@@ -1,0 +1,17 @@
+{
+  "name": "kimi-code-desktop",
+  "private": true,
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "dev": "pnpm --filter @kimi-code/desktop dev",
+    "dev:services": "pnpm --parallel --filter @kimi-code/server --filter @kimi-code/web dev",
+    "build": "pnpm --filter @kimi-code/desktop build",
+    "bundle": "pnpm --filter @kimi-code/desktop bundle",
+    "bundle:local": "pnpm --filter @kimi-code/desktop bundle:local",
+    "build:services": "pnpm --filter @kimi-code/server build && pnpm --filter @kimi-code/web build",
+    "check:public": "node scripts/check-public-source.mjs",
+    "prepare:bundle": "node scripts/prepare-bundle.mjs",
+    "typecheck": "pnpm --filter @kimi-code/server typecheck && pnpm --filter @kimi-code/web typecheck && pnpm --filter @kimi-code/desktop typecheck",
+    "test": "pnpm --filter @kimi-code/server test && pnpm --filter @kimi-code/web test && pnpm --filter @kimi-code/desktop test"
+  }
+}

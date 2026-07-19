@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Kimi Code Desktop",
+  "version": "0.8.3",
+  "identifier": "com.kimicode.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm -C ../.. dev:services",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "pnpm -C ../.. build:services && pnpm -C ../.. prepare:bundle",
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Kimi Code",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 620,
+        "resizable": true,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ws://127.0.0.1:*; frame-src http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "publisher": "Kimi Code Desktop contributors",
+    "shortDescription": "An unofficial desktop GUI for Kimi Code CLI",
+    "longDescription": "Use your own Kimi account and subscription through the official Kimi Code CLI in a native desktop coding workspace.",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    },
+    "resources": {
+      "target/bundle-assets/": ""
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEzRkIwRDA0M0M0MjdDQTgKUldTb2ZFSThCQTM3bysyNy94VWxTSjNjOGt2RDZOZkVmRG9jVk1RT2NGNDgrUEJwcnhiYlhjNDUK",
+      "endpoints": ["https://leonxlnx.github.io/kimi-code-desktop/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
+  }
+}

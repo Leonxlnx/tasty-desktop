@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main Kimi Code desktop window permissions",
+  "windows": ["main", "kimi-*"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:webview:allow-set-webview-zoom",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-start-dragging",
+    "core:window:allow-toggle-maximize",
+    "dialog:allow-open",
+    "opener:allow-open-url",
+    "process:allow-exit",
+    "process:allow-restart",
+    "updater:default"
+  ]
+}

@@ -1,0 +1,27 @@
+node_modules/
+dist/
+build/
+coverage/
+target/
+.turbo/
+.vite/
+tmp/
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+.kimi-code/
+credentials/
+*.log
+*.tsbuildinfo
+
+# Local project-owner work logs and non-redistributable research inputs.
+/HANDOFF.md
+/PROGRESS.md
+/SUPERVISOR.md
+/TASKS.json
+/docs/spec/
+/docs/reference/

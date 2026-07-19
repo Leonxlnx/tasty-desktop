@@ -1,0 +1,16 @@
+{
+  "name": "@kimi-code/desktop",
+  "version": "0.8.3",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "pnpm -C ../.. prepare:bundle && tauri build --no-bundle",
+    "bundle": "pnpm -C ../.. prepare:bundle && tauri build --bundles nsis",
+    "bundle:local": "pnpm -C ../.. prepare:bundle && tauri build --bundles nsis --no-sign",
+    "typecheck": "pnpm -C ../.. prepare:bundle && cargo check --manifest-path src-tauri/Cargo.toml",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

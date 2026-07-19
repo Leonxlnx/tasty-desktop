@@ -1,0 +1,99 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify
+        run: pnpm check:public && pnpm typecheck && pnpm test
+      - name: Build signed NSIS installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm bundle
+      - name: Prepare public update feed
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $configuredVersion = (Get-Content 'apps/desktop/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          if ($version -ne $configuredVersion) { throw "Tag version $version does not match app version $configuredVersion" }
+          $installer = Get-ChildItem 'apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe' | Select-Object -First 1
+          $signature = (Get-Content "$($installer.FullName).sig" -Raw).Trim()
+          $fileName = "Kimi-Code-Desktop-$version-x64-setup.exe"
+          New-Item -ItemType Directory -Path update-site -Force | Out-Null
+          Copy-Item $installer.FullName "update-site/$fileName"
+          Copy-Item "$($installer.FullName).sig" "update-site/$fileName.sig"
+          $sha256 = (Get-FileHash "update-site/$fileName" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$sha256  $fileName" | Set-Content 'update-site/SHA256SUMS.txt' -Encoding ascii
+          @{
+            version = $version
+            notes = "Kimi Code Desktop $version"
+            pub_date = [DateTime]::UtcNow.ToString('o')
+            platforms = @{
+              'windows-x86_64' = @{
+                signature = $signature
+                url = "https://leonxlnx.github.io/kimi-code-desktop/$fileName"
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content update-site/latest.json -Encoding utf8NoBOM
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(
+            (Resolve-Path 'update-site/Kimi-Code-Desktop-*-x64-setup.exe').Path
+            (Resolve-Path 'update-site/Kimi-Code-Desktop-*-x64-setup.exe.sig').Path
+            (Resolve-Path 'update-site/latest.json').Path
+            (Resolve-Path 'update-site/SHA256SUMS.txt').Path
+          )
+          gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME @assets --clobber
+          } else {
+            $notes = "docs/releases/$env:GITHUB_REF_NAME.md"
+            if (Test-Path $notes) {
+              gh release create $env:GITHUB_REF_NAME @assets --notes-file $notes --title $env:GITHUB_REF_NAME
+            } else {
+              gh release create $env:GITHUB_REF_NAME @assets --generate-notes --title $env:GITHUB_REF_NAME
+            }
+          }
+      - name: Publish signed update feed
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          $deploy = Join-Path $env:RUNNER_TEMP 'kimi-update-feed'
+          git worktree add --detach $deploy
+          Push-Location $deploy
+          git switch --orphan gh-pages
+          git rm -rf .
+          Copy-Item "$env:GITHUB_WORKSPACE/update-site/*" .
+          New-Item -ItemType File -Path .nojekyll | Out-Null
+          git add --all
+          git commit -m "Publish $env:GITHUB_REF_NAME update feed"
+          git push --force origin HEAD:gh-pages
+          Pop-Location
+          git worktree remove --force $deploy
