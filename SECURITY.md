@@ -33,6 +33,7 @@ The local orchestration service:
 - Validates the Tauri or configured development origin
 - Requires a random per-launch token in packaged builds
 - Validates workspace file paths and sizes
+- Allows read-only access to the active Kimi session's own background-task `output.log`, and no other file outside the workspace
 - Keeps sensitive MCP configuration out of the renderer
 
 The desktop preview accepts only HTTP or HTTPS URLs whose hostname is exactly `localhost` or `127.0.0.1`. Screenshot capture uses a fresh temporary Microsoft Edge profile that is removed after capture. It never reuses a person's browser profile, cookies, extensions, or logged-in sessions.

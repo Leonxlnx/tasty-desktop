@@ -65,6 +65,8 @@ This design keeps the local stack small while there is a single writer. A databa
 
 File resources must resolve inside the active workspace, must be text, and must stay below configured size limits. Images are sent as ACP image blocks and are not stored in the persistent prompt queue.
 
+ACP writes remain workspace-only. ACP reads additionally allow one narrow Kimi-owned case: the active session may read its own background-subagent `output.log` beneath the Kimi session store. Canonical path checks reject traversal, symlink escapes, other session IDs, and every other out-of-workspace file.
+
 Git checkpoints use an alternate `GIT_INDEX_FILE`, `git write-tree`, and `git commit-tree`. They do not modify the user's branch or index. Revert applies the reverse diff for one turn so work that existed before the turn remains intact.
 
 Git manager mutations validate each path against live status before staging or unstaging. Destructive discard and reset operations are not exposed.

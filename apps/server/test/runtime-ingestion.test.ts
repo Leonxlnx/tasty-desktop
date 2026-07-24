@@ -63,4 +63,25 @@ describe("runtime streaming", () => {
     expect(deltas).toHaveLength(1);
     expect(deltas[0]?.payload.text).toBe("x".repeat(100));
   });
+
+  it("starts a new assistant segment after intervening tool activity", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kimi-stream-order-"));
+    const engine = new OrchestrationEngine(new EventStore(join(dir, "events.jsonl")));
+    await engine.open();
+    await engine.append("thread-1", { type: "ThreadCreated", payload: { sessionId: "session-1", cwd: dir, title: "Stream" } });
+    await engine.append("thread-1", { type: "TurnStarted", payload: { turnId: "turn-1", text: "Go" } });
+    const ingestion = new RuntimeIngestion(engine);
+    await ingestion.ingest({ type: "session_update", params: { sessionId: "session-1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Before tool." } } } });
+    await ingestion.ingest({ type: "session_update", params: { sessionId: "session-1", update: { sessionUpdate: "tool_call", toolCallId: "tool-1", title: "Run check", status: "in_progress" } } });
+    await ingestion.ingest({ type: "session_update", params: { sessionId: "session-1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "While running." } } } });
+    await ingestion.ingest({ type: "session_update", params: { sessionId: "session-1", update: { sessionUpdate: "tool_call_update", toolCallId: "tool-1", status: "completed" } } });
+    await ingestion.ingest({ type: "session_update", params: { sessionId: "session-1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "After tool." } } } });
+    await ingestion.flushAll();
+
+    expect(engine.thread("thread-1")?.messages.filter((message) => message.role === "assistant").map((message) => message.text)).toEqual([
+      "Before tool.",
+      "While running.",
+      "After tool.",
+    ]);
+  });
 });

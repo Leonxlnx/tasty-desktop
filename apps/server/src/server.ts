@@ -160,7 +160,7 @@ async function startRuntime(): Promise<AcpClient> {
   const client = new AcpClient({
     binary: useFake ? process.execPath : resolveKimiBinary(),
     args: useFake ? (currentFile.endsWith(".ts") ? ["--import", "tsx", fakePath] : [fakePath]) : ["acp"],
-    ...(process.env.KIMI_CODE_HOME ? { kimiCodeHome: resolve(process.env.KIMI_CODE_HOME) } : {}),
+    kimiCodeHome: kimiHome,
     mcpServers: async () => {
       const configured = await readKimiMcpServers(kimiShareHome);
       return [
@@ -188,7 +188,8 @@ async function startRuntime(): Promise<AcpClient> {
 
 async function onRuntimeEvent(event: RuntimeEvent): Promise<void> {
   if (event.type === "diagnostic") {
-    pushAll("server.diagnostics", event);
+    (event.level === "error" ? console.error : console.info)(`[kimi-acp:${event.level}] ${event.message}`);
+    if (event.level === "error") pushAll("server.diagnostics", event);
     return;
   }
   await ingestion.ingest(event);
@@ -599,7 +600,7 @@ async function startQueuedTurn(threadId: string, queued: QueuedTurn): Promise<vo
     pushAll("server.diagnostics", { type: "diagnostic", level: "error", message: error.message });
     await ingestion.flush(thread.sessionId);
     const current = engine.thread(thread.threadId);
-    if (current?.activeTurnId === turnId) await engine.append(thread.threadId, { type: "TurnCompleted", payload: { turnId, stopReason: "error" } });
+    if (current?.activeTurnId === turnId) await engine.append(thread.threadId, { type: "TurnCompleted", payload: { turnId, stopReason: "error", error: error.message.slice(0, 2_000) } });
     void runNextQueued(thread.threadId);
   });
 }

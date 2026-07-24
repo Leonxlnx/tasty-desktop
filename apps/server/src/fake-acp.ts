@@ -64,6 +64,17 @@ class FakeAgent implements acp.Agent {
     const session = this.#sessions.get(params.sessionId);
     if (!session) throw new Error("Unknown fake session");
     if (params.prompt.some((block) => block.type === "text" && block.text === "__CLOSE_ACP__")) process.exit(0);
+    const readPath = params.prompt.find((block) => block.type === "text" && block.text.startsWith("__READ_TEXT_FILE__:"));
+    if (readPath?.type === "text") {
+      const result = await this.#connection.readTextFile({ sessionId: params.sessionId, path: readPath.text.slice("__READ_TEXT_FILE__:".length) });
+      await this.#update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: result.content } });
+      return { stopReason: "end_turn" };
+    }
+    const writePath = params.prompt.find((block) => block.type === "text" && block.text.startsWith("__WRITE_TEXT_FILE__:"));
+    if (writePath?.type === "text") {
+      await this.#connection.writeTextFile({ sessionId: params.sessionId, path: writePath.text.slice("__WRITE_TEXT_FILE__:".length), content: "changed" });
+      return { stopReason: "end_turn" };
+    }
     const controller = session.controller = new AbortController();
     for (const block of params.prompt) {
       if (block.type === "resource" && !("text" in block.resource)) throw new Error("Fake ACP rejects blob resources");

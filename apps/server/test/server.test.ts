@@ -349,7 +349,8 @@ describe("orchestration server", () => {
       return event?.type === "TurnCompleted" && event.payload?.stopReason === "error";
     });
     socket.send(JSON.stringify({ id: 3, method: "threads.sendTurn", params: { threadId, text: "__CLOSE_ACP__" } }));
-    await failed;
+    const failedEvent = await failed;
+    expect((failedEvent.payload as { payload?: { error?: string } }).payload?.error).toMatch(/closed|connection/i);
 
     const approval = waitFor(socket, messages, (message) => (message.payload as { type?: string } | undefined)?.type === "ApprovalRequested");
     socket.send(JSON.stringify({ id: 4, method: "threads.sendTurn", params: { threadId, text: "Continue after reconnect" } }));

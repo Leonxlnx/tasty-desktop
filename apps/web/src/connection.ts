@@ -1,21 +1,24 @@
 export type ConnectionState = "connecting" | "reconnecting" | "connected" | "offline" | "error";
 export type ServerMessage = { channel?: string; seq?: number; payload?: unknown; id?: string | number; result?: unknown; error?: { message: string } };
+const boundedRequestMethods = new Set(["threads.list", "files.tree", "files.read", "runtime.configDefaults", "capabilities.list", "usage.quota", "git.status", "git.diff"]);
 
 export class ConnectionSupervisor {
   readonly #url: string;
   readonly #onState: (state: ConnectionState) => void;
   readonly #onMessage: (message: ServerMessage) => void;
-  readonly #pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  readonly #pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: number | undefined }>();
+  readonly #requestTimeoutMs: number;
   #socket: WebSocket | undefined;
   #requestId = 0;
   #attempt = 0;
   #timer: number | undefined;
   #closed = false;
 
-  constructor(url: string, onState: (state: ConnectionState) => void, onMessage: (message: ServerMessage) => void) {
+  constructor(url: string, onState: (state: ConnectionState) => void, onMessage: (message: ServerMessage) => void, requestTimeoutMs = 30_000) {
     this.#url = url;
     this.#onState = onState;
     this.#onMessage = onMessage;
+    this.#requestTimeoutMs = requestTimeoutMs;
   }
 
   start(): void {
@@ -46,7 +49,13 @@ export class ConnectionSupervisor {
     if (this.#socket?.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Server is not connected"));
     const id = ++this.#requestId;
     this.#socket.send(JSON.stringify({ id, method, params }));
-    return new Promise((resolve, reject) => this.#pending.set(id, { resolve, reject }));
+    return new Promise((resolve, reject) => {
+      const timer = boundedRequestMethods.has(method) ? window.setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new Error(`Server request timed out: ${method}`));
+      }, this.#requestTimeoutMs) : undefined;
+      this.#pending.set(id, { resolve, reject, timer });
+    });
   }
 
   #connect(): void {
@@ -62,11 +71,19 @@ export class ConnectionSupervisor {
       this.#onState("connected");
     });
     socket.addEventListener("message", (event) => {
-      const message = JSON.parse(String(event.data)) as ServerMessage;
+      let message: ServerMessage;
+      try {
+        message = JSON.parse(String(event.data)) as ServerMessage;
+      } catch {
+        this.#onState("error");
+        socket.close();
+        return;
+      }
       if (message.id !== undefined) {
         const pending = this.#pending.get(Number(message.id));
         if (!pending) return;
         this.#pending.delete(Number(message.id));
+        if (pending.timer !== undefined) window.clearTimeout(pending.timer);
         if (message.error) pending.reject(new Error(message.error.message));
         else pending.resolve(message.result);
         return;
@@ -92,7 +109,10 @@ export class ConnectionSupervisor {
   }
 
   #rejectPending(message: string): void {
-    for (const pending of this.#pending.values()) pending.reject(new Error(message));
+    for (const pending of this.#pending.values()) {
+      if (pending.timer !== undefined) window.clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
     this.#pending.clear();
   }
 

@@ -12,7 +12,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
     "dialog:allow-open",
-    "opener:allow-open-url",
+    "opener:default",
     "process:allow-exit",
     "process:allow-restart",
     "updater:default"

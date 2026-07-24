@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, dirname, relative, resolve } from "node:path";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { isAbsolute, dirname, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { ApprovalBroker } from "./approval-broker.js";
@@ -88,8 +88,9 @@ export class AcpClient {
 
   async newSession(cwd: string): Promise<acp.NewSessionResponse> {
     if (!isAbsolute(cwd)) throw new Error("Workspace path must be absolute");
-    const result = await this.#agent().newSession({ cwd: resolve(cwd), mcpServers: await this.#mcpServers() });
-    this.#sessionRoots.set(result.sessionId, resolve(cwd));
+    const root = await realpath(resolve(cwd));
+    const result = await this.#agent().newSession({ cwd: root, mcpServers: await this.#mcpServers() });
+    this.#sessionRoots.set(result.sessionId, root);
     return result;
   }
 
@@ -100,7 +101,7 @@ export class AcpClient {
 
   async resumeSession(sessionId: string, cwd: string): Promise<acp.ResumeSessionResponse> {
     if (!isAbsolute(cwd)) throw new Error("Workspace path must be absolute");
-    const root = resolve(cwd);
+    const root = await realpath(resolve(cwd));
     const result = await this.#agent().resumeSession({ sessionId, cwd: root, mcpServers: await this.#mcpServers() });
     this.#sessionRoots.set(sessionId, root);
     return result;
@@ -108,7 +109,7 @@ export class AcpClient {
 
   async loadSession(sessionId: string, cwd: string): Promise<acp.LoadSessionResponse> {
     if (!isAbsolute(cwd)) throw new Error("Workspace path must be absolute");
-    const root = resolve(cwd);
+    const root = await realpath(resolve(cwd));
     this.#sessionRoots.set(sessionId, root);
     return this.#agent().loadSession({ sessionId, cwd: root, mcpServers: await this.#mcpServers() });
   }
@@ -169,7 +170,7 @@ export class AcpClient {
   }
 
   async #readTextFile(params: acp.ReadTextFileRequest): Promise<acp.ReadTextFileResponse> {
-    const path = this.#workspacePath(params.sessionId, params.path);
+    const path = await this.#readablePath(params.sessionId, params.path);
     const content = await readFile(path, "utf8");
     if (params.line == null && params.limit == null) return { content };
     const start = Math.max(0, (params.line ?? 1) - 1);
@@ -177,19 +178,68 @@ export class AcpClient {
   }
 
   async #writeTextFile(params: acp.WriteTextFileRequest): Promise<acp.WriteTextFileResponse> {
-    const path = this.#workspacePath(params.sessionId, params.path);
+    const path = await this.#workspacePath(params.sessionId, params.path);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, params.content, "utf8");
     return {};
   }
 
-  #workspacePath(sessionId: string, path: string): string {
+  async #workspacePath(sessionId: string, path: string): Promise<string> {
     if (!isAbsolute(path)) throw new Error("ACP file paths must be absolute");
     const root = this.#sessionRoots.get(sessionId);
     if (!root) throw new Error(`Unknown ACP session ${sessionId}`);
     const resolved = resolve(path);
-    const rel = relative(root, resolved);
-    if (rel.startsWith("..") || isAbsolute(rel)) throw new Error(`Path is outside workspace: ${resolved}`);
-    return resolved;
+    this.#assertWorkspacePath(root, resolved);
+    try {
+      const canonical = await realpath(resolved);
+      this.#assertWorkspacePath(root, canonical);
+      return canonical;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+
+    let ancestor = dirname(resolved);
+    while (true) {
+      try {
+        const canonical = await realpath(ancestor);
+        this.#assertWorkspacePath(root, canonical);
+        return resolve(canonical, relative(ancestor, resolved));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const parent = dirname(ancestor);
+        if (parent === ancestor) throw error;
+        ancestor = parent;
+      }
+    }
+  }
+
+  #assertWorkspacePath(root: string, path: string): void {
+    const rel = relative(root, path);
+    if (rel.startsWith("..") || isAbsolute(rel)) throw new Error(`Path is outside workspace: ${path}`);
+  }
+
+  async #readablePath(sessionId: string, path: string): Promise<string> {
+    try {
+      return await this.#workspacePath(sessionId, path);
+    } catch (workspaceError) {
+      if (!this.#options.kimiCodeHome || !this.#sessionRoots.has(sessionId)) throw workspaceError;
+      try {
+        const sessions = await realpath(join(resolve(this.#options.kimiCodeHome), "sessions"));
+        const resolved = await realpath(path);
+        const rel = relative(sessions, resolved);
+        if (rel.startsWith("..") || isAbsolute(rel)) throw workspaceError;
+        const parts = rel.split(/[\\/]+/);
+        if (parts.length !== 7
+          || parts[1]?.toLowerCase() !== sessionId.toLowerCase()
+          || parts[2]?.toLowerCase() !== "agents"
+          || !parts[3]
+          || parts[4]?.toLowerCase() !== "tasks"
+          || !parts[5]
+          || parts[6]?.toLowerCase() !== "output.log") throw workspaceError;
+        return resolved;
+      } catch {
+        throw workspaceError;
+      }
+    }
   }
 }

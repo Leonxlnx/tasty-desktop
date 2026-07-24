@@ -1,3 +1,5 @@
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -110,6 +112,65 @@ describe("AcpClient", () => {
       await client.resumeSession(session.sessionId, process.cwd());
       await client.loadSession(session.sessionId, process.cwd());
       expect(reads).toBe(3);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("reads only its own background-task output log outside the workspace", async () => {
+    const fakePath = join(dirname(fileURLToPath(import.meta.url)), "../src/fake-acp.ts");
+    const home = await mkdtemp(join(tmpdir(), "kimi-acp-home-"));
+    const workspace = await mkdtemp(join(tmpdir(), "kimi-acp-workspace-"));
+    const events: RuntimeEvent[] = [];
+    const client = new AcpClient({
+      binary: process.execPath,
+      args: ["--import", "tsx", fakePath],
+      kimiCodeHome: home,
+      onEvent: (event) => events.push(event),
+    });
+    try {
+      await client.start();
+      const session = await client.newSession(workspace);
+      const output = join(home, "sessions", "wd-test", session.sessionId, "agents", "main", "tasks", "agent-test", "output.log");
+      const otherOutput = join(home, "sessions", "wd-test", "other-session", "agents", "main", "tasks", "agent-test", "output.log");
+      const privateFile = join(home, "sessions", "wd-test", session.sessionId, "config.json");
+      await mkdir(dirname(output), { recursive: true });
+      await mkdir(dirname(otherOutput), { recursive: true });
+      await writeFile(output, "background result", "utf8");
+      await writeFile(otherOutput, "other result", "utf8");
+      await writeFile(privateFile, "private", "utf8");
+
+      await expect(client.prompt(session.sessionId, [{ type: "text", text: `__READ_TEXT_FILE__:${output}` }])).resolves.toEqual({ stopReason: "end_turn" });
+      expect(events.some((event) => event.type === "session_update"
+        && event.params.update.sessionUpdate === "agent_message_chunk"
+        && "content" in event.params.update
+        && event.params.update.content.type === "text"
+        && event.params.update.content.text === "background result")).toBe(true);
+      await expect(client.prompt(session.sessionId, [{ type: "text", text: `__READ_TEXT_FILE__:${otherOutput}` }])).rejects.toThrow();
+      await expect(client.prompt(session.sessionId, [{ type: "text", text: `__READ_TEXT_FILE__:${privateFile}` }])).rejects.toThrow();
+      await expect(client.prompt(session.sessionId, [{ type: "text", text: `__WRITE_TEXT_FILE__:${output}` }])).rejects.toThrow();
+      await expect(readFile(output, "utf8")).resolves.toBe("background result");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("rejects workspace junctions that escape the canonical root", async () => {
+    const fakePath = join(dirname(fileURLToPath(import.meta.url)), "../src/fake-acp.ts");
+    const workspace = await mkdtemp(join(tmpdir(), "kimi-acp-workspace-"));
+    const outside = await mkdtemp(join(tmpdir(), "kimi-acp-outside-"));
+    const linked = join(workspace, "linked");
+    const privateFile = join(outside, "private.txt");
+    await writeFile(privateFile, "private", "utf8");
+    await symlink(outside, linked, process.platform === "win32" ? "junction" : "dir");
+    const client = new AcpClient({ binary: process.execPath, args: ["--import", "tsx", fakePath], onEvent: () => undefined });
+    try {
+      await client.start();
+      const session = await client.newSession(workspace);
+      await expect(client.prompt(session.sessionId, [{ type: "text", text: `__READ_TEXT_FILE__:${join(linked, "private.txt")}` }])).rejects.toThrow();
+      await expect(client.prompt(session.sessionId, [{ type: "text", text: `__WRITE_TEXT_FILE__:${join(linked, "created.txt")}` }])).rejects.toThrow();
+      await expect(readFile(privateFile, "utf8")).resolves.toBe("private");
+      await expect(readFile(join(outside, "created.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await client.close();
     }

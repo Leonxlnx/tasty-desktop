@@ -2,12 +2,12 @@ import type { PlanEntry, SessionConfigOption, SessionUpdate, Usage, UsageUpdate 
 import { EventStore, type StoredEvent } from "./event-store.js";
 import type { Checkpoint } from "./checkpoint-reactor.js";
 
-export type Message = { turnId: string; role: "user" | "assistant" | "thought"; text: string; resources?: string[]; images?: Array<{ name: string; mimeType: string }> };
+export type Message = { turnId: string; role: "user" | "assistant" | "thought"; text: string; seq?: number; updatedSeq?: number; resources?: string[]; images?: Array<{ name: string; mimeType: string }> };
 export type ToolCall = { toolCallId: string; turnId?: string; title?: string; kind?: string; status?: string; content?: unknown[]; locations?: unknown[]; rawInput?: unknown; rawOutput?: unknown };
 export type Approval = { requestId: string; turnId?: string; title: string; kind: "permission" | "question" | "plan_review"; options: Array<{ optionId: string; name: string; kind: string }> };
 export type TurnCheckpoint = Checkpoint & { diff?: string };
 export type ThreadUsage = { context?: UsageUpdate; tokens?: Usage };
-export type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; usage?: Usage };
+export type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: Usage };
 export type ActivityEntry = {
   id: string;
   turnId: string;
@@ -16,6 +16,7 @@ export type ActivityEntry = {
   text: string;
   toolCallId?: string;
   seq: number;
+  updatedSeq?: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -61,7 +62,7 @@ export type DomainEvent =
   | { type: "UsageUpdated"; payload: { usage: UsageUpdate } }
   | { type: "ApprovalRequested"; payload: Approval }
   | { type: "ApprovalResolved"; payload: { requestId: string; optionId?: string } }
-  | { type: "TurnCompleted"; payload: { turnId: string; stopReason: string; usage?: Usage } }
+  | { type: "TurnCompleted"; payload: { turnId: string; stopReason: string; error?: string; usage?: Usage } }
   | { type: "TurnCancelled"; payload: { turnId: string } }
   | { type: "CheckpointCaptured"; payload: { checkpoint: Checkpoint; diff?: string } }
   | { type: "CheckpointReverted"; payload: { checkpoint: Checkpoint } };
@@ -196,6 +197,7 @@ export class OrchestrationEngine {
         thread.turns.push({ turnId: String(payload.turnId), startedAt: event.createdAt });
         thread.messages.push({
           turnId: String(payload.turnId), role: "user", text: String(payload.text),
+          seq: event.seq, updatedSeq: event.seq,
           ...(Array.isArray(payload.resources) && payload.resources.length ? { resources: payload.resources as string[] } : {}),
           ...(Array.isArray(payload.images) && payload.images.length ? { images: payload.images as Array<{ name: string; mimeType: string }> } : {}),
         });
@@ -203,16 +205,12 @@ export class OrchestrationEngine {
         break;
       case "MessageAppended":
         if ((payload as Message).role === "thought") appendThoughtActivity(thread, payload as Message, event);
-        else thread.messages.push(payload as Message);
+        else appendMessage(thread, payload as Message, event);
         break;
       case "MessageDelta": {
         const delta = payload as Message;
         if (delta.role === "thought") appendThoughtActivity(thread, delta, event);
-        else {
-          const last = thread.messages.at(-1);
-          if (last?.turnId === delta.turnId && last.role === delta.role) last.text += delta.text;
-          else thread.messages.push({ ...delta });
-        }
+        else appendMessage(thread, delta, event);
         break;
       }
       case "PlanReplaced":
@@ -264,6 +262,7 @@ export class OrchestrationEngine {
         Object.assign(thread.turns.findLast((turn) => turn.turnId === payload.turnId) ?? {}, {
           completedAt: event.createdAt,
           stopReason: String(payload.stopReason),
+          ...(typeof payload.error === "string" && payload.error ? { error: payload.error } : {}),
           ...(payload.usage ? { usage: payload.usage as Usage } : {}),
         });
         finishActivity(thread, String(payload.turnId), event.createdAt, String(payload.stopReason) === "error");
@@ -293,6 +292,7 @@ function appendThoughtActivity(thread: ThreadProjection, message: Message, event
   const current = thread.activity.at(-1);
   if (current?.kind === "thought" && current.turnId === message.turnId && current.status === "in_progress") {
     current.text = boundedText(current.text + message.text, 4_000);
+    current.updatedSeq = event.seq;
     current.updatedAt = event.createdAt;
     return;
   }
@@ -304,9 +304,24 @@ function appendThoughtActivity(thread: ThreadProjection, message: Message, event
     status: "in_progress",
     text: boundedText(message.text, 4_000),
     seq: event.seq,
+    updatedSeq: event.seq,
     createdAt: event.createdAt,
     updatedAt: event.createdAt,
   });
+}
+
+function appendMessage(thread: ThreadProjection, message: Message, event: StoredEvent): void {
+  const last = thread.messages.at(-1);
+  const latestActivitySeq = thread.activity.reduce((latest, entry) => entry.turnId === message.turnId
+    ? Math.max(latest, entry.updatedSeq ?? entry.seq)
+    : latest, -1);
+  if (last?.turnId === message.turnId && last.role === message.role
+    && (last.updatedSeq ?? last.seq ?? -1) > latestActivitySeq) {
+    last.text += message.text;
+    last.updatedSeq = event.seq;
+    return;
+  }
+  thread.messages.push({ ...message, seq: event.seq, updatedSeq: event.seq });
 }
 
 function upsertToolActivity(thread: ThreadProjection, tool: ToolCall & { turnId: string }, event: StoredEvent): void {
@@ -315,6 +330,7 @@ function upsertToolActivity(thread: ThreadProjection, tool: ToolCall & { turnId:
   if (existing) {
     existing.text = tool.title ?? existing.text;
     existing.status = status;
+    existing.updatedSeq = event.seq;
     existing.updatedAt = event.createdAt;
     return;
   }
@@ -327,6 +343,7 @@ function upsertToolActivity(thread: ThreadProjection, tool: ToolCall & { turnId:
     text: tool.title ?? "Tool call",
     toolCallId: tool.toolCallId,
     seq: event.seq,
+    updatedSeq: event.seq,
     createdAt: event.createdAt,
     updatedAt: event.createdAt,
   });

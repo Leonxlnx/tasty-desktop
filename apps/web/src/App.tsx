@@ -7,7 +7,7 @@ import { ConnectionSupervisor, type ConnectionState, type ServerMessage } from "
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { Update } from "@tauri-apps/plugin-updater";
 
-type Message = { turnId: string; role: "user" | "assistant" | "thought"; text: string; resources?: string[]; images?: Array<{ name: string; mimeType: string }> };
+type Message = { turnId: string; role: "user" | "assistant" | "thought"; text: string; seq?: number; updatedSeq?: number; resources?: string[]; images?: Array<{ name: string; mimeType: string }> };
 type ConfigOption = { id: string; name: string; category?: string; type?: string; currentValue: string | boolean; options?: Array<{ value: string; name: string }> };
 type AvailableCommand = { name: string; description: string; input?: { hint?: string } | null };
 type ToolContent = { type: string; path?: string; oldText?: string; newText?: string; content?: { type: string; text?: string } };
@@ -26,8 +26,8 @@ type CapabilityTab = "plugins" | "mcp" | "agents";
 type SubagentRun = { id: string; type: string; description: string; status: "running" | "completed" | "failed"; background: boolean; agentId?: string };
 type GitFile = { path: string; originalPath?: string; staged: boolean; unstaged: boolean; untracked: boolean; indexStatus: string; worktreeStatus: string };
 type GitStatus = { root: string; branch: string; upstream?: string; ahead: number; behind: number; files: GitFile[] };
-type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; usage?: NonNullable<Usage["tokens"]> };
-type ActivityEntry = { id: string; turnId: string; kind: "thought" | "tool"; status: "pending" | "in_progress" | "completed" | "failed"; text: string; toolCallId?: string; seq: number; createdAt: string; updatedAt: string };
+type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: NonNullable<Usage["tokens"]> };
+type ActivityEntry = { id: string; turnId: string; kind: "thought" | "tool"; status: "pending" | "in_progress" | "completed" | "failed"; text: string; toolCallId?: string; seq: number; updatedSeq?: number; createdAt: string; updatedAt: string };
 type QueuedPrompt = { queuedId: string; text: string; mode: "queue" | "steer"; createdAt: string; images: Array<{ name: string; mimeType: string }> };
 type DesktopPreviewCommand = { action: "open" | "resize"; url?: string; panelWidth?: number; viewportWidth?: number; viewportHeight?: number };
 type Thread = {
@@ -86,6 +86,7 @@ const defaultPreferences: Preferences = {
   theme: "system", font: "system", fontSize: 15, accent: "neutral", paletteVersion: 4, sidebarSide: "left", railSide: "right", sidebarWidth: 272, railWidth: 420,
   projectAliases: {}, hiddenProjects: [], hiddenSessions: [], composerConfig: {}, yoloAcknowledged: false,
 };
+const collapsedSidebarWidth = 60;
 let terminalEntryId = 0;
 const coreCommandNames = new Set(["compact", "status", "usage", "mcp", "tasks", "help"]);
 const fallbackCommands: AvailableCommand[] = [
@@ -144,8 +145,12 @@ function composerPrimaryLabel(action: ComposerPrimaryAction): string {
 
 export function presentDiagnostic(message: string): string {
   return /ACP connection closed|Server disconnected|Server is not connected/i.test(message)
-    ? "Kimi runtime disconnected. Your next prompt will reconnect automatically."
+    ? "Kimi runtime disconnected. Reconnecting without stopping active work."
     : message;
+}
+
+export function shouldScheduleRuntimeRecovery(connection: ConnectionState, scheduled: boolean): boolean {
+  return connection === "reconnecting" && !scheduled;
 }
 
 export function hasBlockingWork(threads: Array<Pick<Thread, "running" | "queue" | "approvals">>, draftSending = false): boolean {
@@ -159,9 +164,8 @@ export function showSidebarUpdate(phase: UpdateStatus["phase"]): boolean {
 export function App() {
   const supervisor = useRef<ConnectionSupervisor | undefined>(undefined);
   const submitMode = useRef<"queue" | "steer">("queue");
-  const wasConnected = useRef(false);
   const serverRestarting = useRef(false);
-  const automaticRestartAttempted = useRef(false);
+  const automaticRestartTimer = useRef<number | undefined>(undefined);
   const pendingDomainEvents = useRef<StoredEvent[]>([]);
   const domainEventFrame = useRef<number | undefined>(undefined);
   const fileInput = useRef<HTMLInputElement | null>(null);
@@ -173,6 +177,7 @@ export function App() {
   const quotaRefreshInFlight = useRef(false);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [preferences, setPreferences] = useState<Preferences>(loadPreferences);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [showOnboarding, setShowOnboarding] = useState(() => !loadPreferences().onboardingDone);
   const [cwd, setCwd] = useState(() => loadPreferences().workspace);
   const [runtimeReady, setRuntimeReady] = useState(false);
@@ -224,6 +229,7 @@ export function App() {
   const [draftSending, setDraftSending] = useState(false);
   const [configDefaults, setConfigDefaults] = useState<ConfigOption[]>([]);
   const [draftConfig, setDraftConfig] = useState<Record<string, string>>({});
+  const [configUpdating, setConfigUpdating] = useState<string>();
   const [yoloConfirm, setYoloConfirm] = useState<{ configId: string; value: string }>();
   const [draggingProject, setDraggingProject] = useState<string>();
 
@@ -232,13 +238,30 @@ export function App() {
   const composerOptions = useMemo(() => activeThread ? activeThread.configOptions : applyDraftConfig(configDefaults, draftConfig), [activeThread, configDefaults, draftConfig]);
   const workBlocksUpdate = hasBlockingWork(threads, draftSending);
   const primaryComposerAction = composerPrimaryAction(Boolean(activeThread?.running), Boolean(prompt.trim()));
-  const previewPanelMode = preferences.railWidth >= 1_080 ? "Wide" : preferences.railWidth >= 760 ? "Desktop" : "Compact";
+  const layoutSidebarWidth = preferences.sidebarCollapsed ? collapsedSidebarWidth : preferences.sidebarWidth;
+  const renderedRailWidth = effectiveRailWidth(preferences.railWidth, viewportWidth, layoutSidebarWidth);
+  const previewPanelMode = renderedRailWidth >= 1_080 ? "Wide" : renderedRailWidth >= 760 ? "Desktop" : "Compact";
   const setDiagnostic = useCallback((message: string) => setDiagnostics((current) => [...current, presentDiagnostic(message)].slice(-50)), []);
   const openExternalLink = useCallback(async (url: string) => {
     try {
       await openExternal(url);
     } catch (error) {
       setDiagnostic(`Could not open link: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [setDiagnostic]);
+  const revealLocalPath = useCallback(async (path: string) => {
+    try {
+      await revealPath(path);
+    } catch (error) {
+      setDiagnostic(`Could not reveal path: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [setDiagnostic]);
+  const openRuntimeLog = useCallback(async () => {
+    try {
+      const path = await invoke<string>("app_log_path");
+      await revealPath(path);
+    } catch (error) {
+      setDiagnostic(`Could not open runtime log: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [setDiagnostic]);
   const rememberWorkspace = useCallback((path: string) => {
@@ -252,6 +275,11 @@ export function App() {
   }, []);
 
   useEffect(() => { localStorage.setItem(preferenceKey, JSON.stringify(preferences)); }, [preferences]);
+  useEffect(() => {
+    const resize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
 
   useEffect(() => {
     const syncVisibility = () => { document.documentElement.dataset.visibility = document.visibilityState; };
@@ -274,12 +302,6 @@ export function App() {
   useEffect(() => { void applyZoom(preferences.zoom); }, [preferences.zoom]);
 
   useEffect(() => { if (!workBlocksUpdate) setUpdateNotice(undefined); }, [workBlocksUpdate]);
-  useEffect(() => {
-    if (!diagnostics.length) return;
-    const timer = window.setTimeout(() => setDiagnostics([]), 8_000);
-    return () => window.clearTimeout(timer);
-  }, [diagnostics]);
-
   useEffect(() => {
     if (!openMenu) return;
     const closeMenu = (event: PointerEvent) => {
@@ -435,15 +457,15 @@ export function App() {
   }, [cwd, navView, runtimeReady]);
 
   const call = useCallback((method: string, params: Record<string, unknown> = {}) => supervisor.current?.request(method, params) ?? Promise.reject(new Error("Server is not connected")), []);
-  const restartLocalServer = useCallback(async () => {
+  const recoverLocalServer = useCallback(async () => {
     if (serverRestarting.current) return;
     serverRestarting.current = true;
     try {
-      await invoke("restart_server");
+      await invoke("recover_server");
       supervisor.current?.retry();
       setStartupDelayed(false);
     } catch (error) {
-      setDiagnostic(`Local runtime restart failed: ${error instanceof Error ? error.message : String(error)}`);
+      setDiagnostic(`Local runtime recovery failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       serverRestarting.current = false;
     }
@@ -563,6 +585,7 @@ export function App() {
     return () => {
       disposed = true;
       client?.close();
+      if (automaticRestartTimer.current !== undefined) window.clearTimeout(automaticRestartTimer.current);
       if (domainEventFrame.current !== undefined) window.cancelAnimationFrame(domainEventFrame.current);
     };
 
@@ -617,10 +640,14 @@ export function App() {
 
   useEffect(() => {
     if (connection === "connected") {
-      wasConnected.current = true;
-      automaticRestartAttempted.current = false;
+      if (automaticRestartTimer.current !== undefined) window.clearTimeout(automaticRestartTimer.current);
+      automaticRestartTimer.current = undefined;
       setStartupDelayed(false);
       return;
+    }
+    if (connection === "offline" && automaticRestartTimer.current !== undefined) {
+      window.clearTimeout(automaticRestartTimer.current);
+      automaticRestartTimer.current = undefined;
     }
     if (!bootstrapping) return;
     const timer = window.setTimeout(() => setStartupDelayed(true), 12_000);
@@ -628,11 +655,12 @@ export function App() {
   }, [bootstrapping, connection]);
 
   useEffect(() => {
-    if (!wasConnected.current || automaticRestartAttempted.current || (connection !== "error" && connection !== "reconnecting")) return;
-    automaticRestartAttempted.current = true;
-    const timer = window.setTimeout(() => void restartLocalServer(), 900);
-    return () => window.clearTimeout(timer);
-  }, [connection, restartLocalServer]);
+    if (!shouldScheduleRuntimeRecovery(connection, automaticRestartTimer.current !== undefined)) return;
+    automaticRestartTimer.current = window.setTimeout(() => {
+      automaticRestartTimer.current = undefined;
+      void recoverLocalServer();
+    }, 12_000);
+  }, [connection, recoverLocalServer]);
 
   useEffect(() => {
     if (connection !== "connected") return;
@@ -796,6 +824,18 @@ export function App() {
     void call("threads.interruptTurn", { threadId, clearQueue: true }).catch((error: Error) => setDiagnostic(error.message));
   }
 
+  async function editTurnPrompt(text: string) {
+    if (activeThread?.running) {
+      try {
+        await call("threads.interruptTurn", { threadId: activeThread.threadId, clearQueue: true });
+      } catch (error) {
+        setDiagnostic(error instanceof Error ? error.message : String(error));
+      }
+    }
+    setPrompt(text);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
   function removeQueuedPrompt(threadId: string, queuedId: string) {
     void call("threads.removeQueuedTurn", { threadId, queuedId }).catch((error: Error) => setDiagnostic(error.message));
   }
@@ -856,11 +896,23 @@ export function App() {
     void call("threads.respondToRequest", { threadId: activeThread.threadId, requestId: approval.requestId, optionId }).catch((error: Error) => setDiagnostic(error.message));
   }
 
-  function setConfig(configId: string, value: string) {
-    setPreferences((current) => ({ ...current, composerConfig: { ...current.composerConfig, [configId]: value } }));
+  async function setConfig(configId: string, value: string) {
     if (activeThread) {
-      void call("threads.setConfigOption", { threadId: activeThread.threadId, configId, value }).catch((error: Error) => setDiagnostic(error.message));
+      const threadId = activeThread.threadId;
+      setConfigUpdating(configId);
+      try {
+        const result = await call("threads.setConfigOption", { threadId, configId, value }) as { configOptions?: ConfigOption[] };
+        if (result.configOptions) {
+          setThreads((current) => current.map((thread) => thread.threadId === threadId ? { ...thread, configOptions: result.configOptions! } : thread));
+        }
+        setPreferences((current) => ({ ...current, composerConfig: { ...current.composerConfig, [configId]: value } }));
+      } catch (error) {
+        setDiagnostic(error instanceof Error ? error.message : String(error));
+      } finally {
+        setConfigUpdating((current) => current === configId ? undefined : current);
+      }
     } else if (draftChat) {
+      setPreferences((current) => ({ ...current, composerConfig: { ...current.composerConfig, [configId]: value } }));
       setDraftConfig((current) => {
         const option = configDefaults.find((candidate) => candidate.id === configId);
         const next = { ...current };
@@ -877,7 +929,7 @@ export function App() {
       setYoloConfirm({ configId, value });
       return;
     }
-    setConfig(configId, value);
+    void setConfig(configId, value);
   }
 
   function insertMention(file: string) {
@@ -964,7 +1016,7 @@ export function App() {
       setSelectedFile(await call("files.read", { cwd: activeThread.cwd, path }) as { path: string; content: string });
       setRailView("git");
     } catch (error) {
-      setDiagnostic(error instanceof Error ? error.message : String(error));
+      await revealLocalPath(path);
     }
   }
 
@@ -1049,7 +1101,11 @@ export function App() {
       setPreviewUrl(normalized);
     }
     if (command.panelWidth !== undefined) {
-      setPreferences((current) => ({ ...current, railWidth: clampPanelWidth("rail", command.panelWidth!) }));
+      setPreferences((current) => ({
+        ...current,
+        sidebarCollapsed: current.sidebarCollapsed || command.panelWidth! >= 760,
+        railWidth: clampPanelWidth("rail", command.panelWidth!),
+      }));
     }
     if (command.action === "open") setPreviewRevision((value) => value + 1);
     setRailView("preview");
@@ -1206,7 +1262,7 @@ export function App() {
   function beginPanelResize(panel: "sidebar" | "rail", event: ReactPointerEvent<HTMLDivElement>) {
     event.preventDefault();
     const startX = event.clientX;
-    const startWidth = panel === "sidebar" ? preferences.sidebarWidth : preferences.railWidth;
+    const startWidth = panel === "sidebar" ? preferences.sidebarWidth : renderedRailWidth;
     const side = panel === "sidebar" ? preferences.sidebarSide : preferences.railSide;
     const direction = side === "left" ? 1 : -1;
     const move = (pointer: PointerEvent) => {
@@ -1230,7 +1286,15 @@ export function App() {
     const direction = (event.key === "ArrowRight" ? 1 : -1) * (side === "left" ? 1 : -1);
     setPreferences((current) => panel === "sidebar"
       ? { ...current, sidebarCollapsed: false, sidebarWidth: clampPanelWidth(panel, current.sidebarWidth + direction * 12) }
-      : { ...current, railWidth: clampPanelWidth(panel, current.railWidth + direction * 12) });
+      : { ...current, railWidth: clampPanelWidth(panel, effectiveRailWidth(current.railWidth, viewportWidth, current.sidebarCollapsed ? collapsedSidebarWidth : current.sidebarWidth) + direction * 12) });
+  }
+
+  function cyclePreviewWidth() {
+    setPreferences((current) => {
+      const currentWidth = effectiveRailWidth(current.railWidth, viewportWidth, current.sidebarCollapsed ? collapsedSidebarWidth : current.sidebarWidth);
+      const widths = [...new Set([420, 960, 1_200].map((width) => effectiveRailWidth(width, viewportWidth, collapsedSidebarWidth)))];
+      return { ...current, sidebarCollapsed: true, railWidth: widths.find((width) => width > currentWidth) ?? widths[0]! };
+    });
   }
 
   const projectedRuntimeSessions = useMemo(() => filterRuntimeSessions(runtimeSessions, threads, preferences.hiddenSessions), [preferences.hiddenSessions, runtimeSessions, threads]);
@@ -1264,10 +1328,10 @@ export function App() {
   const context = activeThread?.usage?.context;
   const contextUsed = contextPercent(activeThread?.usage);
   const shellStyle = {
-    "--sidebar-current-width": `${preferences.sidebarCollapsed ? 60 : preferences.sidebarWidth}px`,
-    "--rail-current-width": `${preferences.railWidth}px`,
+    "--sidebar-current-width": `${layoutSidebarWidth}px`,
+    "--rail-current-width": `${renderedRailWidth}px`,
   } as CSSProperties;
-  const railResizeHandle = railView ? <div className="panel-resizer rail-resizer" role="separator" aria-label="Resize side panel" aria-orientation="vertical" aria-valuemin={260} aria-valuemax={1200} aria-valuenow={preferences.railWidth} tabIndex={0} onPointerDown={(event) => beginPanelResize("rail", event)} onKeyDown={(event) => resizePanelWithKeyboard("rail", event)} /> : null;
+  const railResizeHandle = railView ? <div className="panel-resizer rail-resizer" role="separator" aria-label="Resize side panel" aria-orientation="vertical" aria-valuemin={Math.min(260, effectiveRailWidth(1_200, viewportWidth, layoutSidebarWidth))} aria-valuemax={effectiveRailWidth(1_200, viewportWidth, layoutSidebarWidth)} aria-valuenow={renderedRailWidth} tabIndex={0} onPointerDown={(event) => beginPanelResize("rail", event)} onKeyDown={(event) => resizePanelWithKeyboard("rail", event)} /> : null;
   const railTabs = railView ? <RailTabs current={railView} workspace={workspaceTools} activeAgents={agentRuns.filter((run) => run.status === "running").length} onSelect={setRailView} onClose={() => setRailView(undefined)} /> : null;
 
   return (
@@ -1394,8 +1458,8 @@ export function App() {
         </header>
 
         <div className={`timeline ${capabilityCenterOpen ? "capability-timeline" : ""}`}>
-          {bootstrapping ? <StartupScreen delayed={startupDelayed} onRetry={() => void restartLocalServer()} /> : capabilityCenterOpen ? <CapabilitiesCenter data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onUsePrompt={useCapabilityPrompt} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding && auth ? <Onboarding auth={auth} cwd={cwd} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={() => void call("auth.cancel")} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !auth?.authenticated ? <AuthCard auth={auth} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel")} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
-          {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{turnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRespond={respond} onRevert={revertTurn} onReview={() => { setRailView("git"); void refreshGit(); }} />)}</div>}
+          {bootstrapping ? <StartupScreen delayed={startupDelayed} onRetry={() => void recoverLocalServer()} /> : capabilityCenterOpen ? <CapabilitiesCenter data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onUsePrompt={useCapabilityPrompt} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding && auth ? <Onboarding auth={auth} cwd={cwd} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={() => void call("auth.cancel")} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !auth?.authenticated ? <AuthCard auth={auth} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel")} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
+          {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{turnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={() => { setRailView("git"); void refreshGit(); }} />)}</div>}
         </div>
 
         {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <form className={`composer ${draftSending ? "sending" : activeThread?.running ? "working" : ""}`} onSubmit={send}>
@@ -1425,6 +1489,7 @@ export function App() {
                 <button type="button" role="menuitem" onClick={() => startComposerTrigger("/")}><TerminalWindow /><span><strong>Commands</strong><small>Type / to use Kimi commands</small></span><kbd>/</kbd></button>
                 <button type="button" role="menuitem" onClick={() => startComposerTrigger("$")}><SlidersHorizontal /><span><strong>Skills</strong><small>Type $ to invoke a Kimi skill</small></span><kbd>$</kbd></button>
                 <button type="button" role="menuitem" onClick={() => startComposerCommand("plugins")}><DownloadSimple /><span><strong>Install skills & plugins…</strong><small>Use Kimi's native plugin manager</small></span><kbd>/plugins</kbd></button>
+                <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => startComposerCommand("write-goal")}><Hammer /><span><strong>Set workspace goal…</strong><small>Write a persistent goal for this project</small></span><kbd>/write-goal</kbd></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => startComposerTrigger("#")}><FileText /><span><strong>Project files</strong><small>Type # to mention workspace context</small></span><kbd>#</kbd></button>
               </div>}
               <div className="composer-context-wrap">
@@ -1433,7 +1498,7 @@ export function App() {
               </div>
             </div>
             <div className="composer-controls">
-              {(activeThread || draftChat) && <ComposerConfig options={composerOptions} onChange={changeConfig} />}
+              {(activeThread || draftChat) && <ComposerConfig options={composerOptions} busyId={configUpdating} onChange={changeConfig} />}
               <button className={`icon-button primary composer-submit ${primaryComposerAction === "stop" ? "composer-stop" : ""}`} type={primaryComposerAction === "stop" ? "button" : "submit"} aria-label={composerPrimaryLabel(primaryComposerAction)} title={composerPrimaryLabel(primaryComposerAction)} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending || (primaryComposerAction !== "stop" && !prompt.trim())} onClick={primaryComposerAction === "stop" && activeThread ? () => stopThread(activeThread.threadId) : undefined}>{primaryComposerAction === "stop" ? <Stop weight="fill" /> : <ArrowUp weight="bold" />}</button>
             </div>
           </div>
@@ -1487,7 +1552,7 @@ export function App() {
             <form className="preview-address" onSubmit={(event) => { event.preventDefault(); showPreview(); }}>
               <label><Browser /><input value={previewDraft} onChange={(event) => setPreviewDraft(event.target.value)} aria-label="Local preview URL" spellCheck={false} /></label>
               <button className="preview-open" type="submit">Open</button>
-              <div className="preview-actions"><button className="rail-icon" type="button" aria-label="Reload preview" title="Reload preview" onClick={() => setPreviewRevision((value) => value + 1)}><ArrowsClockwise /></button><button className="rail-icon" type="button" aria-label="Open preview in default browser" title="Open in browser" disabled={!previewUrl} onClick={() => { if (previewUrl) void openExternalLink(previewUrl); }}><ArrowSquareOut /></button><button className="preview-size" type="button" aria-label={`Cycle preview width; current ${previewPanelMode.toLowerCase()}`} title="Cycle preview width" onClick={() => setPreferences((current) => ({ ...current, railWidth: current.railWidth >= 1_080 ? 420 : current.railWidth >= 760 ? 1_200 : 960 }))}>{previewPanelMode === "Wide" ? <CornersIn /> : <CornersOut />}<span>{previewPanelMode}</span></button></div>
+              <div className="preview-actions"><button className="rail-icon" type="button" aria-label="Reload preview" title="Reload preview" onClick={() => setPreviewRevision((value) => value + 1)}><ArrowsClockwise /></button><button className="rail-icon" type="button" aria-label="Open preview in default browser" title="Open in browser" disabled={!previewUrl} onClick={() => { if (previewUrl) void openExternalLink(previewUrl); }}><ArrowSquareOut /></button><button className="preview-size" type="button" aria-label={`Cycle preview width; current ${previewPanelMode.toLowerCase()}`} title="Cycle preview width" onClick={cyclePreviewWidth}>{previewPanelMode === "Wide" ? <CornersIn /> : <CornersOut />}<span>{previewPanelMode}</span></button></div>
             </form>
             <div className="preview-frame">
               {previewUrl ? <iframe key={`${previewUrl}-${previewRevision}`} src={previewUrl} title={`Preview of ${previewUrl}`} sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts" referrerPolicy="no-referrer" /> : <div className="preview-empty"><Browser /><strong>No local app open</strong><span>Enter a localhost URL above.</span></div>}
@@ -1539,9 +1604,9 @@ export function App() {
         const pending = yoloConfirm;
         setYoloConfirm(undefined);
         setPreferences((current) => ({ ...current, yoloAcknowledged: true }));
-        setConfig(pending.configId, pending.value);
+        void setConfig(pending.configId, pending.value);
       }} />}
-      {diagnostics.length > 0 && <div className="app-notice" role="status" aria-live="polite"><WarningCircle /><span>{diagnostics[diagnostics.length - 1]}</span><button type="button" aria-label="Dismiss notification" onClick={() => setDiagnostics([])}><X /></button></div>}
+      {diagnostics.length > 0 && <div className="app-notice" role="status" aria-live="polite"><WarningCircle /><span>{diagnostics[diagnostics.length - 1]}</span><button type="button" aria-label="Reveal runtime log" title="Reveal runtime log" onClick={() => void openRuntimeLog()}><Bug /></button><button type="button" aria-label="Copy error details" title="Copy error details" onClick={() => void navigator.clipboard.writeText(diagnostics.join("\n"))}><Copy /></button><button type="button" aria-label="Dismiss notification" onClick={() => setDiagnostics([])}><X /></button></div>}
     </main>
   );
 }
@@ -1715,7 +1780,7 @@ type ComposerControl = {
   choices: Array<{ value: string; name: string; description?: string; danger?: boolean }>;
 };
 
-export function ComposerConfig({ options, onChange }: { options: ConfigOption[]; onChange: (configId: string, value: string) => void }) {
+export function ComposerConfig({ options, busyId, onChange }: { options: ConfigOption[]; busyId?: string | undefined; onChange: (configId: string, value: string) => void }) {
   const [openId, setOpenId] = useState<string>();
   const model = options.find(isModelOption);
   const thinking = options.find(isThinkingOption);
@@ -1763,7 +1828,7 @@ export function ComposerConfig({ options, onChange }: { options: ConfigOption[];
   }
   if (!controls.length) return null;
   return <div className="composer-configs">
-    {controls.map((control) => <ConfigControl control={control} key={control.id} open={openId === control.id} onToggle={() => setOpenId((current) => current === control.id ? undefined : control.id)} onClose={() => setOpenId(undefined)} onPick={(value) => { onChange(control.id, value); setOpenId(undefined); }} />)}
+    {controls.map((control) => <ConfigControl control={{ ...control, disabled: control.disabled || Boolean(busyId) }} key={control.id} open={openId === control.id} onToggle={() => setOpenId((current) => current === control.id ? undefined : control.id)} onClose={() => setOpenId(undefined)} onPick={(value) => { onChange(control.id, value); setOpenId(undefined); }} />)}
   </div>;
 }
 
@@ -2238,6 +2303,10 @@ export function clampPanelWidth(panel: "sidebar" | "rail", width: number): numbe
   return Math.round(Math.min(panel === "sidebar" ? 420 : 1200, Math.max(panel === "sidebar" ? 84 : 260, width)));
 }
 
+export function effectiveRailWidth(requestedWidth: number, viewportWidth: number, sidebarWidth: number, minimumConversationWidth = 400): number {
+  return Math.min(clampPanelWidth("rail", requestedWidth), Math.max(0, Math.round(viewportWidth - sidebarWidth - minimumConversationWidth)));
+}
+
 export function floatingMenuPosition(anchor: { top: number; right: number; bottom: number }, menu: { width: number; height: number }, viewport: { width: number; height: number }): { top: number; left: number } {
   const margin = 8;
   const maxLeft = Math.max(margin, viewport.width - menu.width - margin);
@@ -2327,6 +2396,12 @@ async function openExternal(url: string): Promise<void> {
     return;
   }
   window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function revealPath(path: string): Promise<void> {
+  if (!isTauri()) throw new Error("Explorer integration is available in the desktop app");
+  const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+  await revealItemInDir(path);
 }
 
 function UsagePanel({ quota, error, loading, onRefresh }: { quota: KimiQuota | undefined; error: string | undefined; loading: boolean; onRefresh: () => Promise<void> }) {
@@ -2435,34 +2510,44 @@ export function projectTurns(thread: Thread): TurnView[] {
   });
 }
 
-function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRespond, onRevert, onReview }: {
+function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPath, onEdit, onRespond, onRevert, onReview }: {
   turn: TurnView;
   onOpenUrl: (url: string) => Promise<void>;
   onOpenPreview: (url: string) => void;
   onOpenLocation: (path: string) => void;
+  onRevealPath: (path: string) => Promise<void>;
+  onEdit: (text: string) => Promise<void>;
   onRespond: (approval: Approval, optionId?: string) => void;
   onRevert: (turnId: string) => Promise<void>;
   onReview: () => void;
 }) {
   const user = turn.messages.filter((message) => message.role === "user");
-  const assistant = turn.messages.filter((message) => message.role === "assistant");
-  const report = assistant.map((message) => message.text).join("\n\n");
+  const { commentary, final } = turnAssistantMessages(turn);
+  const report = final?.text ?? "";
+  const failure = turn.record.error
+    ?? (turn.record.stopReason === "error" ? "Kimi stopped before finishing this turn. You can edit the prompt and try again." : undefined);
   const previewLink = findLocalPreviewUrl([
     ...turn.messages.map((message) => message.text),
     ...turn.tools.flatMap((tool) => [tool.title ?? "", ...tool.content?.map((item) => item.content?.text ?? "") ?? [], safeStringify(tool.rawOutput)]),
   ].join("\n"));
   return <section className={`turn-block ${turn.running ? "running" : "complete"}`}>
-    {user.map((message, index) => <article className="user-message" key={`${message.turnId}-user-${index}`}><MarkdownText text={message.text} onOpenUrl={onOpenUrl} /><AttachmentSummary message={message} /><button className="message-copy" type="button" aria-label="Copy task" title="Copy task" onClick={() => void navigator.clipboard.writeText(message.text)}><Copy /></button></article>)}
+    {user.map((message, index) => <article className="user-message" key={`${message.turnId}-user-${index}`}>
+      <MarkdownText text={message.text} onOpenUrl={onOpenUrl} />
+      <PathLinks text={message.text} onReveal={onRevealPath} />
+      <AttachmentSummary message={message} />
+      <div className="message-actions"><button type="button" aria-label="Edit task" title="Edit task" onClick={() => void onEdit(message.text)}><PencilSimple /></button><button type="button" aria-label="Copy task" title="Copy task" onClick={() => void navigator.clipboard.writeText(message.text)}><Copy /></button></div>
+    </article>)}
     <div className="turn-output">
-      {(turn.running || turn.activity.length > 0) && <ActivityTimeline turn={turn} onOpenUrl={onOpenUrl} onOpenLocation={onOpenLocation} />}
-      {assistant.map((message, index) => <article className="assistant-message markdown" key={`${message.turnId}-assistant-${index}`}><MarkdownText text={message.text} onOpenUrl={onOpenUrl} /></article>)}
+      {(turn.running || turn.activity.length > 0 || commentary.length > 0) && <ActivityTimeline turn={turn} commentary={commentary} onOpenUrl={onOpenUrl} onOpenLocation={onOpenLocation} />}
+      {final && <article className="assistant-message markdown"><MarkdownText text={final.text} onOpenUrl={onOpenUrl} /><PathLinks text={final.text} onReveal={onRevealPath} /></article>}
       {turn.approvals.map((approval) => <article className="approval" key={approval.requestId}>
         <div><strong>{approval.kind === "question" ? "Question" : approval.kind === "plan_review" ? "Review plan" : "Permission required"}</strong><p>{approval.title}</p></div>
         <div className="approval-actions">{approval.options.map((option) => <button className={permissionClass(option.kind)} type="button" key={option.optionId} onClick={() => onRespond(approval, option.optionId)}>{option.name}</button>)}</div>
       </article>)}
-      {turn.record.completedAt && (report || turn.canRevert || turn.record.usage?.totalTokens != null || turn.record.stopReason === "cancelled") && <footer className="turn-report">
-        <div className="turn-report-meta">{turn.record.usage?.totalTokens != null && <span>{formatTokens(turn.record.usage.totalTokens)} tokens</span>}{turn.record.stopReason === "cancelled" && <span>Cancelled</span>}</div>
-        <div className="turn-report-actions">{report && <button type="button" onClick={() => void navigator.clipboard.writeText(report)}><Copy /> Copy report</button>}{turn.canRevert && <button type="button" onClick={() => void onRevert(turn.record.turnId)}><ArrowCounterClockwise /> Revert</button>}</div>
+      {turn.record.completedAt && failure && <div className="turn-failure" role="alert"><WarningCircle /><div><strong>Stopped with an error</strong><span>{failure}</span></div></div>}
+      {turn.record.completedAt && (report || turn.canRevert || turn.record.usage?.totalTokens != null || turn.record.stopReason === "cancelled" || failure) && <footer className="turn-report">
+        <div className="turn-report-meta">{turn.record.usage?.totalTokens != null && <span>{formatTokens(turn.record.usage.totalTokens)} tokens</span>}{turn.record.stopReason === "cancelled" && <span>Stopped</span>}{failure && <span>Failed</span>}</div>
+        <div className="turn-report-actions">{report && <button type="button" onClick={() => void navigator.clipboard.writeText(report)}><Copy /> Copy summary</button>}{turn.canRevert && <button type="button" onClick={() => void onRevert(turn.record.turnId)}><ArrowCounterClockwise /> Undo changes</button>}</div>
       </footer>}
       {turn.record.completedAt && previewLink && <div className="turn-preview-link"><span><i />{previewLink}</span><div><button type="button" onClick={() => onOpenPreview(previewLink)}><Browser /> Preview</button><button type="button" onClick={() => void onOpenUrl(previewLink)}><ArrowSquareOut /> Browser</button></div></div>}
       {turn.record.completedAt && turn.checkpoint?.diff && <ChangesCard diff={turn.checkpoint.diff} onReview={onReview} />}
@@ -2470,7 +2555,27 @@ function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRespond, 
   </section>;
 }
 
-export function ActivityTimeline({ turn, onOpenUrl, onOpenLocation }: { turn: TurnView; onOpenUrl: (url: string) => Promise<void>; onOpenLocation: (path: string) => void }) {
+export function turnAssistantMessages(turn: Pick<TurnView, "activity" | "messages" | "running">): { commentary: Message[]; final?: Message } {
+  const assistant = turn.messages.filter((message) => message.role === "assistant");
+  if (turn.running || !assistant.length) return { commentary: assistant };
+  const latestActivity = turn.activity.reduce((latest, entry) => Math.max(latest, entry.updatedSeq ?? entry.seq), -1);
+  const candidate = assistant.at(-1)!;
+  const candidateSeq = candidate.updatedSeq ?? candidate.seq;
+  if (candidateSeq !== undefined && candidateSeq <= latestActivity) return { commentary: assistant };
+  return { commentary: assistant.slice(0, -1), final: candidate };
+}
+
+type TimelineItem =
+  | { id: string; seq: number; updatedSeq: number; kind: "activity"; entry: ActivityEntry }
+  | { id: string; seq: number; updatedSeq: number; kind: "commentary"; message: Message };
+
+export function latestTimelineItemId(items: ReadonlyArray<{ id: string; updatedSeq: number }>): string | undefined {
+  let latest: { id: string; updatedSeq: number } | undefined;
+  for (const item of items) if (!latest || item.updatedSeq > latest.updatedSeq) latest = item;
+  return latest?.id;
+}
+
+export function ActivityTimeline({ turn, commentary = turnAssistantMessages(turn).commentary, onOpenUrl, onOpenLocation }: { turn: TurnView; commentary?: Message[]; onOpenUrl: (url: string) => Promise<void>; onOpenLocation: (path: string) => void }) {
   const [open, setOpen] = useState(turn.running);
   const [showEarlier, setShowEarlier] = useState(false);
   const wasRunning = useRef(turn.running);
@@ -2481,15 +2586,28 @@ export function ActivityTimeline({ turn, onOpenUrl, onOpenLocation }: { turn: Tu
     wasRunning.current = turn.running;
   }, [turn.running]);
   const activity = dedupeActivityEntries(turn.activity);
-  const hidden = Math.max(0, activity.length - 8);
-  const entries = showEarlier ? activity : activity.slice(-8);
-  const currentEntryId = activity.findLast((entry) => entry.status === "pending" || entry.status === "in_progress")?.id;
+  const timeline: TimelineItem[] = [
+    ...activity.map((entry) => ({ id: entry.id, seq: entry.seq, updatedSeq: entry.updatedSeq ?? entry.seq, kind: "activity" as const, entry })),
+    ...commentary.filter((message) => message.text.trim()).map((message, index) => ({ id: `commentary-${message.seq ?? index}`, seq: message.seq ?? index, updatedSeq: message.updatedSeq ?? message.seq ?? index, kind: "commentary" as const, message })),
+  ].sort((a, b) => a.seq - b.seq);
+  const hidden = Math.max(0, timeline.length - 8);
+  const entries = showEarlier ? timeline : timeline.slice(-8);
+  const currentEntryId = turn.running ? latestTimelineItemId(timeline) : undefined;
   return <details className="turn-activity" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary><span className={`activity-state ${turn.running ? "active" : ""}`}>{turn.running ? <i className="activity-spinner" aria-hidden="true" /> : <Check />}</span><strong>{turn.running ? "Working" : `Worked for ${duration}`}</strong><small>{turn.running ? duration : `${activity.length} ${activity.length === 1 ? "step" : "steps"}`}</small><CaretDown /></summary>
+    <summary><span className={`activity-state ${turn.running ? "active" : ""}`}>{turn.running ? <i className="activity-spinner" aria-hidden="true" /> : <Check />}</span><strong>{turn.running ? "Working" : `Worked for ${duration}`}</strong><small>{turn.running ? duration : `${timeline.length} ${timeline.length === 1 ? "step" : "steps"}`}</small><CaretDown /></summary>
     <div className="activity-content">
       {hidden > 0 && !showEarlier && <button className="activity-earlier" type="button" onClick={() => setShowEarlier(true)}>Show {hidden} earlier {hidden === 1 ? "step" : "steps"}</button>}
-      {entries.map((entry) => <ActivityStep key={entry.id} entry={entry} current={entry.id === currentEntryId} tool={entry.toolCallId ? turn.tools.find((tool) => tool.toolCallId === entry.toolCallId) : undefined} onOpenUrl={onOpenUrl} onOpenLocation={onOpenLocation} />)}
+      {entries.map((item) => item.kind === "activity"
+        ? <ActivityStep key={item.id} entry={item.entry} current={item.id === currentEntryId} tool={item.entry.toolCallId ? turn.tools.find((tool) => tool.toolCallId === item.entry.toolCallId) : undefined} onOpenUrl={onOpenUrl} onOpenLocation={onOpenLocation} />
+        : <CommentaryStep key={item.id} message={item.message} current={item.id === currentEntryId} onOpenUrl={onOpenUrl} />)}
     </div>
+  </details>;
+}
+
+function CommentaryStep({ message, current, onOpenUrl }: { message: Message; current: boolean; onOpenUrl: (url: string) => Promise<void> }) {
+  return <details className="activity-step commentary-step">
+    <summary><span className="activity-step-state">{current ? <i className="activity-spinner" aria-label="Current update" /> : <Check />}</span><span>{activityPreview(message.text)}</span><CaretRight /></summary>
+    <div className="activity-detail"><div className="markdown"><MarkdownText text={message.text} onOpenUrl={onOpenUrl} /></div></div>
   </details>;
 }
 
@@ -2531,6 +2649,32 @@ function MarkdownText({ text, onOpenUrl }: { text: string; onOpenUrl: (url: stri
   return <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
     a: ({ href, children }) => <a href={href} onClick={(event) => { event.preventDefault(); if (href) void onOpenUrl(href); }}>{children}</a>,
   }}>{text}</ReactMarkdown>;
+}
+
+export function extractLocalPaths(text: string): string[] {
+  const codePaths = [...text.matchAll(/`([^`\r\n]+)`/g)].map((match) => match[1] ?? "");
+  const plainText = text.replace(/`[^`\r\n]+`/g, " ");
+  const candidates = [
+    ...codePaths,
+    ...[...plainText.matchAll(/\b[A-Za-z]:[\\/][^\s`<>"|?*]+/g)].map((match) => match[0]),
+  ];
+  const seen = new Set<string>();
+  return candidates
+    .map((path) => path.trim().replace(/[),.;!?]+$/g, ""))
+    .filter((path) => /^[A-Za-z]:[\\/]/.test(path))
+    .filter((path) => {
+      const key = path.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 6);
+}
+
+function PathLinks({ text, onReveal }: { text: string; onReveal: (path: string) => Promise<void> }) {
+  const paths = extractLocalPaths(text);
+  if (!paths.length) return null;
+  return <div className="message-paths">{paths.map((path) => <button type="button" title={`Reveal ${path} in Explorer`} key={path} onClick={() => void onReveal(path)}><FolderOpen /><span>{path}</span><ArrowSquareOut /></button>)}</div>;
 }
 
 type DiffSummary = { files: Array<{ path: string; additions: number; deletions: number }>; additions: number; deletions: number };
@@ -2646,11 +2790,7 @@ function AttachmentSummary({ message }: { message: Message }) {
   return <div className="message-attachments">{message.resources?.map((path) => <span key={path}><FileText />{path}</span>)}{message.images?.map((image) => <span key={image.name}><Paperclip />{image.name}</span>)}</div>;
 }
 
-function applyEvent(threads: Thread[], event: StoredEvent): Thread[] {
-  return applyEvents(threads, [event]);
-}
-
-function applyEvents(threads: Thread[], events: StoredEvent[]): Thread[] {
+export function applyEvents(threads: Thread[], events: StoredEvent[]): Thread[] {
   let nextThreads = threads;
   const mutable = new Map<string, Thread>();
   for (const event of events) {
@@ -2689,21 +2829,19 @@ function mutateThread(next: Thread, event: StoredEvent): void {
     next.turns.push({ turnId: String(payload.turnId), startedAt: event.createdAt });
     next.messages.push({
       turnId: String(payload.turnId), role: "user", text: String(payload.text),
+      seq: event.seq, updatedSeq: event.seq,
       ...(Array.isArray(payload.resources) && payload.resources.length ? { resources: payload.resources as string[] } : {}),
       ...(Array.isArray(payload.images) && payload.images.length ? { images: payload.images as Array<{ name: string; mimeType: string }> } : {}),
     }); next.plan = [];
   } else if (event.type === "MessageAppended") {
     const message = payload as Message;
     if (message.role === "thought") appendRendererThought(next, message, event);
-    else next.messages.push(message);
+    else appendRendererMessage(next, message, event);
   }
   else if (event.type === "MessageDelta") {
     const delta = payload as Message;
     if (delta.role === "thought") appendRendererThought(next, delta, event);
-    else {
-      const last = next.messages.at(-1);
-      if (last?.turnId === delta.turnId && last.role === delta.role) last.text += delta.text; else next.messages.push(delta);
-    }
+    else appendRendererMessage(next, delta, event);
   } else if (event.type === "PlanReplaced") next.plan = payload.entries as Thread["plan"];
   else if (event.type === "ToolCallCreated") { const tool = payload.tool as Tool; const turnId = tool.turnId ?? next.activeTurnId; next.tools.push({ ...tool, ...(turnId ? { turnId } : {}) }); if (turnId) upsertRendererTool(next, { ...tool, turnId }, event); }
   else if (event.type === "ToolCallPatched") {
@@ -2718,7 +2856,7 @@ function mutateThread(next: Thread, event: StoredEvent): void {
   else if (event.type === "UsageUpdated") next.usage = { ...next.usage, context: payload.usage as NonNullable<Usage["context"]> };
   else if (event.type === "ApprovalRequested") { const approval = payload as Approval; const turnId = approval.turnId ?? next.activeTurnId; next.approvals.push({ ...approval, ...(turnId ? { turnId } : {}) }); }
   else if (event.type === "ApprovalResolved") next.approvals = next.approvals.filter((approval) => approval.requestId !== payload.requestId);
-  else if (event.type === "TurnCompleted") { const turn = next.turns.findLast((item) => item.turnId === payload.turnId); if (turn) Object.assign(turn, { completedAt: event.createdAt, stopReason: String(payload.stopReason), ...(payload.usage ? { usage: payload.usage as NonNullable<Usage["tokens"]> } : {}) }); finishRendererActivity(next, String(payload.turnId), event.createdAt, String(payload.stopReason) === "error"); next.running = false; next.stopReason = String(payload.stopReason); next.activeTurnId = undefined; if (payload.usage) next.usage = { ...next.usage, tokens: payload.usage as NonNullable<Usage["tokens"]> }; }
+  else if (event.type === "TurnCompleted") { const turn = next.turns.findLast((item) => item.turnId === payload.turnId); if (turn) Object.assign(turn, { completedAt: event.createdAt, stopReason: String(payload.stopReason), ...(typeof payload.error === "string" && payload.error ? { error: payload.error } : {}), ...(payload.usage ? { usage: payload.usage as NonNullable<Usage["tokens"]> } : {}) }); finishRendererActivity(next, String(payload.turnId), event.createdAt, String(payload.stopReason) === "error"); next.running = false; next.stopReason = String(payload.stopReason); next.activeTurnId = undefined; if (payload.usage) next.usage = { ...next.usage, tokens: payload.usage as NonNullable<Usage["tokens"]> }; }
   else if (event.type === "TurnCancelled") { const turn = next.turns.findLast((item) => item.turnId === payload.turnId); if (turn) Object.assign(turn, { completedAt: event.createdAt, stopReason: "cancelled" }); finishRendererActivity(next, String(payload.turnId), event.createdAt, true); next.running = false; next.stopReason = "cancelled"; next.activeTurnId = undefined; }
   else if (event.type === "CheckpointCaptured") { const checkpoint = { ...(payload.checkpoint as Checkpoint) }; if (typeof payload.diff === "string") checkpoint.diff = payload.diff; next.checkpoints.push(checkpoint); }
   else if (event.type === "CheckpointReverted") next.checkpoints.push(payload.checkpoint as Checkpoint);
@@ -2728,11 +2866,26 @@ function appendRendererThought(thread: Thread, message: Message, event: StoredEv
   const current = thread.activity.at(-1);
   if (current?.kind === "thought" && current.turnId === message.turnId && current.status === "in_progress") {
     current.text = boundedActivityText(current.text + message.text);
+    current.updatedSeq = event.seq;
     current.updatedAt = event.createdAt;
     return;
   }
   finishRendererThought(thread, message.turnId, event.createdAt);
-  thread.activity.push({ id: `thought-${event.seq}`, turnId: message.turnId, kind: "thought", status: "in_progress", text: boundedActivityText(message.text), seq: event.seq, createdAt: event.createdAt, updatedAt: event.createdAt });
+  thread.activity.push({ id: `thought-${event.seq}`, turnId: message.turnId, kind: "thought", status: "in_progress", text: boundedActivityText(message.text), seq: event.seq, updatedSeq: event.seq, createdAt: event.createdAt, updatedAt: event.createdAt });
+}
+
+function appendRendererMessage(thread: Thread, message: Message, event: StoredEvent): void {
+  const last = thread.messages.at(-1);
+  const latestActivitySeq = thread.activity.reduce((latest, entry) => entry.turnId === message.turnId
+    ? Math.max(latest, entry.updatedSeq ?? entry.seq)
+    : latest, -1);
+  if (last?.turnId === message.turnId && last.role === message.role
+    && (last.updatedSeq ?? last.seq ?? -1) > latestActivitySeq) {
+    last.text += message.text;
+    last.updatedSeq = event.seq;
+    return;
+  }
+  thread.messages.push({ ...message, seq: event.seq, updatedSeq: event.seq });
 }
 
 function boundedActivityText(text: string): string {
@@ -2745,11 +2898,12 @@ function upsertRendererTool(thread: Thread, tool: Tool & { turnId: string }, eve
   if (existing) {
     existing.text = tool.title ?? existing.text;
     existing.status = status;
+    existing.updatedSeq = event.seq;
     existing.updatedAt = event.createdAt;
     return;
   }
   finishRendererThought(thread, tool.turnId, event.createdAt);
-  thread.activity.push({ id: `tool-${tool.toolCallId}`, turnId: tool.turnId, kind: "tool", status, text: tool.title ?? "Tool call", toolCallId: tool.toolCallId, seq: event.seq, createdAt: event.createdAt, updatedAt: event.createdAt });
+  thread.activity.push({ id: `tool-${tool.toolCallId}`, turnId: tool.turnId, kind: "tool", status, text: tool.title ?? "Tool call", toolCallId: tool.toolCallId, seq: event.seq, updatedSeq: event.seq, createdAt: event.createdAt, updatedAt: event.createdAt });
 }
 
 function finishRendererThought(thread: Thread, turnId: string, updatedAt: string): void {

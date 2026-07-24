@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, clampPanelWidth, compactToolPreview, ComposerConfig, composerPrimaryAction, composerTrigger, contextPercent, dedupeActivityEntries, draftConfigOverrides, filterByTitle, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isYoloChoice, modeDescription, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, presentDiagnostic, projectTurns, promptShortcutMode, reorderPaths, shouldSubmitPrompt, showSidebarUpdate, subagentRuns, summarizeDiff, thinkingEffortLabel, toggleComposerTrigger, updatePercent, workspaceName, workspaceRelativePath } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerPrimaryAction, composerTrigger, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isYoloChoice, latestTimelineItemId, modeDescription, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, presentDiagnostic, projectTurns, promptShortcutMode, reorderPaths, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, subagentRuns, summarizeDiff, thinkingEffortLabel, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceName, workspaceRelativePath } from "./App";
 
 describe("composer send key", () => {
   it("sends on Enter by default and preserves Shift+Enter newlines", () => {
@@ -28,8 +28,14 @@ describe("composer send key", () => {
   });
 
   it("turns raw connection errors into a recoverable message", () => {
-    expect(presentDiagnostic("ACP connection closed")).toBe("Kimi runtime disconnected. Your next prompt will reconnect automatically.");
+    expect(presentDiagnostic("ACP connection closed")).toBe("Kimi runtime disconnected. Reconnecting without stopping active work.");
     expect(presentDiagnostic("Workspace path is required")).toBe("Workspace path is required");
+  });
+
+  it("recovers only after a reconnect remains unresolved", () => {
+    expect(shouldScheduleRuntimeRecovery("reconnecting", false)).toBe(true);
+    expect(shouldScheduleRuntimeRecovery("error", false)).toBe(false);
+    expect(shouldScheduleRuntimeRecovery("reconnecting", true)).toBe(false);
   });
 });
 
@@ -96,6 +102,49 @@ describe("turn activity", () => {
     } as never);
     expect(projectTurns(thread).map((turn) => turn.activity.map((entry) => entry.text))).toEqual([["First"], ["Second"]]);
   });
+
+  it("keeps progress commentary in work and only promotes trailing text to the final summary", () => {
+    const activity = [{ id: "tool-1", turnId: "turn-1", kind: "tool", status: "completed", text: "Run checks", seq: 4, updatedSeq: 4, createdAt: "2026-07-18T10:00:01.000Z", updatedAt: "2026-07-18T10:00:02.000Z" }];
+    const messages = [
+      { turnId: "turn-1", role: "assistant", text: "I am checking the project.", seq: 3, updatedSeq: 3 },
+      { turnId: "turn-1", role: "assistant", text: "The fix is ready.", seq: 5, updatedSeq: 5 },
+    ];
+    const complete = turnAssistantMessages({ activity, messages, running: false } as never);
+    expect(complete.commentary.map((message) => message.text)).toEqual(["I am checking the project."]);
+    expect(complete.final?.text).toBe("The fix is ready.");
+    expect(turnAssistantMessages({ activity: [{ ...activity[0], updatedSeq: 6 }], messages, running: false } as never).final).toBeUndefined();
+    expect(turnAssistantMessages({ activity, messages, running: true } as never).commentary).toHaveLength(2);
+  });
+
+  it("uses the latest update for the live spinner without reordering the timeline", () => {
+    expect(latestTimelineItemId([
+      { id: "older-tool", updatedSeq: 9 },
+      { id: "newer-commentary", updatedSeq: 6 },
+    ])).toBe("older-tool");
+  });
+
+  it("keeps live assistant segments ordered around tool updates", () => {
+    const base = normalizeThread({
+      threadId: "thread", sessionId: "session", cwd: "E:/work", title: "Work", createdAt: "2026-07-18T10:00:00.000Z",
+    } as never);
+    const events = [
+      { threadId: "thread", seq: 1, type: "TurnStarted", payload: { turnId: "turn-1", text: "Go" }, createdAt: "2026-07-18T10:00:00.000Z" },
+      { threadId: "thread", seq: 2, type: "MessageDelta", payload: { turnId: "turn-1", role: "assistant", text: "Inspecting." }, createdAt: "2026-07-18T10:00:01.000Z" },
+      { threadId: "thread", seq: 3, type: "ToolCallCreated", payload: { tool: { toolCallId: "tool-1", title: "Read files", status: "in_progress" } }, createdAt: "2026-07-18T10:00:02.000Z" },
+      { threadId: "thread", seq: 4, type: "MessageDelta", payload: { turnId: "turn-1", role: "assistant", text: "Applying." }, createdAt: "2026-07-18T10:00:03.000Z" },
+    ];
+    const updated = applyEvents([base], events as never)[0]!;
+    expect(updated.messages.filter((message) => message.role === "assistant").map((message) => message.text)).toEqual(["Inspecting.", "Applying."]);
+  });
+});
+
+describe("local path links", () => {
+  it("extracts deduplicated Windows paths without swallowing punctuation", () => {
+    expect(extractLocalPaths("Open `E:\\projects\\android app` or E:\\projects\\android\\app,.")).toEqual([
+      "E:\\projects\\android app",
+      "E:\\projects\\android\\app",
+    ]);
+  });
 });
 
 describe("project navigation", () => {
@@ -145,6 +194,13 @@ describe("workspace panel sizing", () => {
     expect(clampPanelWidth("sidebar", 900)).toBe(420);
     expect(clampPanelWidth("rail", 120)).toBe(260);
     expect(clampPanelWidth("rail", 1600)).toBe(1200);
+  });
+
+  it("gives the conversation space before rendering a requested rail width", () => {
+    expect(effectiveRailWidth(1_200, 1_280, 272)).toBe(608);
+    expect(effectiveRailWidth(1_200, 1_280, 60)).toBe(820);
+    expect(effectiveRailWidth(420, 900, 272)).toBe(228);
+    expect(272 + 400 + effectiveRailWidth(1_200, 900, 272)).toBeLessThanOrEqual(900);
   });
 });
 

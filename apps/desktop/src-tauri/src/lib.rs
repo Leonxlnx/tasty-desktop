@@ -33,7 +33,7 @@ fn server_connection(runtime: State<'_, ServerRuntime>) -> serde_json::Value {
 }
 
 #[tauri::command]
-fn restart_server(_runtime: State<'_, ServerRuntime>) -> Result<(), String> {
+fn recover_server(_runtime: State<'_, ServerRuntime>) -> Result<bool, String> {
     #[cfg(not(debug_assertions))]
     {
         let mut child = _runtime
@@ -41,12 +41,33 @@ fn restart_server(_runtime: State<'_, ServerRuntime>) -> Result<(), String> {
             .lock()
             .map_err(|_| "Server lock is unavailable")?;
         if let Some(process) = child.as_mut() {
-            let _ = process.kill();
-            let _ = process.wait();
+            if process
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_none()
+            {
+                return Ok(false);
+            }
         }
         *child = Some(spawn_server(_runtime.inner()).map_err(|error| error.to_string())?);
+        return Ok(true);
     }
-    Ok(())
+    #[cfg(debug_assertions)]
+    {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+fn app_log_path(app: tauri::AppHandle) -> Result<String, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| {
+            path.join("orchestration-server.log")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -56,7 +77,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![server_connection, restart_server])
+        .invoke_handler(tauri::generate_handler![
+            server_connection,
+            recover_server,
+            app_log_path
+        ])
         .setup(|app| {
             #[cfg(debug_assertions)]
             app.manage(ServerRuntime {
