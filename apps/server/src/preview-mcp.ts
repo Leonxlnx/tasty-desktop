@@ -77,7 +77,7 @@ async function handleLine(line: string, state: { url?: string; panelWidth: numbe
       write({ jsonrpc: "2.0", id: request.id, result: {
         protocolVersion: typeof requested === "string" ? requested : "2025-03-26",
         capabilities: { tools: {} },
-        serverInfo: { name: "Kimi Code Desktop Preview", version: "0.8.3" },
+        serverInfo: { name: "Kimi Code Desktop Preview", version: "0.8.4" },
       } });
       return;
     }

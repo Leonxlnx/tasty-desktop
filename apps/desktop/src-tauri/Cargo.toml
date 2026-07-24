@@ -1,6 +1,6 @@
 [package]
 name = "kimi-code-desktop"
-version = "0.8.3"
+version = "0.8.4"
 description = "A native desktop client for Kimi Code"
 authors = ["Kimi Code Desktop contributors"]
 edition = "2021"

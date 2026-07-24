@@ -51,8 +51,8 @@ Before tagging:
 Create and push an annotated tag whose version exactly matches the Tauri configuration:
 
 ```powershell
-git tag -a v0.8.3 -m "Kimi Code Desktop 0.8.3"
-git push origin v0.8.3
+git tag -a v0.8.4 -m "Kimi Code Desktop 0.8.4"
+git push origin v0.8.4
 ```
 
 The `Windows release` workflow:

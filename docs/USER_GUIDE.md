@@ -36,6 +36,7 @@ Chat menu actions can rename, stop, open, or delete a chat. Right-clicking a pro
 - Use `/` to open Kimi commands.
 - Use `$` to search Kimi skills.
 - Use `#` or `@` to search files in the active project.
+- Use **Set workspace goal** in the `+` menu to start Kimi's `/write-goal` workflow.
 
 The `/` button is a toggle. Selecting it again closes command suggestions without inserting another character.
 
@@ -52,7 +53,11 @@ Queued prompts appear in a compact row above the composer. They can be edited or
 
 Text-only queued prompts survive an app restart. Image payloads remain memory-only so large encoded data is not written into local history.
 
-Thinking and tool activity stay collapsed under the turn that produced them. Completed turns show duration, token usage, copy and revert controls, a compact file-change report, and detected localhost preview links.
+While work is active, short Kimi progress updates and one-line tool rows appear in chronological order. Tool details stay collapsed unless opened. When the turn finishes, this feed collapses into **Worked for ...**, followed by Kimi's final summary, token usage, a compact file-change report, and detected localhost preview links.
+
+Use **Edit task** on a previous prompt to copy it back into the composer. If work is active, the app first cancels that turn and clears its queue. This does not rewrite Kimi's session history. **Undo changes** restores the filesystem checkpoint for that turn only.
+
+Absolute Windows paths in prompts and summaries can be revealed in Explorer. Tool locations first open as text inside the work panel and fall back to Explorer for folders or non-text files.
 
 ## Commands, skills, plugins, and subagents
 
@@ -121,6 +126,12 @@ Reopen the chat. The app resumes its persisted ACP session before applying model
 ### Local preview does not load
 
 Confirm the development server is running and enter a complete local URL, such as `http://localhost:3000`. Remote URLs are rejected by design.
+
+Use **Browser** to hand the URL to the Windows default browser. The preview panel always yields enough space to the chat composer, and wider preview presets collapse the left sidebar first.
+
+### Kimi stops before finishing
+
+The failed turn shows the runtime reason inline. The notification remains visible until dismissed and can copy the diagnostic or reveal `orchestration-server.log`. A transient renderer connection reconnects without restarting Kimi. After a sustained disconnect, recovery starts a new local service only when the previous service has actually exited.
 
 ### Update installation fails
 

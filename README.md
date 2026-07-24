@@ -11,7 +11,7 @@ Sign in with your own Kimi account, use your own plan and quota, open local proj
 
 Download the latest signed updater build from [GitHub Releases](https://github.com/Leonxlnx/kimi-code-desktop/releases/latest).
 
-Current version: `0.8.3`
+Current version: `0.8.4`
 
 Requirements:
 
@@ -34,12 +34,13 @@ Authentication remains owned by the official Kimi Code CLI. The desktop app does
 
 - Project workspaces with multiple resumable chats per folder
 - Standalone chats that stay separate from project files and Git state
-- Streaming Markdown responses with collapsed thinking and tool activity
-- Prompt queueing, steering, cancellation, copy, and turn revert controls
+- Streaming Markdown summaries with chronological, collapsible work and tool activity
+- Prompt queueing, steering, cancellation, edit-and-retry, copy, and turn undo controls
 - Live Kimi model, reasoning, permission, context, and quota surfaces
 - Kimi commands, skills, subagents, plugins, and MCP configuration
 - Integrated Git changes, diff, stage, unstage, and commit workflows
 - Workspace terminal, file preview, and agent-controlled localhost app preview
+- Clickable local paths, durable failure reasons, and revealable runtime logs
 - Configurable theme, typography, density, layout, shortcuts, and panel sizes
 - Signed in-app updates with explicit install and restart controls
 
