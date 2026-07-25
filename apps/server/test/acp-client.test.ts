@@ -126,9 +126,12 @@ describe("AcpClient", () => {
     }
   });
 
-  it("loads client-managed MCP servers for new, resumed, and replayed sessions", async () => {
+  it("loads client-managed MCP servers and lists sessions through a workspace alias", async () => {
     const fakePath = join(dirname(fileURLToPath(import.meta.url)), "../src/fake-acp.ts");
     const workspace = await mkdtemp(join(tmpdir(), "kimi-acp-mcp-"));
+    const aliasRoot = await mkdtemp(join(tmpdir(), "kimi-acp-alias-"));
+    const workspaceAlias = join(aliasRoot, "workspace");
+    await symlink(workspace, workspaceAlias, process.platform === "win32" ? "junction" : "dir");
     const canonicalWorkspace = await realpath(workspace);
     const reads: string[] = [];
     const client = new AcpClient({
@@ -143,6 +146,9 @@ describe("AcpClient", () => {
     try {
       await client.start();
       const session = await client.newSession(workspace);
+      await expect(client.listSessions(workspaceAlias)).resolves.toMatchObject({
+        sessions: [expect.objectContaining({ sessionId: session.sessionId, cwd: canonicalWorkspace })],
+      });
       await client.resumeSession(session.sessionId, workspace);
       await client.loadSession(session.sessionId, workspace);
       expect(reads).toEqual([canonicalWorkspace, canonicalWorkspace, canonicalWorkspace]);

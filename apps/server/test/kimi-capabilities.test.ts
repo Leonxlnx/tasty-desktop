@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -154,7 +154,7 @@ describe("Kimi capability discovery", () => {
 
     expect(installed).toMatchObject({
       skill: { name: "installed-skill", description: "Installed safely", scope: "user", source: "kimi" },
-      destination: join(root, "skills", "installed-skill"),
+      destination: join(await realpath(root), "skills", "installed-skill"),
       restartRequired: true,
     });
     await expect(readFile(join(installed.destination, "references", "notes.md"), "utf8")).resolves.toBe("supporting file");

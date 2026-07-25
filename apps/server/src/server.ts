@@ -1,7 +1,8 @@
+import { realpathSync } from "node:fs";
 import { mkdir, realpath } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ContentBlock, SessionConfigOption } from "@agentclientprotocol/sdk";
 import { WebSocketServer, type VerifyClientCallbackSync, type WebSocket } from "ws";
@@ -1280,13 +1281,22 @@ function isInternalProbeSession(session: unknown): boolean {
   const cwd = (session as { cwd?: unknown }).cwd;
   if (typeof cwd !== "string") return false;
   if (isKimiQuotaProbePath(cwd, quotaProbeCwd)) return true;
-  const normalize = (value: string) => resolve(value).replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
-  return normalize(cwd) === normalize(configProbeCwd);
+  if (basename(cwd).toLowerCase() !== "config-probe") return false;
+  return comparablePath(cwd) === comparablePath(configProbeCwd);
 }
 
 function isStandaloneChatPath(path: string): boolean {
-  const normalize = (value: string) => resolve(value).replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
-  return normalize(path) === normalize(standaloneChatCwd);
+  return basename(path).toLowerCase() === "chats"
+    && comparablePath(path) === comparablePath(standaloneChatCwd);
+}
+
+function comparablePath(value: string): string {
+  try {
+    value = realpathSync(value);
+  } catch {
+    // A stale runtime session may point at a workspace that no longer exists.
+  }
+  return resolve(value).replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
 }
 
 function classifyRuntimeSession(session: unknown): unknown {

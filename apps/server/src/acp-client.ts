@@ -116,11 +116,12 @@ export class AcpClient {
     return result;
   }
 
-  listSessions(cwd?: string): Promise<acp.ListSessionsResponse> {
+  async listSessions(cwd?: string): Promise<acp.ListSessionsResponse> {
     if (cwd && !isAbsolute(cwd)) throw new Error("Workspace path must be absolute");
+    const root = cwd ? await realpath(resolve(cwd)) : undefined;
     return this.#controlRequest(
       "session/list",
-      () => this.#agent().listSessions(cwd ? { cwd: resolve(cwd) } : {}),
+      () => this.#agent().listSessions(root ? { cwd: root } : {}),
     );
   }
 
@@ -302,7 +303,6 @@ export class AcpClient {
     const root = this.#sessionRoots.get(sessionId);
     if (!root) throw new Error(`Unknown ACP session ${sessionId}`);
     const resolved = resolve(path);
-    this.#assertWorkspacePath(root, resolved);
     return { root, resolved };
   }
 

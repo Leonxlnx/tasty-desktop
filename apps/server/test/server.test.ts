@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -97,7 +97,10 @@ describe("orchestration server", () => {
 
   it("serves draft config defaults and applies draft config during threads.create", async () => {
     const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
-    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-config-"));
+    const canonicalDataHome = await mkdtemp(join(tmpdir(), "kimi-server-config-"));
+    const aliasRoot = await mkdtemp(join(tmpdir(), "kimi-server-config-alias-"));
+    const dataHome = join(aliasRoot, "desktop-home");
+    await symlink(canonicalDataHome, dataHome, process.platform === "win32" ? "junction" : "dir");
     await writeFile(join(dataHome, "runtime-defaults.json"), JSON.stringify({ configOptions: [{
       id: "thinking", name: "Thinking", type: "select", category: "thought_level", currentValue: "legacy", options: [{ value: "legacy", name: "Legacy" }],
     }] }));
@@ -130,6 +133,14 @@ describe("orchestration server", () => {
     const cached = ((await updatedDefaults).result as { configOptions: Array<{ id: string; currentValue: unknown }> }).configOptions;
     expect(cached.find((option) => option.id === "model")?.currentValue).toBe("kimi-k3-fast");
     expect(cached.find((option) => option.id === "mode")?.currentValue).toBe("auto");
+
+    const standaloneReply = waitFor(socket, messages, (message) => message.id === 30);
+    socket.send(JSON.stringify({ id: 30, method: "threads.create", params: { standalone: true } }));
+    const standalone = ((await standaloneReply).result as { thread: { sessionId: string } }).thread;
+    const runtimeReply = waitFor(socket, messages, (message) => message.id === 31);
+    socket.send(JSON.stringify({ id: 31, method: "threads.list", params: {} }));
+    const runtimeSessions = ((await runtimeReply).result as { runtimeSessions: Array<{ sessionId: string; kind: string }> }).runtimeSessions;
+    expect(runtimeSessions).toContainEqual(expect.objectContaining({ sessionId: standalone.sessionId, kind: "chat" }));
     socket.close();
   });
 

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -57,7 +57,7 @@ describe("background task monitoring", () => {
       description: "Build APK",
       endedAt: 123,
       exitCode: 0,
-      outputPath: output,
+      outputPath: await realpath(output),
     });
     await expect(readKimiBackgroundTask(home, "session-missing", "bash-build1")).resolves.toBeUndefined();
     await expect(readKimiBackgroundTask(home, "session-own", "../config")).resolves.toBeUndefined();
