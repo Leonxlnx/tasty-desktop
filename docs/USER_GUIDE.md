@@ -6,7 +6,7 @@ Kimi Code Desktop is a Windows interface for the official Kimi Code CLI. It uses
 
 1. Download the newest installer from [GitHub Releases](https://github.com/Leonxlnx/kimi-code-desktop/releases/latest).
 2. Run the installer and open Kimi Code Desktop.
-3. Let onboarding check for Kimi Code CLI. If it is missing, the app can run Kimi's official Windows installer.
+3. Let onboarding check for Kimi Code CLI. If it is missing, choose **Open guide / check again** and follow Kimi's official instructions. The desktop app does not download or execute remote install scripts. Choose the button again after installation so onboarding can continue.
 4. Select **Begin sign-in**.
 5. Open Kimi's verification page and approve the displayed device code.
 
@@ -40,7 +40,7 @@ Chat menu actions can rename, stop, open, or delete a chat. Right-clicking a pro
 
 The `/` button is a toggle. Selecting it again closes command suggestions without inserting another character.
 
-Model, reasoning, and permission choices come from the active Kimi ACP session. The app does not invent options that the installed CLI does not support.
+Model, reasoning, and permission choices come from the active Kimi ACP session. Kimi Code CLI `0.29.1` is the current verified reference runtime and can offer `Low`, `High`, and `Max` effort. The app shows every value the current session offers, including future values, and does not invent unsupported options. A legacy `Thinking On` value is shown as runtime-managed `Default`, not as `Max`.
 
 ## Control active work
 
@@ -55,17 +55,29 @@ Text-only queued prompts survive an app restart. Image payloads remain memory-on
 
 While work is active, short Kimi progress updates and one-line tool rows appear in chronological order. Tool details stay collapsed unless opened. When the turn finishes, this feed collapses into **Worked for ...**, followed by Kimi's final summary, token usage, a compact file-change report, and detected localhost preview links.
 
+Some Kimi shell and agent tools can start a finite background task with automatic notification. The desktop app keeps those real task records in the chat projection, monitors them for up to 24 hours, and queues a follow-up when they finish so Kimi can inspect the output and report the verified result. This follow-up is crash-recoverable and at least once; it is not an exactly-once external delivery guarantee. Long-lived tools that disable their timeout are not monitored this way.
+
 Use **Edit task** on a previous prompt to copy it back into the composer. If work is active, the app first cancels that turn and clears its queue. This does not rewrite Kimi's session history. **Undo changes** restores the filesystem checkpoint for that turn only.
 
 Absolute Windows paths in prompts and summaries can be revealed in Explorer. Tool locations first open as text inside the work panel and fall back to Explorer for folders or non-text files.
 
 ## Commands, skills, plugins, and subagents
 
-The capability center reads the current Kimi command catalog, skill directories, plugin manifests from `~/.kimi/plugins`, and MCP definitions from `~/.kimi/mcp.json`.
+The capability center combines the live Kimi command catalog with local Kimi configuration:
 
-Use Kimi's own commands, such as `/mcp-config` and `/update-config`, to change CLI configuration. Sensitive MCP headers, environment values, arguments, and credentials stay in the server process and are never sent to the renderer.
+- User skills from `%KIMI_CODE_HOME%\skills` (default `%USERPROFILE%\.kimi-code\skills`) and `%USERPROFILE%\.agents\skills`
+- Project skills from `.kimi-code\skills` and `.agents\skills`
+- User MCP definitions from `%KIMI_CODE_HOME%\mcp.json`
+- Review-only project MCP definitions from `.mcp.json` and `.kimi-code\mcp.json`
+- Installed plugin metadata from `%KIMI_CODE_HOME%\plugins`
 
-Subagent shortcuts delegate to Kimi's official `coder`, `explore`, or `plan` agents. Real Kimi `Agent` calls appear in the **Agents** work-panel tab with their type, mode, state, and resumable agent ID when available.
+A skill may be a folder containing `SKILL.md` or a flat Markdown file. Project definitions override same-named user definitions. The `$` menu searches this discovered inventory. It uses slash syntax only when the current Kimi command catalog advertises a matching command; otherwise it inserts `$skill-name` for Kimi to resolve.
+
+To install a local skill, open a project, choose a skill file or folder from that active workspace, and confirm the install. Kimi may request the same workspace-local install through the built-in `skill_install_local` tool, but the request never installs anything by itself. Kimi Code Desktop always opens its confirmation dialog, and only your explicit **Install skill** action invokes the installer. The tool accepts no URLs or downloads. The confirmed install revalidates the manifest, name, symlinks, path containment, size, depth, and entry count before staging the copy in the user Kimi skills directory. Existing skills are never overwritten. Start a new chat after installation so Kimi loads the new skill.
+
+Use Kimi's own commands, such as `/mcp-config` and `/update-config`, when the current runtime advertises them. Plugin management is shown only when Kimi exposes a matching command; the desktop app does not invent `/plugins`. Only user MCP definitions from `%KIMI_CODE_HOME%\mcp.json` are attached. Repository-controlled MCP files are shown as **Review only** and never execute just because a project was opened. Sensitive MCP headers, environment values, arguments, and credentials stay in the server process and are never sent to the renderer.
+
+The `coder`, `explore`, and `plan` entries are convenient Kimi delegation prompts, not a fabricated running-agent inventory. Real Kimi `Agent` calls and their persisted background tasks appear in the **Agents** work-panel tab with their type, foreground or background mode, state, and agent ID when Kimi supplies one.
 
 ## Work panel
 
@@ -132,6 +144,8 @@ Use **Browser** to hand the URL to the Windows default browser. The preview pane
 ### Kimi stops before finishing
 
 The failed turn shows the runtime reason inline. The notification remains visible until dismissed and can copy the diagnostic or reveal `orchestration-server.log`. A transient renderer connection reconnects without restarting Kimi. After a sustained disconnect, recovery starts a new local service only when the previous service has actually exited.
+
+If Kimi started a finite task with automatic notification, keep the chat available. The task remains in the Agents projection after the original turn ends. When it reaches a terminal state, the app queues a follow-up for Kimi to inspect the bounded same-session output and report success or the real failure. Arbitrary detached processes and development servers are not treated as completion notifications.
 
 ### Update installation fails
 

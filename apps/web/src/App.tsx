@@ -19,27 +19,35 @@ type Usage = { context?: { used: number; size: number; cost?: { amount: number; 
 type KimiQuotaRow = { label: string; used: number; limit: number; remaining: number; resetTime?: string; resetHint?: string };
 type KimiQuota = { summary?: KimiQuotaRow; limits: KimiQuotaRow[]; parallel?: number; planType?: string; updatedAt?: string; stale?: boolean };
 type KimiPlugin = { name: string; version: string; description: string; toolCount: number };
-type KimiMcpServer = { name: string; transport: "http" | "stdio" | "unknown"; target: string; needsAuthorization: boolean; connectable: boolean };
+type KimiMcpServer = { name: string; transport: "http" | "stdio" | "unknown"; target: string; needsAuthorization: boolean; connectable: boolean; projectScoped?: true };
+type KimiSkill = { name: string; description: string; scope: "user" | "project"; source: "kimi" | "agents"; path: string; modelInvocable: boolean; hasSubSkills: boolean };
 type KimiAgent = { name: "coder" | "explore" | "plan"; description: string; access: string; supportsBackground: boolean };
-type KimiCapabilities = { plugins: KimiPlugin[]; mcpServers: KimiMcpServer[]; agents: KimiAgent[]; roots: { plugins: string; mcp: string }; warnings: string[]; updatedAt: string };
-type CapabilityTab = "plugins" | "mcp" | "agents";
-type SubagentRun = { id: string; type: string; description: string; status: "running" | "completed" | "failed"; background: boolean; agentId?: string };
+type KimiCapabilities = { plugins: KimiPlugin[]; mcpServers: KimiMcpServer[]; skills: KimiSkill[]; agents: KimiAgent[]; roots: { plugins: string; mcp: string; skills: string }; warnings: string[]; updatedAt: string };
+type CapabilityTab = "skills" | "plugins" | "mcp" | "agents";
+type SubagentRun = { id: string; type: string; description: string; status: "running" | "completed" | "failed"; background: boolean; agentId?: string; detail?: string };
+type BackgroundTask = {
+  taskId: string; queuedId: string; turnId: string; description: string;
+  status: "running" | "completed" | "failed" | "killed" | "lost" | "expired" | "timed_out";
+  registeredAt: string; updatedAt: string; endedAt?: number; exitCode?: number | null; reportQueued: boolean;
+  reportDeliveredAt?: string; reportCancelledAt?: string;
+};
 type GitFile = { path: string; originalPath?: string; staged: boolean; unstaged: boolean; untracked: boolean; indexStatus: string; worktreeStatus: string };
 type GitStatus = { root: string; branch: string; upstream?: string; ahead: number; behind: number; files: GitFile[] };
 type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: NonNullable<Usage["tokens"]> };
 type ActivityEntry = { id: string; turnId: string; kind: "thought" | "tool"; status: "pending" | "in_progress" | "completed" | "failed"; text: string; toolCallId?: string; seq: number; updatedSeq?: number; createdAt: string; updatedAt: string };
 type QueuedPrompt = { queuedId: string; text: string; mode: "queue" | "steer"; createdAt: string; images: Array<{ name: string; mimeType: string }> };
 type DesktopPreviewCommand = { action: "open" | "resize"; url?: string; panelWidth?: number; viewportWidth?: number; viewportHeight?: number };
+type SkillInstallRequest = { cwd: string; source: string; name: string };
 type Thread = {
   threadId: string; sessionId: string; cwd: string; kind: "project" | "chat"; title: string; createdAt: string; updatedAt: string; running: boolean;
   activeTurnId: string | undefined; stopReason: string | undefined; turns: TurnRecord[]; messages: Message[]; plan: Array<{ content: string; status: string }>;
-  activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; configOptions: ConfigOption[]; commands: AvailableCommand[]; modeId: string | undefined; checkpoints: Checkpoint[]; usage?: Usage; queue: QueuedPrompt[];
+  activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; configOptions: ConfigOption[]; commands: AvailableCommand[]; modeId: string | undefined; checkpoints: Checkpoint[]; backgroundTasks: BackgroundTask[]; usage?: Usage; queue: QueuedPrompt[];
 };
 type StoredEvent = { threadId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string };
 type RuntimeSession = { sessionId: string; cwd: string; kind?: "project" | "chat"; title?: string; updatedAt?: string };
 type AuthState = {
-  installed: boolean; authenticated: boolean; loginRunning: boolean; installRunning: boolean; home: string;
-  event?: { type: "progress" | "complete"; operation: "install" | "login" | "logout"; message: string; url?: string; code?: string; success?: boolean };
+  installed: boolean; authenticated: boolean; loginRunning: boolean; installRunning: boolean; installMode: "manual"; installUrl: string; home: string;
+  event?: { type: "progress" | "complete"; operation: "login" | "logout"; message: string; url?: string; code?: string; success?: boolean };
 };
 type Preferences = {
   density: "comfortable" | "compact";
@@ -66,8 +74,13 @@ type Preferences = {
 };
 type ProjectGroup = { cwd: string; name: string; threads: Thread[]; runtimeSessions: RuntimeSession[] };
 type DraftChat = { kind: "project" | "chat"; cwd?: string };
+type ConfigTarget =
+  | { key: string; kind: "thread"; threadId: string }
+  | { key: string; kind: "draft"; draft: DraftChat };
+type ConfigUpdate = { targetKey: string; configId: string; requestId: number };
 type UpdateStatus = { phase: "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error"; version?: string; currentVersion?: string; percent?: number; message?: string };
 type RailView = "git" | "terminal" | "preview" | "agents";
+type AppMenu = "file" | "edit" | "view" | "help";
 type SettingsCategory = "general" | "appearance" | "layout" | "account" | "usage" | "updates" | "about";
 type TerminalSessionInfo = { sessionId: string; cwd: string; shell: string };
 type TerminalEvent = { sessionId: string; type: "stdout" | "stderr" | "exit"; text?: string; code?: number | null };
@@ -79,7 +92,8 @@ type ManageDialog =
   | { kind: "remove-runtime-session"; sessionId: string; name: string }
   | { kind: "delete-project-chats"; cwd: string; name: string; threadIds: string[]; sessionIds: string[] }
   | { kind: "rename-thread"; threadId: string; name: string }
-  | { kind: "delete-thread"; threadId: string; sessionId: string; name: string };
+  | { kind: "delete-thread"; threadId: string; sessionId: string; name: string }
+  | { kind: "install-skill"; cwd: string; source: string; name: string };
 const preferenceKey = "kimi-code-desktop.preferences.v1";
 const defaultPreferences: Preferences = {
   density: "comfortable", sendKey: "enter", workspace: "", onboardingDone: false, sidebarCollapsed: false, projects: [], zoom: 1,
@@ -88,7 +102,6 @@ const defaultPreferences: Preferences = {
 };
 const collapsedSidebarWidth = 60;
 let terminalEntryId = 0;
-const coreCommandNames = new Set(["compact", "status", "usage", "mcp", "tasks", "help"]);
 const fallbackCommands: AvailableCommand[] = [
   { name: "compact", description: "Compact the current Kimi session context." },
   { name: "status", description: "Show the current session and runtime status." },
@@ -97,7 +110,6 @@ const fallbackCommands: AvailableCommand[] = [
   { name: "tasks", description: "Show tasks managed by the current session." },
   { name: "help", description: "Show Kimi Code commands and input help." },
   { name: "mcp-config", description: "Configure MCP servers for Kimi Code." },
-  { name: "plugins", description: "Install or manage Kimi plugins and bundled skills." },
   { name: "update-config", description: "Review or update Kimi Code configuration." },
   { name: "check-kimi-code-docs", description: "Check the official Kimi Code documentation." },
   { name: "custom-theme", description: "Create or update a Kimi Code theme." },
@@ -153,12 +165,79 @@ export function shouldScheduleRuntimeRecovery(connection: ConnectionState, sched
   return connection === "reconnecting" && !scheduled;
 }
 
-export function hasBlockingWork(threads: Array<Pick<Thread, "running" | "queue" | "approvals">>, draftSending = false): boolean {
-  return draftSending || threads.some((thread) => thread.running || thread.queue.length > 0 || thread.approvals.length > 0);
+export function hasBlockingWork(
+  threads: Array<Pick<Thread, "running" | "queue" | "approvals"> & Partial<Pick<Thread, "backgroundTasks">>>,
+  draftSending = false,
+): boolean {
+  return draftSending || threads.some((thread) => thread.running
+    || thread.queue.length > 0
+    || thread.approvals.length > 0
+    || thread.backgroundTasks?.some((task) => !task.reportDeliveredAt && !task.reportCancelledAt));
+}
+
+export function configTargetKey(
+  thread: { threadId: string } | undefined,
+  draft: { kind: "project" | "chat"; cwd?: string } | undefined,
+): string | undefined {
+  if (thread) return `thread:${thread.threadId}`;
+  if (!draft) return undefined;
+  return `draft:${JSON.stringify([draft.kind, draft.cwd ?? ""])}`;
+}
+
+export function composerCanSubmit(
+  view: "projects" | "chats",
+  targetKind: "project" | "chat" | undefined,
+  configUpdating: boolean,
+): boolean {
+  return !configUpdating && targetKind === (view === "chats" ? "chat" : "project");
+}
+
+export function workspaceForView(
+  view: "projects" | "chats",
+  active: Pick<Thread, "kind" | "cwd"> | undefined,
+  draft: DraftChat | undefined,
+  fallback: string,
+): string | undefined {
+  if (active) return active.kind === "project" ? active.cwd : undefined;
+  if (draft) return draft.kind === "project" ? draft.cwd : undefined;
+  return view === "projects" ? fallback || undefined : undefined;
+}
+
+export function workspaceRequestMatches(requested: string, current: string | undefined): boolean {
+  return Boolean(current && samePath(requested, current));
+}
+
+export function skillInstallDialogFromRequest(value: unknown): ({ kind: "install-skill" } & SkillInstallRequest) | undefined {
+  if (!isRecordValue(value)
+    || typeof value.cwd !== "string"
+    || typeof value.source !== "string"
+    || typeof value.name !== "string"
+    || !value.name.trim()
+    || !workspaceRelativePath(value.cwd, value.source)) return undefined;
+  return { kind: "install-skill", cwd: value.cwd, source: value.source, name: value.name.trim() };
+}
+
+export function railForStandaloneChat(current: RailView | undefined): RailView | undefined {
+  return current === "agents" ? current : undefined;
+}
+
+export function shouldAcknowledgeYolo(success: boolean, pendingTarget: string, currentTarget: string | undefined): boolean {
+  return success && pendingTarget === currentTarget;
 }
 
 export function showSidebarUpdate(phase: UpdateStatus["phase"]): boolean {
   return phase === "available" || phase === "downloading" || phase === "installing";
+}
+
+export function isNearScrollBottom(
+  metrics: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
+  threshold = 72,
+): boolean {
+  return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold;
+}
+
+export function isAppMenuOpenKey(key: string): boolean {
+  return key === "ArrowDown" || key === "Enter" || key === " ";
 }
 
 export function App() {
@@ -170,12 +249,24 @@ export function App() {
   const domainEventFrame = useRef<number | undefined>(undefined);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const composerInput = useRef<HTMLTextAreaElement | null>(null);
+  const composer = useRef<HTMLFormElement | null>(null);
   const composerTools = useRef<HTMLDivElement | null>(null);
+  const timeline = useRef<HTMLDivElement | null>(null);
+  const conversationStage = useRef<HTMLDivElement | null>(null);
+  const timelinePinned = useRef(true);
   const terminalEnd = useRef<HTMLDivElement | null>(null);
   const menuBar = useRef<HTMLElement | null>(null);
+  const menuTriggers = useRef<Partial<Record<AppMenu, HTMLButtonElement | null>>>({});
   const pendingUpdate = useRef<Update | undefined>(undefined);
+  const updateInstallInFlight = useRef(false);
   const quotaRefreshInFlight = useRef(false);
+  const configRequestId = useRef(0);
+  const configUpdatesInFlight = useRef(0);
+  const currentConfigTargetKey = useRef<string | undefined>(undefined);
+  const initializedProjectDetails = useRef(new WeakSet<HTMLDetailsElement>());
   const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [serverLookupAttempt, setServerLookupAttempt] = useState(0);
+  const [serverLookupError, setServerLookupError] = useState<string>();
   const [preferences, setPreferences] = useState<Preferences>(loadPreferences);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [showOnboarding, setShowOnboarding] = useState(() => !loadPreferences().onboardingDone);
@@ -195,16 +286,17 @@ export function App() {
   const [threadFilter, setThreadFilter] = useState("");
   const [navView, setNavView] = useState<"projects" | "chats">("projects");
   const [capabilityCenterOpen, setCapabilityCenterOpen] = useState(false);
-  const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>("plugins");
+  const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>("skills");
   const [capabilities, setCapabilities] = useState<KimiCapabilities>();
   const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [railView, setRailView] = useState<RailView>();
-  const [openMenu, setOpenMenu] = useState<"file" | "edit" | "view" | "help" | undefined>();
+  const [openMenu, setOpenMenu] = useState<AppMenu>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("general");
   const [settingsQuery, setSettingsQuery] = useState("");
   const [gitStatus, setGitStatus] = useState<GitStatus>();
+  const [gitStatusCwd, setGitStatusCwd] = useState<string>();
   const [gitDiff, setGitDiff] = useState<{ path: string; diff: string }>();
   const [commitMessage, setCommitMessage] = useState("");
   const [gitBusy, setGitBusy] = useState(false);
@@ -213,6 +305,7 @@ export function App() {
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ phase: "idle" });
   const [updateNotice, setUpdateNotice] = useState<string>();
+  const [updatePreparing, setUpdatePreparing] = useState(false);
   const [terminalSession, setTerminalSession] = useState<TerminalSessionInfo>();
   const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([]);
   const [terminalCommand, setTerminalCommand] = useState("");
@@ -229,19 +322,42 @@ export function App() {
   const [draftSending, setDraftSending] = useState(false);
   const [configDefaults, setConfigDefaults] = useState<ConfigOption[]>([]);
   const [draftConfig, setDraftConfig] = useState<Record<string, string>>({});
-  const [configUpdating, setConfigUpdating] = useState<string>();
-  const [yoloConfirm, setYoloConfirm] = useState<{ configId: string; value: string }>();
+  const [configUpdating, setConfigUpdating] = useState<Record<string, ConfigUpdate>>({});
+  const [yoloConfirm, setYoloConfirm] = useState<{ target: ConfigTarget; configId: string; value: string; busy: boolean }>();
   const [draggingProject, setDraggingProject] = useState<string>();
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
 
   const activeThread = threads.find((thread) => thread.threadId === activeThreadId);
+  const promptTrigger = useMemo(() => composerTrigger(prompt), [prompt]);
+  const composerProjectCwd = activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : undefined;
+  const fileSuggestionQuery = promptTrigger?.kind === "file" ? promptTrigger.query : undefined;
+  const configTarget = activeThread
+    ? { key: configTargetKey(activeThread, undefined)!, kind: "thread" as const, threadId: activeThread.threadId }
+    : draftChat
+      ? { key: configTargetKey(undefined, draftChat)!, kind: "draft" as const, draft: draftChat }
+      : undefined;
+  currentConfigTargetKey.current = configTarget?.key;
   const agentRuns = useMemo(() => subagentRuns(activeThread), [activeThread]);
   const composerOptions = useMemo(() => activeThread ? activeThread.configOptions : applyDraftConfig(configDefaults, draftConfig), [activeThread, configDefaults, draftConfig]);
   const workBlocksUpdate = hasBlockingWork(threads, draftSending);
+  const updateBlocked = workBlocksUpdate || Object.keys(configUpdating).length > 0;
+  const updateMutationsBlocked = updatePreparing || updateStatus.phase === "downloading" || updateStatus.phase === "installing";
+  const configMutationPending = Object.keys(configUpdating).length > 0;
+  const configBusyId = configTarget ? configUpdating[configTarget.key]?.configId : undefined;
+  const composerTargetKind = activeThread?.kind ?? draftChat?.kind;
+  const composerSubmitReady = runtimeReady && composerCanSubmit(navView, composerTargetKind, configMutationPending);
   const primaryComposerAction = composerPrimaryAction(Boolean(activeThread?.running), Boolean(prompt.trim()));
   const layoutSidebarWidth = preferences.sidebarCollapsed ? collapsedSidebarWidth : preferences.sidebarWidth;
   const renderedRailWidth = effectiveRailWidth(preferences.railWidth, viewportWidth, layoutSidebarWidth);
   const previewPanelMode = renderedRailWidth >= 1_080 ? "Wide" : renderedRailWidth >= 760 ? "Desktop" : "Compact";
   const setDiagnostic = useCallback((message: string) => setDiagnostics((current) => [...current, presentDiagnostic(message)].slice(-50)), []);
+  const initializeProjectDetails = useCallback((element: HTMLDetailsElement | null) => {
+    if (!element || initializedProjectDetails.current.has(element)) return;
+    initializedProjectDetails.current.add(element);
+    element.open = true;
+  }, []);
   const openExternalLink = useCallback(async (url: string) => {
     try {
       await openExternal(url);
@@ -264,6 +380,13 @@ export function App() {
       setDiagnostic(`Could not open runtime log: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [setDiagnostic]);
+  const jumpToLatest = useCallback(() => {
+    const target = timeline.current;
+    if (!target) return;
+    target.scrollTop = target.scrollHeight;
+    timelinePinned.current = true;
+    setShowJumpToLatest(false);
+  }, []);
   const rememberWorkspace = useCallback((path: string) => {
     if (!path) return;
     setPreferences((current) => ({
@@ -301,14 +424,61 @@ export function App() {
 
   useEffect(() => { void applyZoom(preferences.zoom); }, [preferences.zoom]);
 
-  useEffect(() => { if (!workBlocksUpdate) setUpdateNotice(undefined); }, [workBlocksUpdate]);
+  useLayoutEffect(() => {
+    timelinePinned.current = true;
+    setShowJumpToLatest(false);
+    const frame = window.requestAnimationFrame(jumpToLatest);
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeThreadId, jumpToLatest]);
+
+  useLayoutEffect(() => {
+    if (!timelinePinned.current) return;
+    const frame = window.requestAnimationFrame(jumpToLatest);
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeThread?.queue.length, activeThread?.updatedAt, draftSending, jumpToLatest]);
+
+  useLayoutEffect(() => {
+    const scrollTarget = timeline.current;
+    if (!scrollTarget || typeof ResizeObserver === "undefined") return;
+    let frame: number | undefined;
+    const keepLatestVisible = () => {
+      if (!timelinePinned.current) return;
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined;
+        if (timelinePinned.current) jumpToLatest();
+      });
+    };
+    const observer = new ResizeObserver(keepLatestVisible);
+    observer.observe(scrollTarget);
+    if (conversationStage.current) observer.observe(conversationStage.current);
+    if (composer.current) observer.observe(composer.current);
+    return () => {
+      observer.disconnect();
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+    };
+  }, [activeThreadId, activeThread?.turns.length, bootstrapping, capabilityCenterOpen, jumpToLatest, showOnboarding]);
+
+  useEffect(() => { if (!updateBlocked) setUpdateNotice(undefined); }, [updateBlocked]);
+  useLayoutEffect(() => {
+    if (!openMenu) return;
+    const frame = window.requestAnimationFrame(() => {
+      menuBar.current?.querySelector<HTMLElement>(".app-menu.open [role=\"menuitem\"]:not([disabled])")?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [openMenu]);
+
   useEffect(() => {
     if (!openMenu) return;
     const closeMenu = (event: PointerEvent) => {
       if (!menuBar.current?.contains(event.target as Node)) setOpenMenu(undefined);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpenMenu(undefined);
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      const trigger = menuTriggers.current[openMenu];
+      setOpenMenu(undefined);
+      window.requestAnimationFrame(() => trigger?.focus());
     };
     window.addEventListener("pointerdown", closeMenu);
     window.addEventListener("keydown", closeOnEscape);
@@ -414,6 +584,10 @@ export function App() {
   }, [activeThreadId, threads]);
 
   useEffect(() => {
+    setYoloConfirm((pending) => pending && pending.target.key !== configTarget?.key ? undefined : pending);
+  }, [configTarget?.key]);
+
+  useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey)) return;
       if (event.key.toLowerCase() === "n" && !event.shiftKey) {
@@ -457,24 +631,46 @@ export function App() {
   }, [cwd, navView, runtimeReady]);
 
   const call = useCallback((method: string, params: Record<string, unknown> = {}) => supervisor.current?.request(method, params) ?? Promise.reject(new Error("Server is not connected")), []);
-  const recoverLocalServer = useCallback(async () => {
+  const recoverLocalServer = useCallback(async (force = false) => {
     if (serverRestarting.current) return;
     serverRestarting.current = true;
+    const hasClient = Boolean(supervisor.current);
     try {
-      await invoke("recover_server");
-      supervisor.current?.retry();
-      setStartupDelayed(false);
+      const restarted = await invoke<boolean>("recover_server", { force });
+      if (restarted && hasClient) {
+        supervisor.current?.retry();
+        setStartupDelayed(false);
+      }
     } catch (error) {
       setDiagnostic(`Local runtime recovery failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      if (!hasClient) {
+        setServerLookupError(undefined);
+        setServerLookupAttempt((current) => current + 1);
+      }
       serverRestarting.current = false;
     }
   }, [setDiagnostic]);
-  const workspaceCwd = activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd;
+  const workspaceCwd = workspaceForView(navView, activeThread, draftChat, cwd);
+  const currentWorkspaceCwd = useRef<string | undefined>(workspaceCwd);
+  currentWorkspaceCwd.current = workspaceCwd;
+  const capabilityCwd = activeThread
+    ? activeThread.kind === "project" ? activeThread.cwd : undefined
+    : draftChat
+      ? draftChat.kind === "project" ? draftChat.cwd : undefined
+      : navView === "projects" ? cwd : undefined;
 
   useEffect(() => {
     if (activeThread?.kind === "chat" && railView && railView !== "agents") setRailView("agents");
   }, [activeThread?.kind, railView]);
+
+  useEffect(() => {
+    setGitStatus(undefined);
+    setGitStatusCwd(undefined);
+    setGitDiff(undefined);
+    setCommitMessage("");
+    setGitBusy(false);
+  }, [workspaceCwd]);
 
   const refreshQuota = useCallback(async () => {
     if (quotaRefreshInFlight.current) return;
@@ -494,13 +690,13 @@ export function App() {
   const refreshCapabilities = useCallback(async () => {
     setCapabilitiesLoading(true);
     try {
-      setCapabilities(await call("capabilities.list") as KimiCapabilities);
+      setCapabilities(await call("capabilities.list", capabilityCwd ? { cwd: capabilityCwd } : {}) as KimiCapabilities);
     } catch (error) {
       setDiagnostic(error instanceof Error ? error.message : String(error));
     } finally {
       setCapabilitiesLoading(false);
     }
-  }, [call, setDiagnostic]);
+  }, [call, capabilityCwd, setDiagnostic]);
 
   useEffect(() => {
     if (connection === "connected") void refreshCapabilities();
@@ -508,14 +704,20 @@ export function App() {
 
   const refreshGit = useCallback(async () => {
     if (!workspaceCwd) return;
+    const requestedCwd = workspaceCwd;
     setGitBusy(true);
     try {
-      setGitStatus(await call("git.status", { cwd: workspaceCwd }) as GitStatus);
+      const status = await call("git.status", { cwd: requestedCwd }) as GitStatus;
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      setGitStatus(status);
+      setGitStatusCwd(requestedCwd);
     } catch (error) {
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
       setGitStatus(undefined);
+      setGitStatusCwd(undefined);
       setDiagnostic(error instanceof Error ? error.message : String(error));
     } finally {
-      setGitBusy(false);
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitBusy(false);
     }
   }, [call, setDiagnostic, workspaceCwd]);
 
@@ -576,23 +778,32 @@ export function App() {
   useEffect(() => {
     let disposed = false;
     let client: ConnectionSupervisor | undefined;
+    setServerLookupError(undefined);
+    setStartupDelayed(false);
     void localServerUrl().then((url) => {
       if (disposed) return;
       client = new ConnectionSupervisor(url, setConnection, handleMessage);
       supervisor.current = client;
       client.start();
+    }).catch((error: unknown) => {
+      if (disposed) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setServerLookupError(message);
+      setStartupDelayed(true);
+      setConnection("error");
     });
     return () => {
       disposed = true;
       client?.close();
+      if (supervisor.current === client) supervisor.current = undefined;
       if (automaticRestartTimer.current !== undefined) window.clearTimeout(automaticRestartTimer.current);
       if (domainEventFrame.current !== undefined) window.cancelAnimationFrame(domainEventFrame.current);
     };
 
     function handleMessage(message: ServerMessage) {
       if (message.channel === "server.welcome") {
-        const payload = message.payload as { defaultCwd: string; threads?: Thread[] };
-        setCwd((value) => value || payload.defaultCwd);
+        const payload = message.payload as { defaultCwd?: string; threads?: Thread[] };
+        if (payload.defaultCwd) setCwd((value) => value || payload.defaultCwd!);
         if (payload.threads) {
           const incoming = payload.threads.map(normalizeThread);
           setThreads(incoming);
@@ -615,6 +826,9 @@ export function App() {
         setThreads((current) => current.map((thread) => thread.threadId === payload.threadId ? { ...thread, queue: payload.queue } : thread));
       } else if (message.channel === "preview.command") {
         applyAgentPreviewCommand(message.payload as DesktopPreviewCommand);
+      } else if (message.channel === "skill.installRequested") {
+        const dialog = skillInstallDialogFromRequest(message.payload);
+        if (dialog) setManageDialog(dialog);
       } else if (message.channel === "server.diagnostics") {
         setDiagnostic(String((message.payload as { message?: string }).message ?? "Runtime error"));
       } else if (message.channel === "auth.status") {
@@ -627,7 +841,11 @@ export function App() {
           return;
         }
         if (status.authenticated && status.event?.type === "complete") {
-          void call("env.bootstrap").then((result) => setRuntimeReady(Boolean((result as { initialize?: unknown }).initialize))).catch((error: Error) => setDiagnostic(error.message));
+          void call("env.bootstrap").then((result) => {
+            const environment = result as { initialize?: unknown; runtimeError?: string };
+            setRuntimeReady(Boolean(environment.initialize));
+            if (environment.runtimeError) setDiagnostic(`Kimi runtime unavailable: ${environment.runtimeError}`);
+          }).catch((error: Error) => setDiagnostic(error.message));
         }
       } else if (message.channel === "terminal.output") {
         const event = message.payload as TerminalEvent;
@@ -636,7 +854,7 @@ export function App() {
         if (event.type === "exit") setTerminalSession((current) => current?.sessionId === event.sessionId ? undefined : current);
       }
     }
-  }, []);
+  }, [serverLookupAttempt]);
 
   useEffect(() => {
     if (connection === "connected") {
@@ -658,7 +876,7 @@ export function App() {
     if (!shouldScheduleRuntimeRecovery(connection, automaticRestartTimer.current !== undefined)) return;
     automaticRestartTimer.current = window.setTimeout(() => {
       automaticRestartTimer.current = undefined;
-      void recoverLocalServer();
+      void recoverLocalServer(false);
     }, 12_000);
   }, [connection, recoverLocalServer]);
 
@@ -666,9 +884,10 @@ export function App() {
     if (connection !== "connected") return;
     setBootstrapping(true);
     void call("env.bootstrap").then((result) => {
-      const environment = result as { initialize?: unknown; auth: AuthState };
+      const environment = result as { initialize?: unknown; auth: AuthState; runtimeError?: string };
       setAuth(environment.auth);
       setRuntimeReady(Boolean(environment.initialize));
+      if (environment.runtimeError) setDiagnostic(`Kimi runtime unavailable: ${environment.runtimeError}`);
       if (!environment.auth.authenticated) return { threads: [], runtimeSessions: [] };
       void refreshQuota();
       return call("threads.list");
@@ -682,17 +901,31 @@ export function App() {
   }, [call, connection, refreshQuota]);
 
   useEffect(() => {
-    const trigger = composerTrigger(prompt);
-    const promptCwd = activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : undefined;
-    if (trigger?.kind !== "file" || !promptCwd) {
+    if (connection !== "connected" || bootstrapping || runtimeReady || !auth?.authenticated) return;
+    const timer = window.setInterval(() => {
+      void call("env.bootstrap").then((result) => {
+        if ((result as { initialize?: unknown }).initialize) setRuntimeReady(true);
+      }).catch(() => undefined);
+    }, 12_000);
+    return () => window.clearInterval(timer);
+  }, [auth?.authenticated, bootstrapping, call, connection, runtimeReady]);
+
+  useEffect(() => {
+    if (fileSuggestionQuery === undefined || !composerProjectCwd) {
       setFileSuggestions([]);
       return;
     }
+    let cancelled = false;
     const timer = window.setTimeout(() => {
-      void call("files.tree", { cwd: promptCwd, query: trigger.query }).then((result) => setFileSuggestions((result as { files: string[] }).files.slice(0, 8))).catch(() => setFileSuggestions([]));
+      void call("files.tree", { cwd: composerProjectCwd, query: fileSuggestionQuery })
+        .then((result) => { if (!cancelled) setFileSuggestions((result as { files: string[] }).files.slice(0, 8)); })
+        .catch(() => { if (!cancelled) setFileSuggestions([]); });
     }, 120);
-    return () => window.clearTimeout(timer);
-  }, [activeThread, call, draftChat, prompt]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [call, composerProjectCwd, fileSuggestionQuery]);
 
   useEffect(() => {
     if (!runtimeReady || configDefaults.length) return;
@@ -730,13 +963,41 @@ export function App() {
     window.setTimeout(() => composerInput.current?.focus(), 0);
   }
 
+  function clearProjectPanels() {
+    setRailView(railForStandaloneChat);
+    setSelectedFile(undefined);
+    setGitStatus(undefined);
+    setGitStatusCwd(undefined);
+    setGitDiff(undefined);
+    setCommitMessage("");
+    setGitBusy(false);
+    setPreviewUrl(undefined);
+    setPreviewDraft("http://localhost:3000");
+    setTerminalEntries([]);
+    setTerminalCommand("");
+    setTerminalStarting(false);
+    if (terminalSession) {
+      void call("terminal.stop", { sessionId: terminalSession.sessionId }).catch((error: Error) => setDiagnostic(error.message));
+      setTerminalSession(undefined);
+    }
+  }
+
   function createStandaloneChat() {
+    clearProjectPanels();
     setNavView("chats");
     setCapabilityCenterOpen(false);
     setActiveThreadId(undefined);
     setDraftChat({ kind: "chat" });
     setDiagnostics([]);
     window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function changeNavView(next: "projects" | "chats") {
+    if (next === "chats") clearProjectPanels();
+    setCapabilityCenterOpen(false);
+    setNavView(next);
+    if (activeThread && !composerCanSubmit(next, activeThread.kind, false)) setActiveThreadId(undefined);
+    if (draftChat && !composerCanSubmit(next, draftChat.kind, false)) setDraftChat(undefined);
   }
 
   function changeThreadMenu(threadId: string, forceOpen = false) {
@@ -758,6 +1019,7 @@ export function App() {
   }
 
   function selectThread(thread: Thread) {
+    if (thread.kind === "chat") clearProjectPanels();
     setCapabilityCenterOpen(false);
     setDraftChat(undefined);
     setActiveThreadId(thread.threadId);
@@ -791,9 +1053,11 @@ export function App() {
     const requestedMode = submitMode.current;
     submitMode.current = "queue";
     const text = prompt.trim();
-    if (!text || (!activeThread && !draftChat) || draftSending) return;
+    if (!runtimeReady || !text || !composerCanSubmit(navView, activeThread?.kind ?? draftChat?.kind, configUpdatesInFlight.current > 0) || draftSending || updateMutationsBlocked) return;
     const mentions = [...text.matchAll(/@\{([^}]+)\}/g)].map((match) => match[1]!);
     const mode = activeThread?.running ? requestedMode : "queue";
+    timelinePinned.current = true;
+    setShowJumpToLatest(false);
     setPrompt("");
     setFileSuggestions([]);
     setComposerMenuOpen(false);
@@ -845,6 +1109,7 @@ export function App() {
   }
 
   function steerQueuedPrompt(threadId: string, queuedId: string) {
+    if (configUpdatesInFlight.current > 0) return;
     void call("threads.steerQueuedTurn", { threadId, queuedId }).catch((error: Error) => setDiagnostic(error.message));
   }
 
@@ -878,6 +1143,10 @@ export function App() {
       } else if (dialog.kind === "delete-project-chats") {
         await Promise.all(dialog.threadIds.map((threadId) => call("threads.delete", { threadId })));
         setPreferences((current) => ({ ...current, hiddenSessions: [...new Set([...dialog.sessionIds, ...current.hiddenSessions])] }));
+      } else if (dialog.kind === "install-skill") {
+        const installed = await call("skills.install", { cwd: dialog.cwd, source: dialog.source }) as { skill?: { name?: string }; restartRequired?: boolean };
+        await refreshCapabilities();
+        setDiagnostic(`Installed ${installed.skill?.name ?? dialog.name}. Start a new chat to load the skill.`);
       }
       setManageDialog(undefined);
       setItemMenu(undefined);
@@ -896,22 +1165,33 @@ export function App() {
     void call("threads.respondToRequest", { threadId: activeThread.threadId, requestId: approval.requestId, optionId }).catch((error: Error) => setDiagnostic(error.message));
   }
 
-  async function setConfig(configId: string, value: string) {
-    if (activeThread) {
-      const threadId = activeThread.threadId;
-      setConfigUpdating(configId);
+  async function setConfig(configId: string, value: string, target = configTarget): Promise<boolean> {
+    if (!target || target.key !== currentConfigTargetKey.current || updateMutationsBlocked || configUpdatesInFlight.current > 0) return false;
+    if (target.kind === "thread") {
+      const threadId = target.threadId;
+      const update = { targetKey: target.key, configId, requestId: ++configRequestId.current };
+      configUpdatesInFlight.current += 1;
+      setConfigUpdating((current) => ({ ...current, [target.key]: update }));
       try {
         const result = await call("threads.setConfigOption", { threadId, configId, value }) as { configOptions?: ConfigOption[] };
         if (result.configOptions) {
           setThreads((current) => current.map((thread) => thread.threadId === threadId ? { ...thread, configOptions: result.configOptions! } : thread));
         }
         setPreferences((current) => ({ ...current, composerConfig: { ...current.composerConfig, [configId]: value } }));
+        return true;
       } catch (error) {
         setDiagnostic(error instanceof Error ? error.message : String(error));
+        return false;
       } finally {
-        setConfigUpdating((current) => current === configId ? undefined : current);
+        configUpdatesInFlight.current = Math.max(0, configUpdatesInFlight.current - 1);
+        setConfigUpdating((current) => {
+          if (current[target.key]?.requestId !== update.requestId) return current;
+          const next = { ...current };
+          delete next[target.key];
+          return next;
+        });
       }
-    } else if (draftChat) {
+    } else {
       setPreferences((current) => ({ ...current, composerConfig: { ...current.composerConfig, [configId]: value } }));
       setDraftConfig((current) => {
         const option = configDefaults.find((candidate) => candidate.id === configId);
@@ -920,16 +1200,18 @@ export function App() {
         else next[configId] = value;
         return next;
       });
+      return true;
     }
   }
 
   function changeConfig(configId: string, value: string) {
+    if (!configTarget || updateMutationsBlocked || configUpdatesInFlight.current > 0) return;
     const option = composerOptions.find((candidate) => candidate.id === configId);
     if (isYoloChoice(option, value) && !preferences.yoloAcknowledged) {
-      setYoloConfirm({ configId, value });
+      setYoloConfirm({ target: configTarget, configId, value, busy: false });
       return;
     }
-    void setConfig(configId, value);
+    void setConfig(configId, value, configTarget);
   }
 
   function insertMention(file: string) {
@@ -940,6 +1222,12 @@ export function App() {
 
   function insertCommand(command: AvailableCommand) {
     setPrompt((value) => replaceComposerTrigger(value, `/${command.name} `));
+    setFileSuggestions([]);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function insertSkill(skill: KimiSkill) {
+    setPrompt((value) => replaceComposerTrigger(value, skillComposerInsertion(skill.name, runtimeCommands ?? [])));
     setFileSuggestions([]);
     window.setTimeout(() => composerInput.current?.focus(), 0);
   }
@@ -1020,42 +1308,79 @@ export function App() {
     }
   }
 
-  async function openGitDiff(path: string) {
-    if (!workspaceCwd) return;
+  async function chooseSkillToInstall(kind: "folder" | "file" = "folder") {
+    if (!capabilityProjectCwd) {
+      setDiagnostic("Open a project before installing a local skill.");
+      return;
+    }
+    setComposerMenuOpen(false);
     try {
-      setGitDiff(await call("git.diff", { cwd: workspaceCwd, path }) as { path: string; diff: string });
+      if (!isTauri()) throw new Error("Local skill installation is available in the desktop app");
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        directory: kind === "folder",
+        multiple: false,
+        defaultPath: capabilityProjectCwd,
+        title: `Choose a skill ${kind} from this project`,
+        ...(kind === "file" ? { filters: [{ name: "Markdown skill", extensions: ["md"] }] } : {}),
+      });
+      if (typeof selected !== "string") return;
+      if (!workspaceRelativePath(capabilityProjectCwd, selected)) {
+        throw new Error("Choose a skill folder inside the active project");
+      }
+      const selectedName = selected.split(/[\\/]/).filter(Boolean).at(-1) ?? "local skill";
+      const name = kind === "file" ? selectedName.replace(/\.md$/i, "") : selectedName;
+      setManageDialog({ kind: "install-skill", cwd: capabilityProjectCwd, source: selected, name });
     } catch (error) {
       setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function openGitDiff(path: string, targetCwd = workspaceCwd) {
+    if (!targetCwd || !gitStatusCwd || !workspaceRequestMatches(targetCwd, gitStatusCwd)) return;
+    try {
+      const diff = await call("git.diff", { cwd: targetCwd, path }) as { path: string; diff: string };
+      if (workspaceRequestMatches(targetCwd, currentWorkspaceCwd.current)) setGitDiff(diff);
+    } catch (error) {
+      if (workspaceRequestMatches(targetCwd, currentWorkspaceCwd.current)) setDiagnostic(error instanceof Error ? error.message : String(error));
     }
   }
 
   async function changeGitStage(file: GitFile) {
-    if (!workspaceCwd) return;
+    if (!workspaceCwd || !gitStatusCwd || !workspaceRequestMatches(workspaceCwd, gitStatusCwd)) return;
+    const requestedCwd = workspaceCwd;
     setGitBusy(true);
     try {
       const method = file.staged ? "git.unstage" : "git.stage";
-      setGitStatus(await call(method, { cwd: workspaceCwd, paths: [file.path] }) as GitStatus);
-      if (gitDiff?.path === file.path) await openGitDiff(file.path);
+      const status = await call(method, { cwd: requestedCwd, paths: [file.path] }) as GitStatus;
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      setGitStatus(status);
+      setGitStatusCwd(requestedCwd);
+      if (gitDiff?.path === file.path) await openGitDiff(file.path, requestedCwd);
     } catch (error) {
-      setDiagnostic(error instanceof Error ? error.message : String(error));
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setDiagnostic(error instanceof Error ? error.message : String(error));
     } finally {
-      setGitBusy(false);
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitBusy(false);
     }
   }
 
   async function commitGit() {
-    if (!workspaceCwd || !commitMessage.trim()) return;
+    if (!workspaceCwd || !gitStatusCwd || !workspaceRequestMatches(workspaceCwd, gitStatusCwd) || !commitMessage.trim()) return;
+    const requestedCwd = workspaceCwd;
+    const message = commitMessage.trim();
     setGitBusy(true);
     try {
-      const result = await call("git.commit", { cwd: workspaceCwd, message: commitMessage }) as { commit: string; status: GitStatus };
+      const result = await call("git.commit", { cwd: requestedCwd, message }) as { commit: string; status: GitStatus };
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
       setGitStatus(result.status);
+      setGitStatusCwd(requestedCwd);
       setGitDiff(undefined);
       setCommitMessage("");
       setDiagnostic(`Committed ${result.commit}`);
     } catch (error) {
-      setDiagnostic(error instanceof Error ? error.message : String(error));
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setDiagnostic(error instanceof Error ? error.message : String(error));
     } finally {
-      setGitBusy(false);
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitBusy(false);
     }
   }
 
@@ -1153,8 +1478,9 @@ export function App() {
 
   async function installCli() {
     try {
-      setAuth((current) => current ? { ...current, installRunning: true } : current);
-      setAuth(await call("env.installCli") as AuthState);
+      const status = await call("env.installCli") as AuthState;
+      setAuth(status);
+      await openExternalLink(status.installUrl);
     } catch (error) {
       setDiagnostic(error instanceof Error ? error.message : String(error));
     }
@@ -1174,18 +1500,24 @@ export function App() {
 
   async function installUpdate() {
     const update = pendingUpdate.current;
-    if (!update) return;
-    if (workBlocksUpdate) {
+    if (!update || updateInstallInFlight.current) return;
+    if (updateBlocked) {
       setUpdateNotice("Finish or stop active work before updating.");
       return;
     }
+    updateInstallInFlight.current = true;
+    setUpdatePreparing(true);
     setUpdateNotice(undefined);
     let downloaded = 0;
     let total: number | undefined;
+    let prepared = false;
+    let nativeStopAttempted = false;
     const currentVersion = updateStatus.currentVersion;
-    setUpdateStatus({ phase: "downloading", version: update.version, ...(currentVersion ? { currentVersion } : {}), percent: 0 });
     try {
-      await update.downloadAndInstall((event) => {
+      await call("env.prepareUpdate");
+      prepared = true;
+      setUpdateStatus({ phase: "downloading", version: update.version, ...(currentVersion ? { currentVersion } : {}), percent: 0 });
+      await update.download((event) => {
         if (event.event === "Started") total = event.data.contentLength;
         if (event.event === "Progress") downloaded += event.data.chunkLength;
         if (event.event !== "Finished") {
@@ -1193,11 +1525,33 @@ export function App() {
           setUpdateStatus({ phase: "downloading", version: update.version, ...(currentVersion ? { currentVersion } : {}), ...(percent === undefined ? {} : { percent }) });
         }
       });
+      await call("env.confirmUpdate");
       setUpdateStatus({ phase: "installing", version: update.version, ...(currentVersion ? { currentVersion } : {}), percent: 100 });
+      nativeStopAttempted = true;
+      await invoke<boolean>("stop_server_for_update");
+      await update.install();
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
     } catch (error) {
+      if (nativeStopAttempted) {
+        try {
+          const restarted = await invoke<boolean>("recover_server", { force: false });
+          if (restarted) supervisor.current?.retry();
+          else if (prepared) await call("env.cancelUpdate");
+        } catch (recoveryError) {
+          setDiagnostic(`Could not resume work after the update failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`);
+        }
+      } else if (prepared) {
+        try {
+          await call("env.cancelUpdate");
+        } catch (cancelError) {
+          setDiagnostic(`Could not resume work after the update failed: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`);
+        }
+      }
       setUpdateStatus({ phase: "error", version: update.version, message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setUpdatePreparing(false);
+      updateInstallInFlight.current = false;
     }
   }
 
@@ -1311,19 +1665,26 @@ export function App() {
   const runtimeCommands = activeThread?.commands.length ? activeThread.commands : threads.find((thread) => thread.commands.length)?.commands;
   const commandCatalog = useMemo(() => runtimeCommands?.length ? runtimeCommands : fallbackCommands, [runtimeCommands]);
   const nativeCapabilityCommands = useMemo(() => new Set((runtimeCommands ?? []).map((command) => command.name)), [runtimeCommands]);
-  const promptTrigger = useMemo(() => composerTrigger(prompt), [prompt]);
   const commandSuggestions = useMemo(() => {
-    if (promptTrigger?.kind !== "command" && promptTrigger?.kind !== "skill") return [];
+    if (promptTrigger?.kind !== "command") return [];
     const query = promptTrigger.query.toLowerCase();
     return commandCatalog
-      .filter((command) => promptTrigger.kind === "command" || !coreCommandNames.has(command.name))
       .filter((command) => !query || command.name.toLowerCase().includes(query) || command.description.toLowerCase().includes(query))
       .slice(0, 10);
   }, [commandCatalog, promptTrigger]);
+  const skillSuggestions = useMemo(() => promptTrigger?.kind === "skill"
+    ? filterKimiSkills(capabilities?.skills ?? [], promptTrigger.query)
+    : [], [capabilities?.skills, promptTrigger]);
+  const visibleFileSuggestions = promptTrigger?.kind === "file" ? fileSuggestions : [];
+  const suggestionCount = commandSuggestions.length + skillSuggestions.length + visibleFileSuggestions.length;
+  const suggestionsOpen = suggestionCount > 0 && !suggestionsDismissed;
+  const activeSuggestionIndex = Math.min(suggestionIndex, Math.max(0, suggestionCount - 1));
+  const activeSuggestionId = suggestionsOpen ? `composer-suggestion-${activeSuggestionIndex}` : undefined;
+  const suggestionQueryKey = promptTrigger ? `${promptTrigger.prefix}:${promptTrigger.query}` : "";
   const sidebarIconOnly = preferences.sidebarCollapsed || preferences.sidebarWidth < 168;
   const workspaceTools = activeThread ? activeThread.kind === "project" : draftChat ? draftChat.kind === "project" : navView === "projects" && Boolean(cwd);
   const railAvailable = Boolean(activeThread) || workspaceTools;
-  const composerProjectCwd = activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : undefined;
+  const capabilityProjectCwd = capabilityCwd;
   const quotaLeft = quotaPercent(quota);
   const context = activeThread?.usage?.context;
   const contextUsed = contextPercent(activeThread?.usage);
@@ -1334,13 +1695,75 @@ export function App() {
   const railResizeHandle = railView ? <div className="panel-resizer rail-resizer" role="separator" aria-label="Resize side panel" aria-orientation="vertical" aria-valuemin={Math.min(260, effectiveRailWidth(1_200, viewportWidth, layoutSidebarWidth))} aria-valuemax={effectiveRailWidth(1_200, viewportWidth, layoutSidebarWidth)} aria-valuenow={renderedRailWidth} tabIndex={0} onPointerDown={(event) => beginPanelResize("rail", event)} onKeyDown={(event) => resizePanelWithKeyboard("rail", event)} /> : null;
   const railTabs = railView ? <RailTabs current={railView} workspace={workspaceTools} activeAgents={agentRuns.filter((run) => run.status === "running").length} onSelect={setRailView} onClose={() => setRailView(undefined)} /> : null;
 
+  useEffect(() => {
+    setSuggestionIndex(0);
+    setSuggestionsDismissed(false);
+  }, [suggestionQueryKey]);
+
+  useEffect(() => {
+    if (!activeSuggestionId) return;
+    document.getElementById(activeSuggestionId)?.scrollIntoView({ block: "nearest" });
+  }, [activeSuggestionId]);
+
+  function chooseComposerSuggestion(index: number) {
+    if (promptTrigger?.kind === "command") {
+      const command = commandSuggestions[index];
+      if (command) insertCommand(command);
+      return;
+    }
+    if (promptTrigger?.kind === "skill") {
+      const skill = skillSuggestions[index];
+      if (skill) insertSkill(skill);
+      return;
+    }
+    const file = visibleFileSuggestions[index];
+    if (file) insertMention(file);
+  }
+
+  function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (suggestionsOpen) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const key = event.key === "ArrowDown" ? "ArrowDown" : "ArrowUp";
+        setSuggestionIndex((current) => moveSuggestionIndex(current, suggestionCount, key));
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSuggestionsDismissed(true);
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        chooseComposerSuggestion(activeSuggestionIndex);
+        return;
+      }
+    }
+    const mode = promptShortcutMode(event, preferences.sendKey, Boolean(activeThread?.running));
+    if (mode) {
+      submitMode.current = mode;
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  }
+
+  function handleAppMenuTriggerKeyDown(menu: AppMenu, event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (!isAppMenuOpenKey(event.key)) return;
+    event.preventDefault();
+    if (openMenu === menu) {
+      menuBar.current?.querySelector<HTMLElement>(".app-menu.open [role=\"menuitem\"]:not([disabled])")?.focus();
+      return;
+    }
+    setOpenMenu(menu);
+  }
+
   return (
     <main style={shellStyle} className={`shell ${railView ? "rail-open" : ""} ${preferences.sidebarCollapsed ? "sidebar-collapsed" : ""} ${sidebarIconOnly ? "sidebar-icon-only" : ""} sidebar-${preferences.sidebarSide} rail-${preferences.railSide} density-${preferences.density}`}>
       <header className="app-titlebar">
         <div className="titlebar-logo" title="Kimi Code"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div>
         <nav ref={menuBar} className="menu-bar" aria-label="Application menu">
           <div className={`app-menu ${openMenu === "file" ? "open" : ""}`} onPointerEnter={() => { if (openMenu) setOpenMenu("file"); }}>
-            <button className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "file"} onClick={() => setOpenMenu((current) => current === "file" ? undefined : "file")}>File</button>
+            <button ref={(element) => { menuTriggers.current.file = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "file"} onClick={() => setOpenMenu((current) => current === "file" ? undefined : "file")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("file", event)}>File</button>
             {openMenu === "file" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus}>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void createAppWindow(); }}><span>New Window</span><kbd>Ctrl Shift N</kbd></button>
               <button type="button" role="menuitem" disabled={!runtimeReady || (navView === "projects" && !cwd)} onClick={() => { setOpenMenu(undefined); navView === "chats" ? createStandaloneChat() : createThread(cwd); }}><span>New Chat</span><kbd>Ctrl N</kbd></button>
@@ -1352,7 +1775,7 @@ export function App() {
             </div>}
           </div>
           <div className={`app-menu ${openMenu === "edit" ? "open" : ""}`} onPointerEnter={() => { if (openMenu) setOpenMenu("edit"); }}>
-            <button className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "edit"} onPointerDown={(event) => event.preventDefault()} onClick={() => setOpenMenu((current) => current === "edit" ? undefined : "edit")}>Edit</button>
+            <button ref={(element) => { menuTriggers.current.edit = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "edit"} onPointerDown={(event) => event.preventDefault()} onClick={() => setOpenMenu((current) => current === "edit" ? undefined : "edit")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("edit", event)}>Edit</button>
             {openMenu === "edit" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus} onPointerDown={(event) => event.preventDefault()}>
               <button type="button" role="menuitem" onClick={() => void edit("cut")}><span>Cut</span><kbd>Ctrl X</kbd></button>
               <button type="button" role="menuitem" onClick={() => void edit("copy")}><span>Copy</span><kbd>Ctrl C</kbd></button>
@@ -1363,7 +1786,7 @@ export function App() {
             </div>}
           </div>
           <div className={`app-menu ${openMenu === "view" ? "open" : ""}`} onPointerEnter={() => { if (openMenu) setOpenMenu("view"); }}>
-            <button className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "view"} onClick={() => setOpenMenu((current) => current === "view" ? undefined : "view")}>View</button>
+            <button ref={(element) => { menuTriggers.current.view = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "view"} onClick={() => setOpenMenu((current) => current === "view" ? undefined : "view")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("view", event)}>View</button>
             {openMenu === "view" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus}>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setPreferences((current) => ({ ...current, zoom: clampZoom(current.zoom + .1) })); }}><span>Zoom In</span><kbd>Ctrl +</kbd></button>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setPreferences((current) => ({ ...current, zoom: clampZoom(current.zoom - .1) })); }}><span>Zoom Out</span><kbd>Ctrl −</kbd></button>
@@ -1376,7 +1799,7 @@ export function App() {
             </div>}
           </div>
           <div className={`app-menu ${openMenu === "help" ? "open" : ""}`} onPointerEnter={() => { if (openMenu) setOpenMenu("help"); }}>
-            <button className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "help"} onClick={() => setOpenMenu((current) => current === "help" ? undefined : "help")}>Help</button>
+            <button ref={(element) => { menuTriggers.current.help = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "help"} onClick={() => setOpenMenu((current) => current === "help" ? undefined : "help")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("help", event)}>Help</button>
             {openMenu === "help" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus}>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void openExternalLink("https://www.kimi.com/code/docs/en/"); }}>Kimi Code Documentation</button>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void openExternalLink("https://github.com/Leonxlnx/kimi-code-desktop#readme"); }}>Kimi Code Desktop Documentation</button>
@@ -1399,18 +1822,18 @@ export function App() {
         <div className="sidebar-toolbar">
           <button className="toolbar-icon" type="button" aria-label={preferences.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} title={preferences.sidebarCollapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"} onClick={() => setPreferences((current) => ({ ...current, sidebarCollapsed: !current.sidebarCollapsed }))}><SidebarSimple /></button>
           <nav className="view-switch" aria-label="Workspace views">
-            <button className={!capabilityCenterOpen && navView === "projects" ? "active" : ""} type="button" aria-current={!capabilityCenterOpen && navView === "projects" ? "page" : undefined} title="Projects" onClick={() => { setCapabilityCenterOpen(false); setNavView("projects"); }}><FolderSimple /><span>Projects</span></button>
-            <button className={!capabilityCenterOpen && navView === "chats" ? "active" : ""} type="button" aria-current={!capabilityCenterOpen && navView === "chats" ? "page" : undefined} title="Chats" onClick={() => { setCapabilityCenterOpen(false); setNavView("chats"); }}><ChatCircleDots /><span>Chats</span></button>
+            <button className={!capabilityCenterOpen && navView === "projects" ? "active" : ""} type="button" aria-current={!capabilityCenterOpen && navView === "projects" ? "page" : undefined} title="Projects" onClick={() => changeNavView("projects")}><FolderSimple /><span>Projects</span></button>
+            <button className={!capabilityCenterOpen && navView === "chats" ? "active" : ""} type="button" aria-current={!capabilityCenterOpen && navView === "chats" ? "page" : undefined} title="Chats" onClick={() => changeNavView("chats")}><ChatCircleDots /><span>Chats</span></button>
           </nav>
           <button className="toolbar-icon" type="button" aria-label="Search projects and chats" title="Search (Ctrl+K)" onClick={() => setSearchOpen(true)}><MagnifyingGlass /></button>
         </div>
 
-        <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title="Plugins, MCP, and subagents" onClick={() => { setRailView(undefined); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Plugins</strong><small>{capabilities ? `${capabilities.plugins.length} installed · ${capabilities.mcpServers.length} MCP` : "Kimi capabilities"}</small></span><CaretRight /></button>
+        <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title="Skills, MCP, plugins, and subagents" onClick={() => { setRailView(undefined); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Capabilities</strong><small>{capabilities ? `${capabilities.skills.length} skills · ${capabilities.mcpServers.length} MCP` : "Skills, MCP, agents"}</small></span><CaretRight /></button>
 
         <div className="sidebar-body">
           <div className="sidebar-heading"><span>{navView === "projects" ? "Projects" : "Chats"}</span><button type="button" title={navView === "projects" ? "Open folder" : "New chat"} aria-label={navView === "projects" ? "Open folder" : "New chat"} disabled={navView === "chats" && !runtimeReady} onClick={() => navView === "projects" ? void chooseWorkspace() : createStandaloneChat()}>{navView === "projects" ? <FolderOpen /> : <Plus />}</button></div>
           <div className="sidebar-list">
-            {bootstrapping ? <SidebarSkeleton /> : navView === "projects" ? visibleProjects.map((project) => <details className={`project-group ${draggingProject && samePath(draggingProject, project.cwd) ? "dragging" : ""}`} key={project.cwd} open>
+            {bootstrapping ? <SidebarSkeleton /> : navView === "projects" ? visibleProjects.map((project) => <details ref={initializeProjectDetails} className={`project-group ${draggingProject && samePath(draggingProject, project.cwd) ? "dragging" : ""}`} key={project.cwd}>
               <summary className={`project-row ${samePath(project.cwd, cwd) ? "active" : ""}`} title={project.cwd} draggable onDragStart={() => setDraggingProject(project.cwd)} onDragEnd={() => setDraggingProject(undefined)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (draggingProject) reorderProject(draggingProject, project.cwd); setDraggingProject(undefined); }} onContextMenu={(event) => { event.preventDefault(); setItemMenu({ kind: "project", id: project.cwd }); }} onClick={() => { setCapabilityCenterOpen(false); setCwd(project.cwd); rememberWorkspace(project.cwd); setDraftChat(undefined); const first = project.threads[0]; if (first) selectThread(first); else setActiveThreadId(undefined); }}>
                 <CaretRight className="project-caret" size={13} /><FolderSimple size={15} /><span>{project.name}</span>
                 <span className="row-actions">
@@ -1444,7 +1867,7 @@ export function App() {
           {updateNotice && <div className="sidebar-update-note" role="status">{updateNotice}</div>}
           <div className="sidebar-footer-actions">
             <button className={`nav-item settings-link ${settingsOpen ? "active" : ""}`} type="button" title="Settings" onClick={() => { setSettingsCategory("general"); setSettingsOpen(true); }}><GearSix size={17} /><span>Settings</span></button>
-            {showSidebarUpdate(updateStatus.phase) && <button className={`sidebar-update ${updateStatus.phase}`} type="button" aria-label={updateStatus.phase === "available" ? `Install Kimi Code Desktop ${updateStatus.version ?? "update"} and restart` : `${updateStatus.phase === "downloading" ? "Downloading" : "Installing"} Kimi Code Desktop update`} title={updateStatus.phase === "available" ? "Install update & restart" : `${updateStatus.phase === "downloading" ? "Downloading" : "Installing"} update`} disabled={updateStatus.phase !== "available"} onClick={() => void installUpdate()}>{updateStatus.phase === "available" ? <DownloadSimple /> : <ArrowsClockwise />}<span>{updateStatus.phase === "available" ? "Update" : updateStatus.phase === "downloading" && updateStatus.percent !== undefined ? `${updateStatus.percent}%` : "Updating"}</span></button>}
+            {showSidebarUpdate(updateStatus.phase) && <button className={`sidebar-update ${updateStatus.phase}`} type="button" aria-label={updateStatus.phase === "available" ? `Install Kimi Code Desktop ${updateStatus.version ?? "update"} and restart` : `${updateStatus.phase === "downloading" ? "Downloading" : "Installing"} Kimi Code Desktop update`} title={updateStatus.phase === "available" ? "Install update & restart" : `${updateStatus.phase === "downloading" ? "Downloading" : "Installing"} update`} disabled={updatePreparing || updateStatus.phase !== "available"} onClick={() => void installUpdate()}>{updateStatus.phase === "available" ? <DownloadSimple /> : <ArrowsClockwise />}<span>{updatePreparing ? "Preparing" : updateStatus.phase === "available" ? "Update" : updateStatus.phase === "downloading" && updateStatus.percent !== undefined ? `${updateStatus.percent}%` : "Updating"}</span></button>}
           </div>
         </footer>
       </aside>
@@ -1457,38 +1880,50 @@ export function App() {
           </div>
         </header>
 
-        <div className={`timeline ${capabilityCenterOpen ? "capability-timeline" : ""}`}>
-          {bootstrapping ? <StartupScreen delayed={startupDelayed} onRetry={() => void recoverLocalServer()} /> : capabilityCenterOpen ? <CapabilitiesCenter data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onUsePrompt={useCapabilityPrompt} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding && auth ? <Onboarding auth={auth} cwd={cwd} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={() => void call("auth.cancel")} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !auth?.authenticated ? <AuthCard auth={auth} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel")} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
-          {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{turnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={() => { setRailView("git"); void refreshGit(); }} />)}</div>}
+        <div className="timeline-shell">
+          <div ref={timeline} className={`timeline ${capabilityCenterOpen ? "capability-timeline" : ""}`} onScroll={(event) => {
+            const pinned = isNearScrollBottom(event.currentTarget);
+            timelinePinned.current = pinned;
+            setShowJumpToLatest(!pinned && Boolean(activeThread && turnViews.length));
+          }}>
+            {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} canInstallSkill={Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding && auth ? <Onboarding auth={auth} cwd={cwd} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={() => void call("auth.cancel")} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !auth?.authenticated ? <AuthCard auth={auth} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel")} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
+            {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{turnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={() => { setRailView("git"); void refreshGit(); }} />)}</div>}
+          </div>
+          {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}><CaretDown /> Jump to latest</button>}
         </div>
 
-        {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <form className={`composer ${draftSending ? "sending" : activeThread?.running ? "working" : ""}`} onSubmit={send}>
+        {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <form ref={composer} className={`composer ${draftSending ? "sending" : activeThread?.running ? "working" : ""}`} onSubmit={send}>
           {activeThread?.queue.length ? <PromptQueue
             queue={activeThread.queue}
             onClear={() => clearQueuedPrompts(activeThread.threadId)}
             onRemove={(queuedId) => removeQueuedPrompt(activeThread.threadId, queuedId)}
             onUpdate={(queuedId, text) => updateQueuedPrompt(activeThread.threadId, queuedId, text)}
+            steerDisabled={configMutationPending}
             onSteer={(queuedId) => steerQueuedPrompt(activeThread.threadId, queuedId)}
           /> : null}
-          <textarea ref={composerInput} aria-label={activeThread?.running ? "Task prompt. Enter queues. Control Enter steers." : "Task prompt"} title={activeThread?.running ? "Enter to queue · Ctrl+Enter to steer" : undefined} value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={(event) => { const mode = promptShortcutMode(event, preferences.sendKey, Boolean(activeThread?.running)); if (mode) { submitMode.current = mode; event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={activeThread?.running ? "Queue the next instruction (Ctrl+Enter to steer)" : activeThread?.kind === "chat" || draftChat?.kind === "chat" ? "Message Kimi" : activeThread || draftChat ? "Ask Kimi to work in this project" : "Start a chat first"} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending} />
-          {commandSuggestions.length > 0 && <div className="mention-menu command-mention-menu" role="listbox" aria-label={promptTrigger?.kind === "skill" ? "Kimi skills" : "Kimi commands"}>
-            <small>{promptTrigger?.kind === "skill" ? "Skills from Kimi Code" : "Commands from Kimi Code"}</small>
-            {commandSuggestions.map((command) => <button type="button" role="option" aria-selected="false" key={command.name} onClick={() => insertCommand(command)}>{promptTrigger?.kind === "skill" ? <SlidersHorizontal /> : <TerminalWindow />}<span><strong>/{command.name}</strong><small>{command.description}</small></span></button>)}
+          <textarea ref={composerInput} role="combobox" aria-autocomplete="list" aria-controls={suggestionsOpen ? "composer-suggestions" : undefined} aria-expanded={suggestionsOpen} aria-activedescendant={activeSuggestionId} aria-label={activeThread?.running ? "Task prompt. Enter queues. Control Enter steers." : "Task prompt"} title={activeThread?.running ? "Enter to queue · Ctrl+Enter to steer" : undefined} value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={updateMutationsBlocked ? "Updating Kimi Code Desktop…" : !runtimeReady ? "Reconnecting to Kimi runtime…" : activeThread?.running ? "Queue the next instruction (Ctrl+Enter to steer)" : activeThread?.kind === "chat" || draftChat?.kind === "chat" ? "Message Kimi" : activeThread || draftChat ? "Ask Kimi to work in this project" : "Start a chat first"} disabled={!auth?.authenticated || !runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} />
+          {suggestionsOpen && (commandSuggestions.length > 0 || skillSuggestions.length > 0) && <div className="mention-menu command-mention-menu" id="composer-suggestions" role="listbox" aria-label={promptTrigger?.kind === "skill" ? "Installed Kimi skills" : "Kimi commands"}>
+            <small>{promptTrigger?.kind === "skill" ? "Installed skills" : "Commands from Kimi Code"}</small>
+            {promptTrigger?.kind === "skill"
+              ? skillSuggestions.map((skill, index) => <button id={`composer-suggestion-${index}`} type="button" role="option" tabIndex={-1} aria-selected={activeSuggestionIndex === index} key={`${skill.scope}-${skill.source}-${skill.name}`} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSuggestionIndex(index)} onClick={() => insertSkill(skill)}><SlidersHorizontal /><span><strong>${skill.name}</strong><small>{skill.description || `${skill.scope} skill`}</small></span><em>{skill.scope}</em></button>)
+              : commandSuggestions.map((command, index) => <button id={`composer-suggestion-${index}`} type="button" role="option" tabIndex={-1} aria-selected={activeSuggestionIndex === index} key={command.name} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSuggestionIndex(index)} onClick={() => insertCommand(command)}><TerminalWindow /><span><strong>/{command.name}</strong><small>{command.description}</small></span></button>)}
           </div>}
-          {fileSuggestions.length > 0 && <div className="mention-menu" role="listbox" aria-label="Project files">{fileSuggestions.map((file) => <button type="button" role="option" aria-selected="false" key={file} onClick={() => insertMention(file)}><FileText />{file}</button>)}</div>}
+          {suggestionsOpen && visibleFileSuggestions.length > 0 && <div className="mention-menu" id="composer-suggestions" role="listbox" aria-label="Project files">{visibleFileSuggestions.map((file, index) => <button id={`composer-suggestion-${index}`} type="button" role="option" tabIndex={-1} aria-selected={activeSuggestionIndex === index} key={file} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSuggestionIndex(index)} onClick={() => insertMention(file)}><FileText />{file}</button>)}</div>}
           {images.length > 0 && <div className="pending-images">{images.map((image) => <span key={image.name}>{image.name}<button type="button" aria-label={`Remove ${image.name}`} onClick={() => setImages((current) => current.filter((item) => item !== image))}><X /></button></span>)}</div>}
           <div className="composer-footer">
             <div ref={composerTools} className="composer-tools">
               <input ref={fileInput} type="file" accept="image/*" multiple hidden onChange={(event) => void attachImages(event.target.files)} />
-              <button className={`composer-action ${composerMenuOpen ? "active" : ""}`} type="button" title="Add context and Kimi capabilities" aria-label="Add context and Kimi capabilities" aria-haspopup="menu" aria-expanded={composerMenuOpen} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending} onClick={() => setComposerMenuOpen((current) => !current)}><Plus /></button>
-              <button className={`composer-action composer-skill-action ${promptTrigger?.prefix === "/" ? "active" : ""}`} type="button" title="Use a Kimi command (/)" aria-label="Toggle Kimi commands" aria-pressed={promptTrigger?.prefix === "/"} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending} onClick={toggleComposerCommandPicker}>/</button>
+              <button className={`composer-action ${composerMenuOpen ? "active" : ""}`} type="button" title="Add context and Kimi capabilities" aria-label="Add context and Kimi capabilities" aria-haspopup="menu" aria-expanded={composerMenuOpen} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} onClick={() => setComposerMenuOpen((current) => !current)}><Plus /></button>
+              <button className={`composer-action composer-skill-action ${promptTrigger?.prefix === "/" ? "active" : ""}`} type="button" title="Use a Kimi command (/)" aria-label="Toggle Kimi commands" aria-pressed={promptTrigger?.prefix === "/"} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} onClick={toggleComposerCommandPicker}>/</button>
               {composerMenuOpen && <div className="composer-tools-menu" role="menu" onKeyDown={moveMenuFocus}>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void attachWorkspaceFiles()}><Paperclip /><span><strong>Add files…</strong><small>{composerProjectCwd ? "Attach files from this project" : "Available inside a project"}</small></span></button>
                 <button type="button" role="menuitem" onClick={() => { setComposerMenuOpen(false); fileInput.current?.click(); }}><ImageSquare /><span><strong>Add images…</strong><small>Attach up to five images</small></span></button>
                 <span className="composer-menu-separator" role="separator" />
                 <button type="button" role="menuitem" onClick={() => startComposerTrigger("/")}><TerminalWindow /><span><strong>Commands</strong><small>Type / to use Kimi commands</small></span><kbd>/</kbd></button>
                 <button type="button" role="menuitem" onClick={() => startComposerTrigger("$")}><SlidersHorizontal /><span><strong>Skills</strong><small>Type $ to invoke a Kimi skill</small></span><kbd>$</kbd></button>
-                <button type="button" role="menuitem" onClick={() => startComposerCommand("plugins")}><DownloadSimple /><span><strong>Install skills & plugins…</strong><small>Use Kimi's native plugin manager</small></span><kbd>/plugins</kbd></button>
+                <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("folder")}><DownloadSimple /><span><strong>Install skill folder…</strong><small>{composerProjectCwd ? "Copy a skill bundle from this project" : "Available inside a project"}</small></span></button>
+                <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("file")}><FileText /><span><strong>Install skill file…</strong><small>{composerProjectCwd ? "Copy a flat Markdown skill from this project" : "Available inside a project"}</small></span></button>
+                {nativeCapabilityCommands.has("plugins") && <button type="button" role="menuitem" onClick={() => startComposerCommand("plugins")}><PlugsConnected /><span><strong>Plugin manager…</strong><small>Open the manager exposed by this Kimi runtime</small></span><kbd>/plugins</kbd></button>}
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => startComposerCommand("write-goal")}><Hammer /><span><strong>Set workspace goal…</strong><small>Write a persistent goal for this project</small></span><kbd>/write-goal</kbd></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => startComposerTrigger("#")}><FileText /><span><strong>Project files</strong><small>Type # to mention workspace context</small></span><kbd>#</kbd></button>
               </div>}
@@ -1498,8 +1933,8 @@ export function App() {
               </div>
             </div>
             <div className="composer-controls">
-              {(activeThread || draftChat) && <ComposerConfig options={composerOptions} busyId={configUpdating} onChange={changeConfig} />}
-              <button className={`icon-button primary composer-submit ${primaryComposerAction === "stop" ? "composer-stop" : ""}`} type={primaryComposerAction === "stop" ? "button" : "submit"} aria-label={composerPrimaryLabel(primaryComposerAction)} title={composerPrimaryLabel(primaryComposerAction)} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending || (primaryComposerAction !== "stop" && !prompt.trim())} onClick={primaryComposerAction === "stop" && activeThread ? () => stopThread(activeThread.threadId) : undefined}>{primaryComposerAction === "stop" ? <Stop weight="fill" /> : <ArrowUp weight="bold" />}</button>
+              {(activeThread || draftChat) && <ComposerConfig options={composerOptions} busyId={configBusyId} disabled={!runtimeReady || updateMutationsBlocked || configMutationPending} onChange={changeConfig} />}
+              <button className={`icon-button primary composer-submit ${primaryComposerAction === "stop" ? "composer-stop" : ""}`} type={primaryComposerAction === "stop" ? "button" : "submit"} aria-label={composerPrimaryLabel(primaryComposerAction)} title={composerPrimaryLabel(primaryComposerAction)} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked || (primaryComposerAction !== "stop" && (!composerSubmitReady || !prompt.trim()))} onClick={primaryComposerAction === "stop" && activeThread ? () => stopThread(activeThread.threadId) : undefined}>{primaryComposerAction === "stop" ? <Stop weight="fill" /> : <ArrowUp weight="bold" />}</button>
             </div>
           </div>
         </form>}
@@ -1585,7 +2020,7 @@ export function App() {
         quotaError={quotaError}
         quotaLoading={quotaLoading}
         updateStatus={updateStatus}
-        turnRunning={workBlocksUpdate}
+        turnRunning={updateBlocked || updatePreparing}
         onCategory={setSettingsCategory}
         onQuery={setSettingsQuery}
         onPreferences={(patch) => setPreferences((current) => ({ ...current, ...patch }))}
@@ -1600,19 +2035,27 @@ export function App() {
         onShowOnboarding={() => { setShowOnboarding(true); setSettingsOpen(false); setSettingsQuery(""); }}
       />}
       {manageDialog && <ManageItemDialog dialog={manageDialog} onCancel={() => setManageDialog(undefined)} onConfirm={confirmManageAction} />}
-      {yoloConfirm && <YoloConfirmDialog onCancel={() => setYoloConfirm(undefined)} onConfirm={() => {
+      {yoloConfirm && <YoloConfirmDialog busy={yoloConfirm.busy} onCancel={() => setYoloConfirm((pending) => pending?.busy ? pending : undefined)} onConfirm={async () => {
         const pending = yoloConfirm;
+        if (pending.target.key !== currentConfigTargetKey.current || pending.busy) {
+          setYoloConfirm(undefined);
+          return;
+        }
+        setYoloConfirm({ ...pending, busy: true });
+        const success = await setConfig(pending.configId, pending.value, pending.target);
+        if (shouldAcknowledgeYolo(success, pending.target.key, currentConfigTargetKey.current)) {
+          setPreferences((current) => ({ ...current, yoloAcknowledged: true }));
+        }
         setYoloConfirm(undefined);
-        setPreferences((current) => ({ ...current, yoloAcknowledged: true }));
-        void setConfig(pending.configId, pending.value);
       }} />}
       {diagnostics.length > 0 && <div className="app-notice" role="status" aria-live="polite"><WarningCircle /><span>{diagnostics[diagnostics.length - 1]}</span><button type="button" aria-label="Reveal runtime log" title="Reveal runtime log" onClick={() => void openRuntimeLog()}><Bug /></button><button type="button" aria-label="Copy error details" title="Copy error details" onClick={() => void navigator.clipboard.writeText(diagnostics.join("\n"))}><Copy /></button><button type="button" aria-label="Dismiss notification" onClick={() => setDiagnostics([])}><X /></button></div>}
     </main>
   );
 }
 
-function PromptQueue({ queue, onClear, onRemove, onUpdate, onSteer }: {
+function PromptQueue({ queue, steerDisabled = false, onClear, onRemove, onUpdate, onSteer }: {
   queue: QueuedPrompt[];
+  steerDisabled?: boolean;
   onClear: () => void;
   onRemove: (queuedId: string) => void;
   onUpdate: (queuedId: string, text: string) => void;
@@ -1643,7 +2086,7 @@ function PromptQueue({ queue, onClear, onRemove, onUpdate, onSteer }: {
         <span><b>{queued.mode === "steer" ? "Steer" : `Next ${index + 1}`}</b><span title={queued.text}>{queued.text}</span></span>
         <div className="queued-prompt-actions">
           <button type="button" onClick={() => setEditing({ queuedId: queued.queuedId, text: queued.text })}><PencilSimple /> Edit</button>
-          <button type="button" onClick={() => onSteer(queued.queuedId)}>Steer</button>
+          <button type="button" disabled={steerDisabled} onClick={() => onSteer(queued.queuedId)}>Steer</button>
           <button className="queued-remove" type="button" aria-label={`Remove queued prompt: ${queued.text}`} onClick={() => onRemove(queued.queuedId)}><X /></button>
         </div>
       </div>)}
@@ -1751,6 +2194,8 @@ function ManageItemDialog({ dialog, onCancel, onConfirm }: { dialog: ManageDialo
           ? { title: `Remove “${dialog.name}”?`, description: "This hides the resumable session in Kimi Code Desktop. Its official Kimi history stays untouched.", action: "Remove" }
         : dialog.kind === "delete-project-chats"
           ? { title: `Delete chats in ${dialog.name}?`, description: `This removes ${dialog.threadIds.length} local chat${dialog.threadIds.length === 1 ? "" : "s"}. Project files are never deleted.`, action: "Delete chats" }
+        : dialog.kind === "install-skill"
+          ? { title: `Install “${dialog.name}”?`, description: "Kimi Code Desktop will copy this project-local skill into your user Kimi skills folder. Existing skills are never overwritten.", action: "Install skill" }
           : { title: `Delete “${dialog.name}”?`, description: "This removes the local chat history from the desktop harness. Project files stay untouched.", action: "Delete chat" };
   useEffect(() => {
     const close = (event: KeyboardEvent) => {
@@ -1763,7 +2208,7 @@ function ManageItemDialog({ dialog, onCancel, onConfirm }: { dialog: ManageDialo
     <form className="manage-dialog" role="dialog" aria-modal="true" aria-labelledby="manage-title" onKeyDown={trapDialogFocus} onSubmit={(event) => { event.preventDefault(); setBusy(true); void Promise.resolve(onConfirm(renaming ? value : undefined)).finally(() => setBusy(false)); }}>
       <header><span><strong id="manage-title">{copy.title}</strong><small>{copy.description}</small></span><button type="button" aria-label="Close" disabled={busy} onClick={onCancel}><X /></button></header>
       {renaming && <label><span>Name</span><input autoFocus value={value} maxLength={120} onChange={(event) => setValue(event.target.value)} onFocus={(event) => event.currentTarget.select()} /></label>}
-      <footer><button className="secondary" type="button" disabled={busy} onClick={onCancel}>Cancel</button><button className={renaming || dialog.kind === "remove-project" || dialog.kind === "remove-runtime-session" ? "primary" : "danger"} type="submit" disabled={busy || (renaming && !value.trim())}>{busy ? "Working…" : copy.action}</button></footer>
+      <footer><button className="secondary" type="button" disabled={busy} onClick={onCancel}>Cancel</button><button className={renaming || dialog.kind === "remove-project" || dialog.kind === "remove-runtime-session" || dialog.kind === "install-skill" ? "primary" : "danger"} type="submit" disabled={busy || (renaming && !value.trim())}>{busy ? "Working…" : copy.action}</button></footer>
     </form>
   </div>;
 }
@@ -1780,7 +2225,7 @@ type ComposerControl = {
   choices: Array<{ value: string; name: string; description?: string; danger?: boolean }>;
 };
 
-export function ComposerConfig({ options, busyId, onChange }: { options: ConfigOption[]; busyId?: string | undefined; onChange: (configId: string, value: string) => void }) {
+export function ComposerConfig({ options, busyId, disabled = false, onChange }: { options: ConfigOption[]; busyId?: string | undefined; disabled?: boolean; onChange: (configId: string, value: string) => void }) {
   const [openId, setOpenId] = useState<string>();
   const model = options.find(isModelOption);
   const thinking = options.find(isThinkingOption);
@@ -1828,7 +2273,7 @@ export function ComposerConfig({ options, busyId, onChange }: { options: ConfigO
   }
   if (!controls.length) return null;
   return <div className="composer-configs">
-    {controls.map((control) => <ConfigControl control={{ ...control, disabled: control.disabled || Boolean(busyId) }} key={control.id} open={openId === control.id} onToggle={() => setOpenId((current) => current === control.id ? undefined : control.id)} onClose={() => setOpenId(undefined)} onPick={(value) => { onChange(control.id, value); setOpenId(undefined); }} />)}
+    {controls.map((control) => <ConfigControl control={{ ...control, disabled: control.disabled || disabled || Boolean(busyId) }} key={control.id} open={openId === control.id} onToggle={() => setOpenId((current) => current === control.id ? undefined : control.id)} onClose={() => setOpenId(undefined)} onPick={(value) => { onChange(control.id, value); setOpenId(undefined); }} />)}
   </div>;
 }
 
@@ -1903,7 +2348,7 @@ function ConfigControl({ control, open, onToggle, onClose, onPick }: { control: 
   </>;
 }
 
-function YoloConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
+function YoloConfirmDialog({ busy, onConfirm, onCancel }: { busy: boolean; onConfirm: () => void; onCancel: () => void }) {
   useEffect(() => {
     const close = (event: KeyboardEvent) => {
       if (event.key === "Escape") onCancel();
@@ -1913,17 +2358,15 @@ function YoloConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; onC
   }, [onCancel]);
   return <div className="manage-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
     <div className="manage-dialog" role="alertdialog" aria-modal="true" aria-labelledby="yolo-title" aria-describedby="yolo-description" onKeyDown={trapDialogFocus}>
-      <header><span><strong id="yolo-title">Enable YOLO mode?</strong><small id="yolo-description">Kimi will run every tool and command without asking first. Enable this only for workspaces you fully trust. You will not be asked again.</small></span><button type="button" aria-label="Close" onClick={onCancel}><X /></button></header>
-      <footer><button className="secondary" type="button" onClick={onCancel}>Cancel</button><button className="danger" type="button" autoFocus onClick={onConfirm}>Enable YOLO</button></footer>
+      <header><span><strong id="yolo-title">Enable YOLO mode?</strong><small id="yolo-description">Kimi will run every tool and command without asking first. Enable this only for workspaces you fully trust. You will not be asked again.</small></span><button type="button" aria-label="Close" disabled={busy} onClick={onCancel}><X /></button></header>
+      <footer><button className="secondary" type="button" disabled={busy} onClick={onCancel}>Cancel</button><button className="danger" type="button" autoFocus disabled={busy} onClick={onConfirm}>{busy ? "Enabling…" : "Enable YOLO"}</button></footer>
     </div>
   </div>;
 }
 
-export function thinkingEffortLabel(model?: ConfigOption, thinking?: ConfigOption): string {
-  const modelName = model ? currentChoiceName(model) : "";
+export function thinkingEffortLabel(_model?: ConfigOption, thinking?: ConfigOption): string {
   const current = thinking ? currentChoiceName(thinking) : "";
   if (current && !/^(?:thinking[ -]?)?(?:on|off|enabled|disabled|true|false|1|0)$/i.test(current)) return current;
-  if (/\bk3\b/i.test(modelName) && /^(true|on|enabled|1)$/i.test(String(thinking?.currentValue ?? "on"))) return "Max";
   return /^(false|off|disabled|0)$/i.test(String(thinking?.currentValue ?? "")) ? "Off" : "Default";
 }
 
@@ -2053,7 +2496,7 @@ function SettingsDialog({ category, query, preferences, auth, cwd, quota, quotaE
               <section className="settings-group"><h2>Sizing</h2><SettingsRow title="Sidebar width" description="Drag the divider in the workspace or adjust it here."><label className="settings-range"><input type="range" min="84" max="420" step="4" value={preferences.sidebarWidth} onChange={(event) => onPreferences({ sidebarCollapsed: false, sidebarWidth: clampPanelWidth("sidebar", Number(event.target.value)) })} /><output>{preferences.sidebarWidth}px</output></label></SettingsRow><SettingsRow title="Work panel width" description="Applies to every work-panel tab, including desktop preview."><label className="settings-range"><input type="range" min="260" max="1200" step="4" value={preferences.railWidth} onChange={(event) => onPreferences({ railWidth: clampPanelWidth("rail", Number(event.target.value)) })} /><output>{preferences.railWidth}px</output></label></SettingsRow><SettingsRow title="Restore layout" description="Return panels to their balanced default positions and sizes."><button className="secondary" type="button" onClick={() => onPreferences({ sidebarCollapsed: false, sidebarSide: "left", railSide: "right", sidebarWidth: defaultPreferences.sidebarWidth, railWidth: defaultPreferences.railWidth })}><ArrowsClockwise /> Reset panels</button></SettingsRow></section>
             </>}
 
-            {category === "account" && <section className="settings-group"><h2>Kimi account</h2><div className="account-card"><UserCircle /><div><strong>{auth?.authenticated ? "Kimi account connected" : "Not signed in"}</strong><small>{auth?.installed ? "Official Kimi Code CLI detected" : "Kimi Code CLI is not installed"}</small></div></div><code className="account-home">{auth?.home ?? "Loading local Kimi home…"}</code><p className="settings-note">The app uses each person's own local Kimi login and subscription. Credentials never enter this repository.</p>{auth?.authenticated ? <button className="secondary danger-text" type="button" disabled={auth.loginRunning || auth.installRunning} onClick={() => void onLogout()}><SignOut /> Log out</button> : auth?.installed ? <button className="primary" type="button" disabled={auth.loginRunning} onClick={() => void onLogin()}><SignIn /> Sign in</button> : <button className="primary" type="button" disabled={auth?.installRunning} onClick={() => void onInstallCli()}><DownloadSimple /> Install Kimi CLI</button>}</section>}
+            {category === "account" && <section className="settings-group"><h2>Kimi account</h2><div className="account-card"><UserCircle /><div><strong>{auth?.authenticated ? "Kimi account connected" : "Not signed in"}</strong><small>{auth?.installed ? "Official Kimi Code CLI detected" : "Kimi Code CLI is not installed"}</small></div></div><code className="account-home">{auth?.home ?? "Loading local Kimi home…"}</code><p className="settings-note">The app uses each person's own local Kimi login and subscription. Credentials never enter this repository.</p>{auth?.authenticated ? <button className="secondary danger-text" type="button" disabled={auth.loginRunning || auth.installRunning} onClick={() => void onLogout()}><SignOut /> Log out</button> : auth?.installed ? <button className="primary" type="button" disabled={auth.loginRunning} onClick={() => void onLogin()}><SignIn /> Sign in</button> : <button className="primary" type="button" onClick={() => void onInstallCli()}><DownloadSimple /> Open guide / check again</button>}</section>}
 
             {category === "usage" && <div className="settings-usage"><UsagePanel quota={quota} error={quotaError} loading={quotaLoading} onRefresh={onRefreshQuota} /><p className="settings-note">Subscription limits come from the official local Kimi CLI <code>/usage</code> panel and refresh on focus and every minute. New official limit windows appear automatically.</p></div>}
 
@@ -2090,51 +2533,59 @@ function settingsDescription(category: SettingsCategory): string {
 function RailTabs({ current, workspace, activeAgents, onSelect, onClose }: { current: RailView; workspace: boolean; activeAgents: number; onSelect: (view: RailView) => void; onClose: () => void }) {
   return <nav className="rail-tabs" aria-label="Side panel tabs">
     <div>
-      {workspace && <button className={current === "git" ? "active" : ""} type="button" aria-current={current === "git" ? "page" : undefined} onClick={() => onSelect("git")}><GitBranch /><span>Changes</span></button>}
-      {workspace && <button className={current === "terminal" ? "active" : ""} type="button" aria-current={current === "terminal" ? "page" : undefined} onClick={() => onSelect("terminal")}><TerminalWindow /><span>Terminal</span></button>}
-      {workspace && <button className={current === "preview" ? "active" : ""} type="button" aria-current={current === "preview" ? "page" : undefined} onClick={() => onSelect("preview")}><Browser /><span>Preview</span></button>}
-      <button className={current === "agents" ? "active" : ""} type="button" aria-current={current === "agents" ? "page" : undefined} onClick={() => onSelect("agents")}><Robot /><span>Agents</span>{activeAgents > 0 && <small className="rail-agent-count">{activeAgents}</small>}</button>
+      {workspace && <button className={current === "git" ? "active" : ""} type="button" title="Changes" aria-label="Changes" aria-current={current === "git" ? "page" : undefined} onClick={() => onSelect("git")}><GitBranch /><span>Changes</span></button>}
+      {workspace && <button className={current === "terminal" ? "active" : ""} type="button" title="Terminal" aria-label="Terminal" aria-current={current === "terminal" ? "page" : undefined} onClick={() => onSelect("terminal")}><TerminalWindow /><span>Terminal</span></button>}
+      {workspace && <button className={current === "preview" ? "active" : ""} type="button" title="Preview" aria-label="Preview" aria-current={current === "preview" ? "page" : undefined} onClick={() => onSelect("preview")}><Browser /><span>Preview</span></button>}
+      <button className={current === "agents" ? "active" : ""} type="button" title="Agents" aria-label={activeAgents > 0 ? `Agents, ${activeAgents} active` : "Agents"} aria-current={current === "agents" ? "page" : undefined} onClick={() => onSelect("agents")}><Robot /><span>Agents</span>{activeAgents > 0 && <small className="rail-agent-count">{activeAgents}</small>}</button>
     </div>
     <button className="rail-tabs-close" type="button" aria-label="Close side panel" onClick={onClose}><X /></button>
   </nav>;
 }
 
-function CapabilitiesCenter({ data, loading, tab, nativePlugins, nativeMcp, onTab, onRefresh, onUsePrompt, onCopyPath }: {
+function CapabilitiesCenter({ data, loading, tab, nativePlugins, nativeMcp, canInstallSkill, onTab, onRefresh, onInstallSkill, onUseSkill, onUsePrompt, onCopyPath }: {
   data: KimiCapabilities | undefined;
   loading: boolean;
   tab: CapabilityTab;
   nativePlugins: boolean;
   nativeMcp: boolean;
+  canInstallSkill: boolean;
   onTab: (tab: CapabilityTab) => void;
   onRefresh: () => Promise<void>;
+  onInstallSkill: (kind?: "folder" | "file") => Promise<void>;
+  onUseSkill: (name: string) => void;
   onUsePrompt: (text: string) => void;
   onCopyPath: (path: string) => void;
 }) {
-  const count = tab === "plugins" ? data?.plugins.length : tab === "mcp" ? data?.mcpServers.length : data?.agents.length;
+  const count = tab === "skills" ? data?.skills.length : tab === "plugins" ? data?.plugins.length : tab === "mcp" ? data?.mcpServers.length : data?.agents.length;
+  const path = tab === "skills" ? data?.roots.skills : tab === "mcp" ? data?.roots.mcp : tab === "plugins" ? data?.roots.plugins : undefined;
   return <section className="capabilities-center" aria-label="Kimi capabilities">
     <header className="capabilities-hero">
       <div className="capabilities-mark"><PlugsConnected /></div>
-      <div><span>Extend Kimi</span><h1>Plugins, tools, and focused agents.</h1><p>Everything here comes from your official local Kimi installation. The desktop app never copies credentials or invents a second plugin runtime.</p></div>
+      <div><span>Extend Kimi</span><h1>Skills, tools, and focused agents.</h1><p>Everything here is read from your local Kimi installation and active project. The desktop app never copies credentials or invents a second capability runtime.</p></div>
       <button className="capabilities-refresh" type="button" disabled={loading} onClick={() => void onRefresh()}><ArrowsClockwise className={loading ? "rotating" : ""} /><span>{loading ? "Refreshing" : "Refresh"}</span></button>
     </header>
     <nav className="capabilities-tabs" aria-label="Capability categories">
-      <button className={tab === "plugins" ? "active" : ""} type="button" onClick={() => onTab("plugins")}><PlugsConnected /><span>Plugins</span><small>{data?.plugins.length ?? 0}</small></button>
+      <button className={tab === "skills" ? "active" : ""} type="button" onClick={() => onTab("skills")}><SlidersHorizontal /><span>Skills</span><small>{data?.skills.length ?? 0}</small></button>
       <button className={tab === "mcp" ? "active" : ""} type="button" onClick={() => onTab("mcp")}><Cpu /><span>MCP servers</span><small>{data?.mcpServers.length ?? 0}</small></button>
       <button className={tab === "agents" ? "active" : ""} type="button" onClick={() => onTab("agents")}><Robot /><span>Subagents</span><small>{data?.agents.length ?? 3}</small></button>
+      <button className={tab === "plugins" ? "active" : ""} type="button" onClick={() => onTab("plugins")}><PlugsConnected /><span>Plugins</span><small>{data?.plugins.length ?? 0}</small></button>
     </nav>
     <div className="capabilities-content" key={tab}>
-      <div className="capabilities-section-title"><div><strong>{tab === "plugins" ? "Installed plugins" : tab === "mcp" ? "Configured tool servers" : "Kimi-native agent shortcuts"}</strong><span>{count ?? 0} {tab === "agents" ? "shortcuts" : "configured"}</span></div>{tab === "plugins" ? <button type="button" onClick={() => onUsePrompt(nativePlugins ? "/plugins " : "Help me install or manage a Kimi Code plugin using the capabilities available in this Kimi version. ")}><Plus /> Install with Kimi</button> : tab === "mcp" ? <button type="button" onClick={() => onUsePrompt(nativeMcp ? "/mcp-config " : "Help me configure an MCP server for Kimi Code using the capabilities available in this Kimi version. ")}><Plus /> Configure MCP</button> : null}</div>
-      {loading && !data ? <CapabilitySkeleton /> : tab === "plugins" ? <div className="capability-grid">
-        {data?.plugins.map((plugin) => <article className="capability-card" key={plugin.name}><span className="capability-icon"><PlugsConnected /></span><div><strong>{plugin.name}</strong><small>v{plugin.version} · {plugin.toolCount} {plugin.toolCount === 1 ? "tool" : "tools"}</small><p>{plugin.description || "Local Kimi plugin"}</p></div><button type="button" onClick={() => onUsePrompt(nativePlugins ? `/plugins ${plugin.name} ` : `Help me inspect and manage the installed Kimi plugin ${plugin.name}. `)}>Manage</button></article>)}
-        {!data?.plugins.length && <CapabilityEmpty icon={<PlugsConnected />} title="No plugins installed yet" text={nativePlugins ? "Install a Kimi plugin from a folder, ZIP URL, or Git repository through Kimi's native manager." : "This Kimi runtime has not exposed its native plugin manager in the current session. Kimi can still inspect the installed version and guide a compatible setup."} action={nativePlugins ? "Open plugin manager" : "Ask Kimi"} onAction={() => onUsePrompt(nativePlugins ? "/plugins " : "Check my installed Kimi Code version and help me enable or install compatible plugins. ")} />}
+      <div className="capabilities-section-title"><div><strong>{tab === "skills" ? "Available skills" : tab === "plugins" ? "Detected plugins" : tab === "mcp" ? "Configured tool servers" : "Kimi-native agent shortcuts"}</strong><span>{count ?? 0} {tab === "agents" ? "shortcuts" : tab === "skills" ? "available" : "configured"}</span></div>{tab === "skills" ? <span className="capabilities-title-actions"><button type="button" disabled={!canInstallSkill} title={canInstallSkill ? "Install a skill bundle from this project" : "Open a project to install a skill"} onClick={() => void onInstallSkill("folder")}><Plus /> Skill folder</button><button type="button" disabled={!canInstallSkill} title={canInstallSkill ? "Install a flat Markdown skill from this project" : "Open a project to install a skill"} onClick={() => void onInstallSkill("file")}><FileText /> Skill file</button></span> : tab === "plugins" && nativePlugins ? <button type="button" onClick={() => onUsePrompt("/plugins ")}><Plus /> Open plugin manager</button> : tab === "mcp" ? <button type="button" onClick={() => onUsePrompt(nativeMcp ? "/mcp-config " : "Help me configure an MCP server for Kimi Code using the capabilities available in this Kimi version. ")}><Plus /> Configure MCP</button> : null}</div>
+      {loading && !data ? <CapabilitySkeleton /> : tab === "skills" ? <div className="capability-grid">
+        {data?.skills.map((skill) => <article className="capability-card" key={`${skill.scope}-${skill.source}-${skill.name}`}><span className="capability-icon"><SlidersHorizontal /></span><div><strong>{skill.name}</strong><small>{skill.scope} · {skill.source === "kimi" ? "Kimi" : "Agents"}{skill.hasSubSkills ? " · sub-skills" : ""}</small><p>{skill.description || "Local Kimi skill"}</p></div><button type="button" onClick={() => onUseSkill(skill.name)}>Use</button></article>)}
+        {!data?.skills.length && <CapabilityEmpty icon={<SlidersHorizontal />} title="No skills found" text="Kimi discovers skills from your user folders and the active project's .kimi-code or .agents directory." {...(canInstallSkill ? { action: "Install skill folder", onAction: () => onInstallSkill("folder") } : {})} />}
+      </div> : tab === "plugins" ? <div className="capability-grid">
+        {data?.plugins.map((plugin) => <article className="capability-card" key={plugin.name}><span className="capability-icon"><PlugsConnected /></span><div><strong>{plugin.name}</strong><small>v{plugin.version} · {plugin.toolCount} {plugin.toolCount === 1 ? "tool" : "tools"}</small><p>{plugin.description || "Local Kimi plugin"}</p></div>{nativePlugins ? <button type="button" onClick={() => onUsePrompt(`/plugins ${plugin.name} `)}>Manage</button> : <span className="capability-badge">Detected locally</span>}</article>)}
+        {!data?.plugins.length && <CapabilityEmpty icon={<PlugsConnected />} title="No plugins detected" text={nativePlugins ? "This Kimi runtime exposes its plugin manager, but no local plugin manifests were found." : "Your current Kimi runtime does not advertise a plugin command. The desktop app will not create a fake plugin flow."} {...(nativePlugins ? { action: "Open plugin manager", onAction: () => onUsePrompt("/plugins ") } : {})} />}
       </div> : tab === "mcp" ? <div className="capability-list">
-        {data?.mcpServers.map((server) => <article className="mcp-row" key={server.name}><span className={`mcp-status ${server.connectable ? "ready" : "attention"}`} /><div><strong>{server.name}</strong><small>{server.transport.toUpperCase()} · {server.target}</small></div>{!server.connectable && <span className="capability-badge">{server.needsAuthorization ? "OAuth" : "Unsupported"}</span>}<button type="button" onClick={() => onUsePrompt(nativeMcp ? "/mcp " : `Check the configured MCP server ${server.name} and report its available tools. `)}>Check</button></article>)}
+        {data?.mcpServers.map((server) => <article className="mcp-row" key={server.name}><span className={`mcp-status ${server.connectable ? "ready" : "attention"}`} /><div><strong>{server.name}</strong><small>{server.transport.toUpperCase()} · {server.target}</small></div>{!server.connectable && <span className="capability-badge">{server.projectScoped ? "Review only" : server.needsAuthorization ? "OAuth" : "Unsupported"}</span>}{!server.projectScoped && <button type="button" onClick={() => onUsePrompt(nativeMcp ? "/mcp " : `Check the configured MCP server ${server.name} and report its available tools. `)}>Check</button>}</article>)}
         {!data?.mcpServers.length && <CapabilityEmpty icon={<Cpu />} title="No MCP servers configured" text={nativeMcp ? "Connect Kimi to APIs, databases, and local tools using its standard MCP configuration." : "This Kimi runtime has not exposed MCP configuration commands in the current session. Ask Kimi to use the configuration supported by your installed version."} action={nativeMcp ? "Configure MCP" : "Ask Kimi"} onAction={() => onUsePrompt(nativeMcp ? "/mcp-config " : "Check my installed Kimi Code version and help me configure a compatible MCP server. ")} />}
       </div> : <div className="agent-grid">
         {(data?.agents ?? defaultAgentCapabilities()).map((agent) => <article className={`agent-card agent-${agent.name}`} key={agent.name}><div className="agent-card-top"><span><Robot /></span><small>{agent.supportsBackground ? "Foreground or background" : "Foreground"}</small></div><h2>{agent.name}</h2><p>{agent.description}</p><footer><span>{agent.access}</span><button type="button" onClick={() => onUsePrompt(`Use the ${agent.name} subagent for this task: `)}>Use agent <CaretRight /></button></footer></article>)}
       </div>}
       {data?.warnings.length ? <div className="capability-warning"><WarningCircle /><span>{data.warnings.join(" ")}</span></div> : null}
-      {data && <footer className="capabilities-paths"><span>Local Kimi data</span><button type="button" title={tab === "mcp" ? data.roots.mcp : data.roots.plugins} onClick={() => onCopyPath(tab === "mcp" ? data.roots.mcp : data.roots.plugins)}><Copy /> Copy {tab === "mcp" ? "config" : "plugin folder"} path</button></footer>}
+      {path && <footer className="capabilities-paths"><span>Local Kimi data</span><button type="button" title={path} onClick={() => onCopyPath(path)}><Copy /> Copy {tab === "mcp" ? "config" : `${tab.slice(0, -1)} folder`} path</button></footer>}
     </div>
   </section>;
 }
@@ -2143,15 +2594,15 @@ function CapabilitySkeleton() {
   return <div className="capability-skeleton" aria-label="Loading Kimi capabilities" aria-busy="true"><span /><span /><span /></div>;
 }
 
-function CapabilityEmpty({ icon, title, text, action, onAction }: { icon: React.ReactNode; title: string; text: string; action: string; onAction: () => void }) {
-  return <div className="capability-empty"><span>{icon}</span><strong>{title}</strong><p>{text}</p><button type="button" onClick={onAction}>{action}</button></div>;
+function CapabilityEmpty({ icon, title, text, action, onAction }: { icon: React.ReactNode; title: string; text: string; action?: string; onAction?: () => void | Promise<void> }) {
+  return <div className="capability-empty"><span>{icon}</span><strong>{title}</strong><p>{text}</p>{action && onAction && <button type="button" onClick={() => void onAction()}>{action}</button>}</div>;
 }
 
 function SubagentsRail({ runs, onUseAgent, onOpenCenter }: { runs: SubagentRun[]; onUseAgent: (agent: string) => void; onOpenCenter: () => void }) {
   const active = runs.filter((run) => run.status === "running").length;
   return <section className="agents-rail-content">
     <header><div><span>{active ? `${active} active` : "Kimi subagents"}</span><strong>Focused work, separate context.</strong></div><button type="button" onClick={onOpenCenter}>Browse agents</button></header>
-    {runs.length ? <div className="agent-run-list">{runs.map((run) => <article className={`agent-run ${run.status}`} key={run.id}><span className="agent-run-state">{run.status === "running" ? <i /> : run.status === "completed" ? <Check /> : <WarningCircle />}</span><div><strong>{run.description}</strong><small><b>{run.type}</b>{run.background ? " · background" : " · foreground"}{run.agentId ? ` · ${run.agentId}` : ""}</small></div><span>{run.status}</span></article>)}</div> : <div className="agents-empty"><Robot /><strong>No subagents in this chat</strong><p>Ask Kimi to delegate exploration, planning, or implementation without filling the main context.</p><div><button type="button" onClick={() => onUseAgent("explore")}>Explore</button><button type="button" onClick={() => onUseAgent("plan")}>Plan</button><button type="button" onClick={() => onUseAgent("coder")}>Code</button></div></div>}
+    {runs.length ? <div className="agent-run-list">{runs.map((run) => <article className={`agent-run ${run.status}`} key={run.id}><span className="agent-run-state">{run.status === "running" ? <i /> : run.status === "completed" ? <Check /> : <WarningCircle />}</span><div><strong>{run.description}</strong><small><b>{run.type}</b>{run.background ? " · background" : " · foreground"}{run.agentId ? ` · ${run.agentId}` : ""}</small></div><span>{run.detail ?? run.status}</span></article>)}</div> : <div className="agents-empty"><Robot /><strong>No subagents in this chat</strong><p>Ask Kimi to delegate exploration, planning, or implementation without filling the main context.</p><div><button type="button" onClick={() => onUseAgent("explore")}>Explore</button><button type="button" onClick={() => onUseAgent("plan")}>Plan</button><button type="button" onClick={() => onUseAgent("coder")}>Code</button></div></div>}
   </section>;
 }
 
@@ -2162,7 +2613,7 @@ function Onboarding({ auth, cwd, onInstall, onLogin, onOpenUrl, onChooseWorkspac
   return <section className="onboarding">
     <header><div className="onboarding-mark"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div><div><span>Welcome</span><h1>Your Kimi plan, in a focused desktop workspace.</h1><p>Kimi Code Desktop wraps the official CLI. Your login, quota, files, and sessions stay on this Windows account.</p></div></header>
     <ol className="setup-steps">
-      <li className={auth.installed ? "complete" : ""}><span>{auth.installed ? <Check /> : "1"}</span><div><strong>Install Kimi Code CLI</strong><p>{auth.installed ? "Found the local Kimi CLI." : "Runs Kimi's official Windows installer."}</p>{!auth.installed && <button className="primary" type="button" disabled={auth.installRunning} onClick={() => void onInstall()}><DownloadSimple />{auth.installRunning ? "Installing…" : "Install Kimi CLI"}</button>}</div></li>
+      <li className={auth.installed ? "complete" : ""}><span>{auth.installed ? <Check /> : "1"}</span><div><strong>Install Kimi Code CLI</strong><p>{auth.installed ? "Found the local Kimi CLI." : "Open Kimi's official instructions. The app does not download or run install scripts."}</p>{!auth.installed && <button className="primary" type="button" onClick={() => void onInstall()}><DownloadSimple />Open install guide</button>}</div></li>
       <li className={auth.authenticated ? "complete" : ""}><span>{auth.authenticated ? <Check /> : "2"}</span><div><strong>Connect your Kimi account</strong><p>{auth.authenticated ? "Your local Kimi account is connected." : "Kimi opens a device-code flow for your own subscription."}</p>{!auth.authenticated && auth.installed && <div className="auth-actions"><button className="primary" type="button" disabled={auth.loginRunning} onClick={() => void onLogin()}><SignIn />{auth.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button>{auth.loginRunning && <button className="secondary" type="button" onClick={onCancel}>Cancel</button>}</div>}{auth.event?.operation === "login" && auth.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(auth.event!.url!)}>Open Kimi verification</button>}{auth.event?.operation === "login" && auth.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(auth.event?.code ?? "")}><Copy />{auth.event.code}</button>}</div></li>
       <li className={cwd ? "complete" : ""}><span>{cwd ? <Check /> : "3"}</span><div><strong>Choose a workspace</strong><p>{cwd || "Pick the folder Kimi is allowed to work in."}</p><button className="secondary" type="button" onClick={() => void onChooseWorkspace()}><FolderOpen />{cwd ? "Change folder" : "Choose folder"}</button></div></li>
     </ol>
@@ -2174,25 +2625,44 @@ function AuthCard({ auth, onInstall, onLogin, onOpenUrl, onCancel }: {
   auth: AuthState | undefined; onInstall: () => Promise<void>; onLogin: () => Promise<void>; onOpenUrl: (url: string) => Promise<void>; onCancel: () => void;
 }) {
   if (!auth) return <section className="auth-card" aria-live="polite"><ArrowsClockwise size={24} /><div><h1>Starting Kimi Code</h1><p>Checking the local CLI and account…</p></div></section>;
-  return <section className="auth-card"><SignIn size={24} /><div><h1>{auth?.installed ? "Connect Kimi Code" : "Install Kimi Code CLI"}</h1><p>{auth?.installed ? "Sign in with your own Kimi plan. Credentials stay in your local Kimi Code home." : "The desktop app needs Kimi's official CLI. Installation uses Kimi's published Windows script."}</p>{auth?.event?.operation === "login" && auth.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(auth.event!.url!)}>Open Kimi verification</button>}{auth?.event?.operation === "login" && auth.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(auth.event?.code ?? "")}><Copy />{auth.event.code}</button>}<div className="auth-actions">{auth?.installed ? <button className="primary" type="button" disabled={auth.loginRunning} onClick={() => void onLogin()}>{auth.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button> : <button className="primary" type="button" disabled={auth?.installRunning} onClick={() => void onInstall()}>{auth?.installRunning ? "Installing…" : "Install Kimi CLI"}</button>}{(auth?.loginRunning || auth?.installRunning) && <button className="secondary" type="button" onClick={onCancel}>Cancel</button>}</div></div></section>;
+  return <section className="auth-card"><SignIn size={24} /><div><h1>{auth?.installed ? "Connect Kimi Code" : "Install Kimi Code CLI"}</h1><p>{auth?.installed ? "Sign in with your own Kimi plan. Credentials stay in your local Kimi Code home." : "The desktop app needs Kimi's official CLI. Open the official install guide, then return here when installation is complete."}</p>{auth?.event?.operation === "login" && auth.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(auth.event!.url!)}>Open Kimi verification</button>}{auth?.event?.operation === "login" && auth.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(auth.event?.code ?? "")}><Copy />{auth.event.code}</button>}<div className="auth-actions">{auth?.installed ? <button className="primary" type="button" disabled={auth.loginRunning} onClick={() => void onLogin()}>{auth.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button> : <button className="primary" type="button" onClick={() => void onInstall()}>Open install guide</button>}{auth?.loginRunning && <button className="secondary" type="button" onClick={onCancel}>Cancel</button>}</div></div></section>;
 }
 
 function SidebarSkeleton() {
   return <div className="sidebar-skeleton" aria-label="Loading projects" aria-busy="true">{[72, 54, 80, 62, 46, 76].map((width, index) => <span style={{ width: `${width}%` }} key={`${width}-${index}`} />)}</div>;
 }
 
-function StartupScreen({ delayed, onRetry }: { delayed: boolean; onRetry: () => void }) {
-  return <div className="startup-screen" aria-label="Starting Kimi Code" aria-busy={!delayed}><div className="startup-intro"><img src="/kimi-logo.png" alt="" aria-hidden="true" /><span>Kimi Code Desktop</span><strong>{delayed ? "The local runtime needs attention" : "Opening your workspace"}</strong><small>{delayed ? "Kimi Code did not become ready in time. Restart it safely without closing the app." : "Connecting to your local Kimi runtime and restoring sessions"}</small>{delayed ? <button type="button" onClick={onRetry}><ArrowsClockwise /> Restart local runtime</button> : <div className="startup-progress" aria-hidden="true"><i /></div>}</div></div>;
+function StartupScreen({ delayed, error, onRetry }: { delayed: boolean; error?: string; onRetry: () => void }) {
+  const needsAttention = delayed || Boolean(error);
+  return <div className="startup-screen" aria-label="Starting Kimi Code" aria-busy={!needsAttention}><div className="startup-intro"><img src="/kimi-logo.png" alt="" aria-hidden="true" /><span>Kimi Code Desktop</span><strong>{needsAttention ? "The local runtime needs attention" : "Opening your workspace"}</strong><small>{error ?? (delayed ? "Kimi Code did not become ready in time. Restart it safely without closing the app." : "Connecting to your local Kimi runtime and restoring sessions")}</small>{needsAttention ? <button type="button" onClick={onRetry}><ArrowsClockwise /> Restart local runtime</button> : <div className="startup-progress" aria-hidden="true"><i /></div>}</div></div>;
 }
 
-async function localServerUrl(): Promise<string> {
-  try {
-    const connection = await invoke<{ port: number; token: string }>("server_connection");
-    const token = connection.token ? `?token=${encodeURIComponent(connection.token)}` : "";
-    return `ws://127.0.0.1:${connection.port}${token}`;
-  } catch {
-    return "ws://127.0.0.1:4317";
+export function serverWebSocketUrl(connection: unknown): string {
+  if (!connection || typeof connection !== "object") throw new Error("The desktop runtime returned no server connection.");
+  const { port, token } = connection as { port?: unknown; token?: unknown };
+  if (!Number.isInteger(port) || Number(port) < 1 || Number(port) > 65_535 || typeof token !== "string" || token.length > 4_096) {
+    throw new Error("The desktop runtime returned an invalid server connection.");
   }
+  return `ws://127.0.0.1:${port}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+}
+
+export async function localServerUrl(
+  native = isTauri(),
+  lookup: () => Promise<unknown> = () => invoke("server_connection"),
+  attempts = 4,
+  retryDelayMs = 100,
+): Promise<string> {
+  if (!native) return "ws://127.0.0.1:4317";
+  let failure: unknown;
+  for (let attempt = 0; attempt < Math.max(1, attempts); attempt += 1) {
+    try {
+      return serverWebSocketUrl(await lookup());
+    } catch (error) {
+      failure = error;
+      if (attempt + 1 < attempts && retryDelayMs > 0) await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
+    }
+  }
+  throw new Error(`Could not locate the local Kimi runtime: ${failure instanceof Error ? failure.message : String(failure)}`);
 }
 
 export function workspaceName(cwd: string): string {
@@ -2342,6 +2812,21 @@ export function normalizeAvailableCommands(value: unknown): AvailableCommand[] {
   return commands;
 }
 
+export function filterKimiSkills(skills: KimiSkill[], query: string, limit = 10): KimiSkill[] {
+  const needle = query.trim().toLowerCase();
+  return skills
+    .filter((skill) => !needle || skill.name.toLowerCase().includes(needle) || skill.description.toLowerCase().includes(needle))
+    .slice(0, Math.max(0, limit));
+}
+
+export function skillComposerInsertion(skillName: string, runtimeCommands: Array<{ name: string }>): string {
+  const normalizedName = skillName.trim();
+  const advertised = runtimeCommands
+    .map((command) => command.name.trim().replace(/^\/+/, ""))
+    .find((name) => name.toLowerCase() === normalizedName.toLowerCase() || name.toLowerCase() === `skill:${normalizedName.toLowerCase()}`);
+  return advertised ? `/${advertised} ` : `$${normalizedName} `;
+}
+
 export function composerTrigger(value: string): { kind: "command" | "skill" | "file"; prefix: "/" | "$" | "#" | "@"; query: string; start: number } | undefined {
   const match = /(^|\s)([/#$@])(\{?[^}\s]*)$/.exec(value);
   if (!match) return undefined;
@@ -2398,6 +2883,11 @@ async function openExternal(url: string): Promise<void> {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+export function moveSuggestionIndex(current: number, count: number, key: "ArrowDown" | "ArrowUp"): number {
+  if (count <= 0) return 0;
+  return key === "ArrowDown" ? (current + 1) % count : (current - 1 + count) % count;
+}
+
 async function revealPath(path: string): Promise<void> {
   if (!isTauri()) throw new Error("Explorer integration is available in the desktop app");
   const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
@@ -2442,25 +2932,61 @@ function defaultAgentCapabilities(): KimiAgent[] {
   ];
 }
 
-export function subagentRuns(thread: Pick<Thread, "tools"> | undefined): SubagentRun[] {
+export function subagentRuns(thread: Pick<Thread, "tools"> & Partial<Pick<Thread, "backgroundTasks">> | undefined): SubagentRun[] {
   if (!thread) return [];
-  return thread.tools.filter(isSubagentTool).map<SubagentRun>((tool) => {
+  const backgroundTasks = thread.backgroundTasks ?? [];
+  const matchedTasks = new Set<string>();
+  const runs = thread.tools.filter(isSubagentTool).map<SubagentRun>((tool) => {
     const input = isRecordValue(tool.rawInput) ? tool.rawInput : {};
     const output = `${safeStringify(tool.rawOutput)} ${tool.content?.map((item) => safeStringify(item)).join(" ") ?? ""}`;
     const agentId = /\bagent_id:\s*([\w-]+)/i.exec(output)?.[1];
+    const taskId = /\btask_id:\s*((?:agent|bash)-[a-z0-9]+)\b/i.exec(output)?.[1];
+    const task = taskId ? backgroundTasks.find((candidate) => candidate.taskId === taskId) : undefined;
+    if (task) matchedTasks.add(task.taskId);
     const type = typeof input.subagent_type === "string" ? input.subagent_type : /actual_subagent_type:\s*([\w-]+)/i.exec(output)?.[1] ?? "coder";
     const description = typeof input.description === "string" && input.description.trim()
       ? input.description.trim()
       : (tool.title ?? "Agent task").replace(/^Agent\s*:\s*/i, "");
+    const background = input.run_in_background === true || /\bautomatic_notification:\s*true\b/i.test(output) || /\bkind:\s*agent\b/i.test(output);
+    const status = task
+      ? backgroundTaskRunStatus(task.status)
+      : background && /\bstatus:\s*running\b/i.test(output)
+        ? "running"
+        : tool.status === "in_progress" || tool.status === "pending" ? "running" : tool.status === "failed" ? "failed" : "completed";
     return {
       id: tool.toolCallId,
       type,
       description,
-      status: tool.status === "in_progress" || tool.status === "pending" ? "running" : tool.status === "failed" ? "failed" : "completed",
-      background: input.run_in_background === true || /\bkind:\s*agent\b/i.test(output),
+      status,
+      background,
       ...(agentId ? { agentId } : {}),
+      ...(task ? { detail: backgroundTaskDetail(task) } : {}),
     };
-  }).reverse();
+  });
+  for (const task of backgroundTasks) {
+    if (matchedTasks.has(task.taskId) || !task.taskId.startsWith("agent-")) continue;
+    runs.push({
+      id: task.taskId,
+      type: "agent",
+      description: task.description,
+      status: backgroundTaskRunStatus(task.status),
+      background: true,
+      agentId: task.taskId,
+      detail: backgroundTaskDetail(task),
+    });
+  }
+  return runs.reverse();
+}
+
+function backgroundTaskRunStatus(status: BackgroundTask["status"]): SubagentRun["status"] {
+  return status === "running" ? "running" : status === "completed" ? "completed" : "failed";
+}
+
+function backgroundTaskDetail(task: BackgroundTask): string {
+  if (task.status === "running") return "running";
+  if (task.status === "completed") return task.reportQueued ? "report queued" : "completed";
+  const status = task.status === "timed_out" ? "timed out" : task.status;
+  return task.exitCode === undefined || task.exitCode === null ? status : `${status} · exit ${task.exitCode}`;
 }
 
 function isSubagentTool(tool: Tool | undefined): tool is Tool {
@@ -2796,7 +3322,7 @@ export function applyEvents(threads: Thread[], events: StoredEvent[]): Thread[] 
   for (const event of events) {
     if (event.type === "ThreadCreated") {
       const payload = event.payload as { sessionId: string; cwd: string; kind?: "project" | "chat"; title: string; configOptions: ConfigOption[] };
-      const created: Thread = { threadId: event.threadId, ...payload, kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], usage: {}, queue: [] };
+      const created: Thread = { threadId: event.threadId, ...payload, kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], backgroundTasks: [], usage: {}, queue: [] };
       mutable.set(event.threadId, created);
       nextThreads = [created, ...nextThreads.filter((thread) => thread.threadId !== event.threadId)];
       continue;
@@ -2856,6 +3382,42 @@ function mutateThread(next: Thread, event: StoredEvent): void {
   else if (event.type === "UsageUpdated") next.usage = { ...next.usage, context: payload.usage as NonNullable<Usage["context"]> };
   else if (event.type === "ApprovalRequested") { const approval = payload as Approval; const turnId = approval.turnId ?? next.activeTurnId; next.approvals.push({ ...approval, ...(turnId ? { turnId } : {}) }); }
   else if (event.type === "ApprovalResolved") next.approvals = next.approvals.filter((approval) => approval.requestId !== payload.requestId);
+  else if (event.type === "BackgroundTaskRegistered") {
+    if (!next.backgroundTasks.some((task) => task.taskId === payload.taskId)) {
+      next.backgroundTasks.push({
+        taskId: String(payload.taskId),
+        queuedId: String(payload.queuedId),
+        turnId: String(payload.turnId),
+        description: String(payload.description),
+        status: "running",
+        registeredAt: event.createdAt,
+        updatedAt: event.createdAt,
+        reportQueued: false,
+      });
+    }
+  }
+  else if (event.type === "BackgroundTaskFinished") {
+    const task = next.backgroundTasks.find((candidate) => candidate.taskId === payload.taskId);
+    if (task) {
+      const status = String(payload.status);
+      task.status = status === "completed" || status === "failed" || status === "killed" || status === "lost" || status === "expired" || status === "timed_out" ? status : "failed";
+      task.updatedAt = event.createdAt;
+      if (typeof payload.endedAt === "number") task.endedAt = payload.endedAt;
+      if (typeof payload.exitCode === "number" || payload.exitCode === null) task.exitCode = payload.exitCode as number | null;
+    }
+  }
+  else if (event.type === "BackgroundTaskReportQueued") {
+    const task = next.backgroundTasks.find((candidate) => candidate.taskId === payload.taskId);
+    if (task) { task.reportQueued = true; task.updatedAt = event.createdAt; }
+  }
+  else if (event.type === "BackgroundTaskReportDelivered") {
+    const task = next.backgroundTasks.find((candidate) => candidate.taskId === payload.taskId);
+    if (task && !task.reportCancelledAt) { task.reportDeliveredAt = event.createdAt; task.updatedAt = event.createdAt; }
+  }
+  else if (event.type === "BackgroundTaskReportCancelled") {
+    const task = next.backgroundTasks.find((candidate) => candidate.taskId === payload.taskId);
+    if (task && !task.reportDeliveredAt) { task.reportCancelledAt = event.createdAt; task.updatedAt = event.createdAt; }
+  }
   else if (event.type === "TurnCompleted") { const turn = next.turns.findLast((item) => item.turnId === payload.turnId); if (turn) Object.assign(turn, { completedAt: event.createdAt, stopReason: String(payload.stopReason), ...(typeof payload.error === "string" && payload.error ? { error: payload.error } : {}), ...(payload.usage ? { usage: payload.usage as NonNullable<Usage["tokens"]> } : {}) }); finishRendererActivity(next, String(payload.turnId), event.createdAt, String(payload.stopReason) === "error"); next.running = false; next.stopReason = String(payload.stopReason); next.activeTurnId = undefined; if (payload.usage) next.usage = { ...next.usage, tokens: payload.usage as NonNullable<Usage["tokens"]> }; }
   else if (event.type === "TurnCancelled") { const turn = next.turns.findLast((item) => item.turnId === payload.turnId); if (turn) Object.assign(turn, { completedAt: event.createdAt, stopReason: "cancelled" }); finishRendererActivity(next, String(payload.turnId), event.createdAt, true); next.running = false; next.stopReason = "cancelled"; next.activeTurnId = undefined; }
   else if (event.type === "CheckpointCaptured") { const checkpoint = { ...(payload.checkpoint as Checkpoint) }; if (typeof payload.diff === "string") checkpoint.diff = payload.diff; next.checkpoints.push(checkpoint); }
@@ -2950,6 +3512,7 @@ export function normalizeThread(value: Thread): Thread {
     commands: normalizeAvailableCommands(thread.commands),
     modeId: typeof thread.modeId === "string" ? thread.modeId : undefined,
     checkpoints: Array.isArray(thread.checkpoints) ? thread.checkpoints : [],
+    backgroundTasks: Array.isArray(thread.backgroundTasks) ? thread.backgroundTasks : [],
     usage: thread.usage && typeof thread.usage === "object" ? thread.usage : {},
     queue: Array.isArray(thread.queue) ? thread.queue : [],
   };

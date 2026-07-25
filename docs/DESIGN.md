@@ -1,6 +1,6 @@
 # Design System
 
-Kimi Code Desktop uses a quiet, Windows-native interface designed for long coding sessions.
+Kimi Code Desktop uses a quiet, Windows-native interface designed for long coding sessions. Its default theme is a neutral graphite system: the application reads as one continuous workspace, not a collection of dark cards.
 
 ## Principles
 
@@ -15,8 +15,8 @@ Kimi Code Desktop uses a quiet, Windows-native interface designed for long codin
 
 All interface colors come from `apps/web/src/styles/tokens.css`.
 
-- Canvas and sidebar use neutral near-black values.
-- Raised surfaces use two charcoal steps.
+- Canvas, chrome, and navigation use neutral near-black and graphite values without a blue cast.
+- Raised surfaces use two charcoal steps and appear only where elevation communicates a real interaction.
 - Primary text is soft white.
 - Secondary and disabled text use neutral grays.
 - Success, warning, and danger colors appear only when the corresponding state is real.
@@ -33,8 +33,8 @@ Hierarchy comes from size, weight, and spacing. Settings allow users to change t
 
 The base spacing unit is 4 px. Common gaps are 8, 12, 16, 24, and 32 px.
 
-- Controls use a 6 px radius.
-- Cards use a 10 px radius.
+- Controls use a 5–7 px radius.
+- Bounded content uses a 10–14 px radius.
 - The composer uses a 20 px radius.
 - Dialogs use a 14 px radius.
 - Borders are 1 px and low contrast.
@@ -43,13 +43,17 @@ The base spacing unit is 4 px. Common gaps are 8, 12, 16, 24, and 32 px.
 
 ## Layout
 
-The desktop has three functional zones:
+The desktop has three functional zones separated by single-pixel dividers:
 
 1. Project and chat navigation
 2. Conversation
 3. Optional work panel
 
-The left sidebar collapses to an icon rail. The right work panel becomes a drawer at narrow widths. Users can resize and reposition both panels.
+The left sidebar collapses to an icon rail. Its outlined Projects/Chats switch uses a light overlay for selection, and the Extensions row is the entry point for plugins, MCP servers, and agents. Project and task rows stay compact, with extra spacing only after an expanded project's final task.
+
+The right work panel remains a real grid column, never an overlay on the conversation or composer. It becomes a drawer only at narrow widths. Users can resize and reposition both panels.
+
+The composer is capped at 790 px, uses a 20 px outer radius, starts with a 58 px writing area, and ends in a compact control row. Its send/stop control is a single 36 px circular action. Queued prompts attach as a flat shelf inside the same surface rather than forming another card.
 
 ## Interaction
 
@@ -60,8 +64,9 @@ The left sidebar collapses to an icon rail. The right work panel becomes a drawe
 - Approval requests interrupt the flow with explicit actions.
 - Diffs use stable line numbers and restrained red and green backgrounds.
 - Empty, loading, offline, and error states remain concise and functional.
+- Opening or switching tasks starts at the latest message. Live output follows only while the reader remains near the bottom. Scrolling upward detaches that behavior and reveals an explicit **Jump to latest** action.
 
-Transitions use transform and opacity, normally between 120 and 180 ms. Background animation pauses when the window is hidden. `prefers-reduced-motion` removes travel and looping indicators.
+Transitions use transform and opacity, normally between 100 and 180 ms, and remain CSS-driven. Background animation pauses when the window is hidden. `prefers-reduced-motion` removes travel and looping indicators.
 
 ## Accessibility
 

@@ -1,24 +1,24 @@
 :root {
   color-scheme: dark;
 
-  --color-canvas: #101010;
-  --color-sidebar: #181818;
-  --color-chrome: #181818;
-  --color-surface-1: #1d1d1d;
-  --color-surface-2: #242424;
-  --color-surface-3: #2b2b2b;
-  --color-hover: #333333;
-  --color-border: #292929;
-  --color-border-strong: #3a3a3a;
+  --color-canvas: #0e0e0f;
+  --color-sidebar: #1c1c1f;
+  --color-chrome: #1c1c1f;
+  --color-surface-1: #222225;
+  --color-surface-2: #28282c;
+  --color-surface-3: #303035;
+  --color-hover: #37373c;
+  --color-border: #2b2b2f;
+  --color-border-strong: #3b3b41;
 
-  --color-text: #f3f3f3;
-  --color-text-secondary: #c7c7c7;
-  --color-text-tertiary: #969696;
+  --color-text: #f3f3f5;
+  --color-text-secondary: #c9c9ce;
+  --color-text-tertiary: #8b8b94;
   --color-text-inverse: #111111;
 
   --color-accent: #d8d8d8;
   --color-accent-hover: #f2f2f2;
-  --color-accent-muted: #2d2d2d;
+  --color-accent-muted: #303035;
   --color-focus: #d0d0d0;
   --color-on-accent: #111111;
 
@@ -64,11 +64,11 @@
   --space-8: 32px;
   --space-10: 40px;
 
-  --radius-xs: 7px;
-  --radius-sm: 10px;
-  --radius-md: 14px;
-  --radius-lg: 18px;
-  --radius-xl: 24px;
+  --radius-xs: 5px;
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
   --radius-pill: 999px;
 
   --control-height: 36px;
@@ -77,20 +77,22 @@
   --sidebar-current-width: 272px;
   --sidebar-collapsed-width: 60px;
   --rail-current-width: 420px;
-  --composer-max-width: 900px;
+  --composer-max-width: 790px;
 
   --shadow-dialog: 0 28px 90px rgb(0 0 0 / 48%);
-  --shadow-composer: 0 12px 34px rgb(0 0 0 / 18%);
-  --shadow-composer-focus: 0 16px 42px rgb(0 0 0 / 23%);
-  --shadow-control: 0 8px 20px rgb(0 0 0 / 18%);
+  --shadow-composer: 0 10px 30px rgb(0 0 0 / 22%);
+  --shadow-composer-focus: 0 10px 30px rgb(0 0 0 / 26%), inset 0 0 0 1px rgb(255 255 255 / 5%);
+  --shadow-control: 0 6px 18px rgb(0 0 0 / 18%);
   --shadow-drawer: -18px 0 52px rgb(0 0 0 / 42%);
   --focus-ring: 0 0 0 2px var(--color-canvas), 0 0 0 4px var(--color-focus);
 
-  --duration-fast: 120ms;
-  --duration-normal: 220ms;
-  --duration-slow: 420ms;
+  --duration-fast: 100ms;
+  --duration-normal: 170ms;
+  --duration-slow: 260ms;
   --ease-standard: cubic-bezier(.2, .8, .2, 1);
   --ease-emphasized: cubic-bezier(.16, 1, .3, 1);
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
 
   --z-base: 0;
   --z-sticky: 10;
@@ -209,7 +211,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   :root {
-    --duration-fast: 0ms;
-    --duration-normal: 0ms;
+    --duration-fast: 80ms;
+    --duration-normal: 100ms;
+    --duration-slow: 120ms;
   }
 }

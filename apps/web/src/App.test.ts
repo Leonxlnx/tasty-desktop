@@ -1,7 +1,20 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerPrimaryAction, composerTrigger, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isYoloChoice, latestTimelineItemId, modeDescription, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, presentDiagnostic, projectTurns, promptShortcutMode, reorderPaths, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, subagentRuns, summarizeDiff, thinkingEffortLabel, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceName, workspaceRelativePath } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, latestTimelineItemId, localServerUrl, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, presentDiagnostic, projectTurns, promptShortcutMode, railForStandaloneChat, reorderPaths, serverWebSocketUrl, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+
+describe("agent skill install requests", () => {
+  it("opens confirmation only for a source inside the requested workspace", () => {
+    expect(skillInstallDialogFromRequest({ cwd: "C:\\work", source: "C:\\work\\skill", name: "Example" })).toEqual({
+      kind: "install-skill",
+      cwd: "C:\\work",
+      source: "C:\\work\\skill",
+      name: "Example",
+    });
+    expect(skillInstallDialogFromRequest({ cwd: "C:\\work", source: "C:\\other\\skill", name: "Example" })).toBeUndefined();
+    expect(skillInstallDialogFromRequest({ cwd: "C:\\work", source: "C:\\work\\skill", name: "" })).toBeUndefined();
+  });
+});
 
 describe("composer send key", () => {
   it("sends on Enter by default and preserves Shift+Enter newlines", () => {
@@ -25,6 +38,14 @@ describe("composer send key", () => {
     expect(composerPrimaryAction(false, true)).toBe("send");
     expect(composerPrimaryAction(true, false)).toBe("stop");
     expect(composerPrimaryAction(true, true)).toBe("queue");
+  });
+
+  it("never submits to a hidden view or while configuration is still applying", () => {
+    expect(composerCanSubmit("projects", "project", false)).toBe(true);
+    expect(composerCanSubmit("chats", "chat", false)).toBe(true);
+    expect(composerCanSubmit("chats", "project", false)).toBe(false);
+    expect(composerCanSubmit("projects", "chat", false)).toBe(false);
+    expect(composerCanSubmit("projects", "project", true)).toBe(false);
   });
 
   it("turns raw connection errors into a recoverable message", () => {
@@ -60,6 +81,10 @@ describe("update progress", () => {
     expect(hasBlockingWork([idle, { ...idle, running: true }])).toBe(true);
     expect(hasBlockingWork([idle, { ...idle, queue: [{ queuedId: "q" }] } as never])).toBe(true);
     expect(hasBlockingWork([idle, { ...idle, approvals: [{ requestId: "approval" }] } as never])).toBe(true);
+    expect(hasBlockingWork([idle, { ...idle, backgroundTasks: [{ status: "running" }] } as never])).toBe(true);
+    expect(hasBlockingWork([idle, { ...idle, backgroundTasks: [{ status: "completed", reportQueued: true }] } as never])).toBe(true);
+    expect(hasBlockingWork([idle, { ...idle, backgroundTasks: [{ status: "completed", reportDeliveredAt: "2026-07-25T10:00:00Z" }] } as never])).toBe(false);
+    expect(hasBlockingWork([idle, { ...idle, backgroundTasks: [{ status: "failed", reportCancelledAt: "2026-07-25T10:00:00Z" }] } as never])).toBe(false);
     expect(hasBlockingWork([idle], true)).toBe(true);
     expect(["available", "downloading", "installing"].map((phase) => showSidebarUpdate(phase as never))).toEqual([true, true, true]);
     expect(showSidebarUpdate("current")).toBe(false);
@@ -138,6 +163,40 @@ describe("turn activity", () => {
   });
 });
 
+describe("native server lookup", () => {
+  it("uses the native dynamic port and safely encodes its token", () => {
+    expect(serverWebSocketUrl({ port: 61_429, token: "a+b /?" })).toBe("ws://127.0.0.1:61429?token=a%2Bb%20%2F%3F");
+    expect(serverWebSocketUrl({ port: 4_317, token: "" })).toBe("ws://127.0.0.1:4317");
+  });
+
+  it("rejects malformed native responses and never falls back to the development port", async () => {
+    expect(() => serverWebSocketUrl({ port: 0, token: "secret" })).toThrow(/invalid server connection/i);
+    expect(() => serverWebSocketUrl({ port: 61_429 })).toThrow(/invalid server connection/i);
+    let attempts = 0;
+    await expect(localServerUrl(true, async () => {
+      attempts += 1;
+      throw new Error("native lookup failed");
+    }, 2, 0)).rejects.toThrow(/could not locate/i);
+    expect(attempts).toBe(2);
+    await expect(localServerUrl(false)).resolves.toBe("ws://127.0.0.1:4317");
+  });
+});
+
+describe("conversation scroll anchoring", () => {
+  it("pins only while the viewport remains close to the latest content", () => {
+    expect(isNearScrollBottom({ scrollHeight: 1_000, scrollTop: 628, clientHeight: 300 })).toBe(true);
+    expect(isNearScrollBottom({ scrollHeight: 1_000, scrollTop: 627, clientHeight: 300 })).toBe(false);
+    expect(isNearScrollBottom({ scrollHeight: 300, scrollTop: 0, clientHeight: 300 })).toBe(true);
+  });
+});
+
+describe("application menus", () => {
+  it("opens from standard keyboard activation keys", () => {
+    expect(["ArrowDown", "Enter", " "].every(isAppMenuOpenKey)).toBe(true);
+    expect(isAppMenuOpenKey("Escape")).toBe(false);
+  });
+});
+
 describe("local path links", () => {
   it("extracts deduplicated Windows paths without swallowing punctuation", () => {
     expect(extractLocalPaths("Open `E:\\projects\\android app` or E:\\projects\\android\\app,.")).toEqual([
@@ -148,6 +207,22 @@ describe("local path links", () => {
 });
 
 describe("project navigation", () => {
+  it("never exposes a project workspace while the standalone chat view is active", () => {
+    expect(workspaceForView("chats", { kind: "chat", cwd: "C:/runtime/chats" } as never, undefined, "E:/project")).toBeUndefined();
+    expect(workspaceForView("chats", undefined, { kind: "chat" }, "E:/project")).toBeUndefined();
+    expect(workspaceForView("chats", undefined, undefined, "E:/project")).toBeUndefined();
+    expect(workspaceForView("projects", { kind: "project", cwd: "E:/project" } as never, undefined, "E:/other")).toBe("E:/project");
+    expect(workspaceForView("projects", undefined, undefined, "E:/project")).toBe("E:/project");
+    expect(["git", "terminal", "preview"].map((view) => railForStandaloneChat(view as never))).toEqual([undefined, undefined, undefined]);
+    expect(railForStandaloneChat("agents")).toBe("agents");
+  });
+
+  it("accepts Git results only for the workspace that requested them", () => {
+    expect(workspaceRequestMatches("E:\\project", "e:/project/")).toBe(true);
+    expect(workspaceRequestMatches("E:/project-a", "E:/project-b")).toBe(false);
+    expect(workspaceRequestMatches("E:/project", undefined)).toBe(false);
+  });
+
   it("groups local and resumable chats under one normalized workspace", () => {
     const threads = [{ cwd: "e:\\work\\KimiDesktop\\", title: "Polish navigation" }] as unknown as Parameters<typeof groupProjects>[1];
     const sessions = [{ cwd: "E:/work/KimiDesktop", title: "Resume auth work" }] as Parameters<typeof groupProjects>[2];
@@ -234,6 +309,13 @@ describe("Kimi composer capabilities", () => {
     expect(toggleComposerTrigger("fix this", "/")).toBe("fix this /");
   });
 
+  it("wraps keyboard suggestion selection in both directions", () => {
+    expect(moveSuggestionIndex(0, 3, "ArrowDown")).toBe(1);
+    expect(moveSuggestionIndex(2, 3, "ArrowDown")).toBe(0);
+    expect(moveSuggestionIndex(0, 3, "ArrowUp")).toBe(2);
+    expect(moveSuggestionIndex(4, 0, "ArrowUp")).toBe(0);
+  });
+
   it("normalizes the real ACP command catalog and keeps files inside the workspace", () => {
     expect(normalizeAvailableCommands([{ name: "/mcp-config", description: " Configure MCP " }, { name: "", description: "bad" }, { name: "mcp-config", description: "duplicate" }])).toEqual([
       { name: "mcp-config", description: "Configure MCP" },
@@ -252,6 +334,24 @@ describe("tool output previews", () => {
   });
 });
 
+describe("Kimi skill composer integration", () => {
+  const skills = [
+    { name: "review", description: "Review a change", scope: "project" as const, source: "kimi" as const, path: "E:\\work\\.kimi-code\\skills\\review", modelInvocable: true, hasSubSkills: false },
+    { name: "release", description: "Prepare release notes", scope: "user" as const, source: "agents" as const, path: "C:\\Users\\me\\.agents\\skills\\release.md", modelInvocable: false, hasSubSkills: false },
+  ];
+
+  it("filters the real discovered skill inventory", () => {
+    expect(filterKimiSkills(skills, "notes")).toEqual([skills[1]]);
+    expect(filterKimiSkills(skills, "", 1)).toEqual([skills[0]]);
+  });
+
+  it("only rewrites a skill to slash syntax when the runtime advertises it", () => {
+    expect(skillComposerInsertion("review", [{ name: "review" }])).toBe("/review ");
+    expect(skillComposerInsertion("review", [{ name: "/skill:review" }])).toBe("/skill:review ");
+    expect(skillComposerInsertion("review", [{ name: "help" }])).toBe("$review ");
+  });
+});
+
 describe("subagent projection", () => {
   it("derives real agent runs from preserved Kimi Agent tool calls", () => {
     expect(subagentRuns({ tools: [{
@@ -262,13 +362,42 @@ describe("subagent projection", () => {
       content: [{ type: "content", content: { type: "text", text: "agent_id: a1234" } }],
     }] })).toEqual([{ id: "agent-1", type: "explore", description: "Inspect performance", status: "running", background: true, agentId: "a1234" }]);
   });
+
+  it("uses persisted background status instead of treating a detached agent as completed", () => {
+    expect(subagentRuns({
+      tools: [{
+        toolCallId: "agent-call",
+        title: "Agent: build APK",
+        status: "completed",
+        rawInput: { subagent_type: "coder", description: "Build APK", run_in_background: true },
+        rawOutput: "task_id: agent-build1\nstatus: running\nautomatic_notification: true",
+      }],
+      backgroundTasks: [{
+        taskId: "agent-build1",
+        queuedId: "queued-1",
+        turnId: "turn-1",
+        description: "Build APK",
+        status: "running",
+        registeredAt: "2026-07-25T10:00:00.000Z",
+        updatedAt: "2026-07-25T10:00:00.000Z",
+        reportQueued: false,
+      }],
+    })).toEqual([{
+      id: "agent-call",
+      type: "coder",
+      description: "Build APK",
+      status: "running",
+      background: true,
+      detail: "running",
+    }]);
+  });
 });
 
 describe("runtime thinking effort", () => {
-  it("reports K3's real CLI-managed Max effort without inventing a local toggle", () => {
+  it("does not mislabel a legacy binary K3 thinking toggle as a specific effort", () => {
     const model = { id: "model", name: "Model", currentValue: "kimi-for-coding/k3", options: [{ value: "kimi-for-coding/k3", name: "K3" }] };
     const thinking = { id: "thinking", name: "Thinking", currentValue: "on", options: [{ value: "on", name: "On" }] };
-    expect(thinkingEffortLabel(model, thinking)).toBe("Max");
+    expect(thinkingEffortLabel(model, thinking)).toBe("Default");
     expect(thinkingEffortLabel(model, { ...thinking, currentValue: "off" })).toBe("Off");
   });
 
@@ -290,9 +419,22 @@ describe("draft composer configuration", () => {
   it("renders model, reasoning, and permission controls before a thread exists", () => {
     const markup = renderToStaticMarkup(createElement(ComposerConfig, { options: draftDefaults, onChange: () => undefined }));
     expect(markup).toContain('aria-label="Model: Kimi K3"');
-    expect(markup).toContain('aria-label="Reasoning: Max"');
+    expect(markup).toContain('aria-label="Reasoning: Default"');
     expect(markup).toContain('aria-label="Permissions: Default"');
     expect(markup.match(/config-trigger/g)).toHaveLength(3);
+  });
+
+  it("renders an explicit Max effort supplied by the runtime", () => {
+    const effortOptions = draftDefaults.map((option) => option.id === "thinking" ? {
+      ...option,
+      currentValue: "high",
+      options: [{ value: "low", name: "Low" }, { value: "high", name: "High" }, { value: "max", name: "Max" }],
+    } : option);
+    const overrides = draftConfigOverrides(effortOptions, { thinking: "max" });
+    const markup = renderToStaticMarkup(createElement(ComposerConfig, { options: applyDraftConfig(effortOptions, overrides), onChange: () => undefined }));
+
+    expect(markup).toContain('aria-label="Reasoning: Max"');
+    expect(overrides).toEqual({ thinking: "max" });
   });
 
   it("renders nothing instead of placeholder controls when the runtime offers no options", () => {
@@ -323,6 +465,20 @@ describe("draft composer configuration", () => {
     expect(isYoloChoice(draftDefaults.find((option) => option.id === "model"), "yolo")).toBe(false);
     expect(isYoloChoice(undefined, "yolo")).toBe(false);
     expect(isYoloChoice({ id: "mode", name: "Mode", currentValue: "default", options: [{ value: "full", name: "Full access" }] }, "full")).toBe(true);
+  });
+
+  it("keeps YOLO confirmation bound to the chat or draft that requested it", () => {
+    const first = configTargetKey({ threadId: "thread-1" }, undefined)!;
+    const second = configTargetKey({ threadId: "thread-2" }, undefined)!;
+    const projectDraft = configTargetKey(undefined, { kind: "project", cwd: "C:\\work" })!;
+    const chatDraft = configTargetKey(undefined, { kind: "chat" })!;
+
+    expect(first).not.toBe(second);
+    expect(projectDraft).not.toBe(chatDraft);
+    expect(shouldAcknowledgeYolo(true, first, first)).toBe(true);
+    expect(shouldAcknowledgeYolo(false, first, first)).toBe(false);
+    expect(shouldAcknowledgeYolo(true, first, second)).toBe(false);
+    expect(shouldAcknowledgeYolo(true, projectDraft, chatDraft)).toBe(false);
   });
 
   it("describes permission modes honestly", () => {
