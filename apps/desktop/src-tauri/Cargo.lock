@@ -1915,7 +1915,7 @@ dependencies = [
 
 [[package]]
 name = "kimi-code-desktop"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "serde_json",
  "tauri",

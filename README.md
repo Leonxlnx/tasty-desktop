@@ -11,7 +11,7 @@ Sign in with your own Kimi account, use your own plan and quota, open local proj
 
 Download the latest signed updater build from [GitHub Releases](https://github.com/Leonxlnx/kimi-code-desktop/releases/latest).
 
-Current version: `0.8.4`
+Current version: `0.9.0`
 
 Requirements:
 
@@ -24,7 +24,7 @@ The installer includes the local Node.js runtime used by the desktop orchestrati
 ## Getting started
 
 1. Install and open Kimi Code Desktop.
-2. Complete onboarding. The app checks for Kimi Code CLI and can run Kimi's official Windows installer if needed.
+2. Complete onboarding. If Kimi Code CLI is missing, the app links to the official installation guide; it never downloads or executes a remote install script.
 3. Select **Begin sign-in** and approve the device code with your own Kimi account.
 4. Open a folder for project work or create a standalone chat.
 
@@ -34,10 +34,12 @@ Authentication remains owned by the official Kimi Code CLI. The desktop app does
 
 - Project workspaces with multiple resumable chats per folder
 - Standalone chats that stay separate from project files and Git state
+- A continuous graphite workspace with compact navigation, a bottom-anchored transcript, and an explicit jump-to-latest control
 - Streaming Markdown summaries with chronological, collapsible work and tool activity
 - Prompt queueing, steering, cancellation, edit-and-retry, copy, and turn undo controls
-- Live Kimi model, reasoning, permission, context, and quota surfaces
-- Kimi commands, skills, subagents, plugins, and MCP configuration
+- Live Kimi model, reasoning, permission, context, and quota surfaces, including every effort value offered by the installed runtime
+- Discovered project and user skills, confirmed workspace-local skill installation, real subagent activity, and redacted MCP configuration
+- Persistent monitoring for finite Kimi background tasks that request automatic notification, followed by a queued verification report
 - Integrated Git changes, diff, stage, unstage, and commit workflows
 - Workspace terminal, file preview, and agent-controlled localhost app preview
 - Clickable local paths, durable failure reasons, and revealable runtime logs
@@ -65,6 +67,7 @@ The send shortcut can be changed in General settings.
 - Packaged connections require a random per-launch token.
 - Kimi credentials remain in the official Kimi CLI home and are never read by the renderer.
 - File resources are workspace-bound, text-only, and size-limited.
+- Local skill installation accepts only validated files or bundles inside the active workspace and never overwrites an installed skill.
 - App preview accepts only `localhost` and `127.0.0.1` URLs.
 - Preview screenshots use an isolated temporary Microsoft Edge profile, never a person's normal browser profile.
 - No application telemetry is implemented.
@@ -75,11 +78,11 @@ Read [SECURITY.md](SECURITY.md) before reporting a vulnerability.
 
 Requirements for contributors:
 
-- Node.js 22 or newer
+- Node.js 22 or newer for development; Windows packaging uses the checksum-pinned Node.js v22.22.2 x64 runtime
 - pnpm 10
 - Rust and Cargo
 - WebView2
-- Kimi Code CLI 0.26.0 or a compatible version
+- Kimi Code CLI 0.29.1, the current verified reference runtime, or a compatible ACP version
 
 Install and start the native development app:
 

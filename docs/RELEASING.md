@@ -6,11 +6,14 @@ Published Windows releases are built by GitHub Actions. Do not upload a locally 
 
 - The working tree is clean.
 - CI passes on `main`.
+- Windows packaging runs on Node.js v22.22.2 x64. `prepare:bundle` rejects any executable or Node license whose SHA-256 does not match the official v22.22.2 Windows archive.
 - The version matches in:
   - `apps/desktop/package.json`
   - `apps/desktop/src-tauri/Cargo.toml`
   - `apps/desktop/src-tauri/tauri.conf.json`
-  - `apps/desktop/src-tauri/Cargo.lock`
+  - The `kimi-code-desktop` package entry in `apps/desktop/src-tauri/Cargo.lock`
+  - `apps/server/src/preview-mcp.ts`
+  - The current-version line in `README.md`
 - GitHub Actions contains `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 - `docs/releases/vX.Y.Z.md` contains reviewed English release notes.
 - No Kimi task, queued prompt, or approval is active during local install verification.
@@ -21,6 +24,7 @@ Run:
 
 ```powershell
 pnpm install --frozen-lockfile
+pnpm check:public
 pnpm typecheck
 pnpm test
 pnpm build:services
@@ -36,6 +40,8 @@ pnpm bundle:local
 
 The local installer is intentionally unsigned when the protected updater key is unavailable. It must not replace a signed GitHub release asset.
 
+Verification for the current supervised release process uses local shell tests, builds, process inspection, loopback RPC checks, runtime logs, and file hashes only. Do not launch the Codex in-app browser, browser MCP, Chrome control, screenshot capture, or browser-based visual QA. Release notes must describe concrete implementation and automated checks without claiming unperformed visual validation.
+
 ## Public-source check
 
 Before tagging:
@@ -48,11 +54,12 @@ Before tagging:
 
 ## Publish
 
-Create and push an annotated tag whose version exactly matches the Tauri configuration:
+Create and push an annotated tag whose version exactly matches every field in the prerequisites:
 
 ```powershell
-git tag -a v0.8.4 -m "Kimi Code Desktop 0.8.4"
-git push origin v0.8.4
+$version = "X.Y.Z"
+git tag -a "v$version" -m "Kimi Code Desktop $version"
+git push origin "v$version"
 ```
 
 The `Windows release` workflow:
