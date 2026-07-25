@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,7 +91,7 @@ describe("orchestration server", () => {
     const standaloneReply = waitFor(socket, messages, (message) => message.id === 22);
     socket.send(JSON.stringify({ id: 22, method: "threads.create", params: { standalone: true } }));
     const standalone = ((await standaloneReply).result as { thread: { cwd: string; kind: string; title: string } }).thread;
-    expect(standalone).toMatchObject({ cwd: join(dataHome, "runtime", "chats"), kind: "chat", title: "New chat" });
+    expect(standalone).toMatchObject({ cwd: join(await realpath(dataHome), "runtime", "chats"), kind: "chat", title: "New chat" });
     socket.close();
   });
 
