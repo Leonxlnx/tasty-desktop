@@ -26,6 +26,7 @@ Include the app version, Windows version, reproduction steps, impact, and whethe
 ## Trust boundaries
 
 Kimi Code Desktop delegates authentication, model access, sessions, commands, skills, subagents, and subscription quota to the installed official Kimi Code CLI. The app must never read or copy credential contents.
+If the CLI is missing, onboarding opens Kimi's official installation guide only after a user click; it never downloads or executes a remote installation script.
 
 The local orchestration service:
 
@@ -33,8 +34,13 @@ The local orchestration service:
 - Validates the Tauri or configured development origin
 - Requires a random per-launch token in packaged builds
 - Validates workspace file paths and sizes
-- Allows read-only access to the active Kimi session's own background-task `output.log`, and no other file outside the workspace
+- Allows bounded read-only access to the active Kimi session's own background-task record and `output.log`, and no other file outside the workspace
+- Installs a local skill only from a validated non-symlink source inside the active workspace, after confirmation, without overwriting an existing skill
+- Treats `skill_install_local` as a request only: the preview bridge cannot invoke installation RPCs, and a normal app window must show and receive explicit confirmation before the existing installer runs
+- Attaches MCP definitions only from the user's Kimi home; repository MCP files are redacted for review and never auto-executed
 - Keeps sensitive MCP configuration out of the renderer
+
+Background-task records must resolve beneath the matching Kimi session and contain a validated finite task identifier. Monitoring expires after 24 hours and excludes tools that explicitly disable their timeout. A recovered completion can be queued at least once after a crash; callers must not treat the follow-up as exactly-once external delivery.
 
 The desktop preview accepts only HTTP or HTTPS URLs whose hostname is exactly `localhost` or `127.0.0.1`. Screenshot capture uses a fresh temporary Microsoft Edge profile that is removed after capture. It never reuses a person's browser profile, cookies, extensions, or logged-in sessions.
 

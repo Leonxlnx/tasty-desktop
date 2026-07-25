@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -74,6 +74,50 @@ describe("event log replay", () => {
     expect(JSON.parse(lines[0]!).type).toBe("ThreadSnapshot");
     expect(lines[0]!.length).toBeLessThan(20_000);
     expect(engine.thread("thread-1")?.tools[0]?.rawOutput).toMatchObject({ truncated: true });
+  });
+
+  it("trims an incomplete final record without losing earlier events", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kimi-event-torn-tail-"));
+    const path = join(dir, "events.jsonl");
+    const first = new OrchestrationEngine(new EventStore(path));
+    await first.open();
+    await first.append("thread-1", { type: "ThreadCreated", payload: { sessionId: "session-1", cwd: dir, title: "Recovered" } });
+    await first.drain();
+    await appendFile(path, '{"threadId":"thread-1","seq":2,"type":"ThreadRenamed"', "utf8");
+
+    const restarted = new OrchestrationEngine(new EventStore(path));
+    await restarted.open();
+    expect(restarted.thread("thread-1")?.title).toBe("Recovered");
+    await restarted.append("thread-1", { type: "ThreadRenamed", payload: { title: "Still writable" } });
+    await restarted.drain();
+
+    const lines = (await readFile(path, "utf8")).trim().split(/\r?\n/).map((line) => JSON.parse(line));
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatchObject({ seq: 2, type: "ThreadRenamed" });
+  });
+
+  it("fails closed on corruption before the final record", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kimi-event-interior-corrupt-"));
+    const path = join(dir, "events.jsonl");
+    const first = new OrchestrationEngine(new EventStore(path));
+    await first.open();
+    await first.append("thread-1", { type: "ThreadCreated", payload: { sessionId: "session-1", cwd: dir, title: "Valid" } });
+    await first.drain();
+    await appendFile(path, '{x\n{"threadId":"thread-1","seq":2,"type":"ThreadRenamed","payload":{"title":"Hidden"},"createdAt":"2026-07-25T00:00:00.000Z"}\n', "utf8");
+
+    await expect(new OrchestrationEngine(new EventStore(path)).open()).rejects.toThrow("JSON");
+  });
+
+  it("does not discard a malformed final record that is not an incomplete JSON prefix", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "kimi-event-final-corrupt-"));
+    const path = join(dir, "events.jsonl");
+    const first = new OrchestrationEngine(new EventStore(path));
+    await first.open();
+    await first.append("thread-1", { type: "ThreadCreated", payload: { sessionId: "session-1", cwd: dir, title: "Valid" } });
+    await first.drain();
+    await appendFile(path, "{x", "utf8");
+
+    await expect(new OrchestrationEngine(new EventStore(path)).open()).rejects.toThrow("JSON");
   });
 });
 

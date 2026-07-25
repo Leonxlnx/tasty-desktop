@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
@@ -11,7 +11,7 @@ import {
   clampPreviewViewportHeight,
   clampPreviewViewportWidth,
   normalizeDesktopPreviewUrl,
-  type DesktopPreviewCommand,
+  type PreviewBridgeCommand,
 } from "./desktop-preview.js";
 
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
@@ -47,6 +47,24 @@ const tools = [
       viewportHeight: { type: "number", minimum: 240, maximum: 1200 },
     }, additionalProperties: false },
   },
+  {
+    name: "skill_install_local",
+    description: "Request installation of one local skill from the active workspace. The desktop app always asks the user to confirm before anything is installed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "string", minLength: 1, description: "Absolute path to a local skill directory or Markdown skill file inside the active workspace." },
+      },
+      required: ["source"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
 ];
 
 export function startPreviewMcp(): void {
@@ -77,7 +95,7 @@ async function handleLine(line: string, state: { url?: string; panelWidth: numbe
       write({ jsonrpc: "2.0", id: request.id, result: {
         protocolVersion: typeof requested === "string" ? requested : "2025-03-26",
         capabilities: { tools: {} },
-        serverInfo: { name: "Kimi Code Desktop Preview", version: "0.8.4" },
+        serverInfo: { name: "Kimi Code Desktop Preview", version: "0.9.0" },
       } });
       return;
     }
@@ -103,6 +121,7 @@ async function handleLine(line: string, state: { url?: string; panelWidth: numbe
 
 async function callTool(name: string, args: Record<string, unknown>, state: { url?: string; panelWidth: number; viewportWidth: number; viewportHeight: number }): Promise<ToolResult> {
   try {
+    if (name === "skill_install_local") return await installLocalSkill(args);
     state.panelWidth = clampPreviewPanelWidth(args.panelWidth ?? state.panelWidth);
     state.viewportWidth = clampPreviewViewportWidth(args.viewportWidth ?? state.viewportWidth);
     state.viewportHeight = clampPreviewViewportHeight(args.viewportHeight ?? state.viewportHeight);
@@ -136,7 +155,43 @@ async function callTool(name: string, args: Record<string, unknown>, state: { ur
   }
 }
 
-async function sendBridge(command: DesktopPreviewCommand): Promise<void> {
+async function installLocalSkill(args: Record<string, unknown>): Promise<ToolResult> {
+  const keys = Object.keys(args);
+  const source = args.source;
+  if (keys.length !== 1 || keys[0] !== "source" || typeof source !== "string" || !source.trim()) {
+    throw new Error("skill_install_local accepts exactly one source path.");
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(source) || !isAbsolute(source)) {
+    throw new Error("Skill source must be an absolute local path.");
+  }
+  const workspace = process.env.KIMI_DESKTOP_SKILL_WORKSPACE;
+  if (!workspace || !isAbsolute(workspace)) {
+    throw new Error("Skill installation is unavailable for this session.");
+  }
+  try {
+    const sourceEntry = await lstat(source);
+    if (sourceEntry.isSymbolicLink() || (!sourceEntry.isDirectory() && !sourceEntry.isFile())) {
+      throw new Error("Skill source must be a regular file or directory.");
+    }
+    if (sourceEntry.isFile() && extname(source).toLowerCase() !== ".md") {
+      throw new Error("Skill source must be a directory or Markdown file.");
+    }
+    const canonicalWorkspace = await realpath(workspace);
+    const canonicalSource = await realpath(source);
+    const rel = relative(canonicalWorkspace, canonicalSource);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error("Skill source must be inside the active workspace.");
+    const sourceName = basename(canonicalSource);
+    const name = sourceEntry.isFile() ? sourceName.slice(0, -extname(sourceName).length) : sourceName;
+    await sendBridge({ action: "request_skill_install", cwd: canonicalWorkspace, source: canonicalSource, name });
+    return textResult(`Confirmation requested for local skill '${name}'. It has not been installed; the user must confirm in Kimi Code Desktop.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/^(?:Skill|SKILL\.md)\b/.test(message)) throw new Error(message);
+    throw new Error("Skill installation could not be requested. Check that the source is a valid local skill inside this workspace.");
+  }
+}
+
+async function sendBridge(command: PreviewBridgeCommand): Promise<void> {
   const url = process.env.KIMI_DESKTOP_PREVIEW_BRIDGE;
   if (!url) throw new Error("Kimi Code Desktop preview bridge is unavailable.");
   await new Promise<void>((resolvePromise, reject) => {

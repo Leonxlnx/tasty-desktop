@@ -1,3 +1,6 @@
+import { mkdtemp, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   clampPreviewPanelWidth,
@@ -23,11 +26,17 @@ describe("desktop preview bridge", () => {
     expect(clampPreviewViewportHeight(10)).toBe(240);
   });
 
-  it("attaches the bundled MCP and authenticates its private bridge token", () => {
+  it("attaches the bundled MCP with its trusted workspace and authenticates its private bridge token", async () => {
     const bridge = "ws://127.0.0.1:4317?preview-token=test-token";
-    const server = createDesktopPreviewMcpServer("file:///C:/runtime/orchestration-server.mjs", bridge);
+    const workspace = await realpath(await mkdtemp(join(tmpdir(), "kimi-preview-workspace-")));
+    const kimiHome = await realpath(await mkdtemp(join(tmpdir(), "kimi-preview-home-")));
+    const server = createDesktopPreviewMcpServer("file:///C:/runtime/orchestration-server.mjs", bridge, workspace, kimiHome);
     expect(server).toMatchObject({ name: "kimi-desktop-preview", args: [expect.stringMatching(/preview-mcp\.mjs$/)] });
-    expect((server as { env?: Array<{ name: string; value: string }> }).env).toEqual([{ name: "KIMI_DESKTOP_PREVIEW_BRIDGE", value: bridge }]);
+    expect((server as { env?: Array<{ name: string; value: string }> }).env).toEqual([
+      { name: "KIMI_DESKTOP_PREVIEW_BRIDGE", value: bridge },
+      { name: "KIMI_DESKTOP_SKILL_WORKSPACE", value: workspace },
+      { name: "KIMI_CODE_HOME", value: kimiHome },
+    ]);
     expect(isPreviewBridgeRequest("/?preview-token=test-token", "test-token")).toBe(true);
     expect(isPreviewBridgeRequest("/?preview-token=wrong", "test-token")).toBe(false);
   });

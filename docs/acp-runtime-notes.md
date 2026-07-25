@@ -1,6 +1,8 @@
 # Kimi ACP Runtime Notes
 
-These notes describe behavior verified against Kimi Code CLI `0.26.0`. Future versions may expose additional runtime values. The desktop app treats ACP responses as authoritative.
+These notes describe behavior verified against Kimi Code CLI `0.29.1`. Future versions may expose additional runtime values. The desktop app treats ACP responses as authoritative.
+
+The repository retains a `0.26.0` initialize/auth golden transcript as a compatibility fixture. It is not the current reference runtime and should not be rewritten to look like a newer CLI.
 
 ## Initialization
 
@@ -16,9 +18,9 @@ Before login, creating a session returns an authentication-required error. The d
 
 ## Runtime configuration
 
-The verified K3 session exposes live model, thinking, and permission options through ACP. Kimi Code CLI `0.26.0` currently reports `Thinking On` as its only thinking choice for this configuration.
+The verified K3 session on Kimi Code CLI `0.29.1` exposes live model, reasoning effort, and permission options through ACP. Depending on the selected model and account, the runtime can offer `Low`, `High`, and `Max`.
 
-The desktop app does not create Standard, High, Max, or future reasoning choices locally. It renders the values returned by the session and rejects values not offered by the active runtime.
+The desktop app does not create effort choices locally. It renders the values returned by the session, accepts future values without a desktop release, and rejects values not offered by the active runtime. A legacy binary `Thinking On` value is shown as runtime-managed `Default`; it is not evidence that the runtime selected `Max`.
 
 Draft controls use the freshest runtime catalog available. When a persisted chat opens after a server restart, the app resumes that ACP session before applying a configuration change. This prevents stale session IDs and refreshes any choices added by a newer CLI.
 
@@ -26,7 +28,7 @@ The Kimi child process starts with `KIMI_CODE_NO_AUTO_UPDATE=1` so a running ses
 
 ## Subscription usage
 
-ACP `0.26.0` exposes session and context usage but not subscription windows.
+ACP session events expose context and turn usage but do not provide the complete subscription-window surface used by the desktop app.
 
 For plan limits, the app launches the official Kimi CLI in an app-owned hidden workspace, invokes its local `/usage` panel, and parses only rendered percentage and reset rows. The CLI owns OAuth refresh and network access. The desktop app does not read tokens or call Kimi account APIs.
 
@@ -34,7 +36,7 @@ The verified panel reports weekly and five-hour windows but no monthly window. T
 
 ## Prompt queue and steering
 
-ACP `0.26.0` exposes prompt and cancel, but no mid-turn steering method.
+The desktop does not assume that an ACP session supports a separate mid-turn steering method.
 
 - Queue appends a prompt to one server-owned FIFO per desktop thread.
 - Steer places the new instruction first, cancels the current ACP turn, and dispatches after the persisted cancellation boundary.
@@ -42,11 +44,27 @@ ACP `0.26.0` exposes prompt and cancel, but no mid-turn steering method.
 
 This prevents concurrent `session/prompt` calls against one ACP session.
 
+## Background task completion
+
+Kimi shell and `Agent` tool results can identify a finite detached task with a task ID, a supported status, and `automatic_notification: true`. The desktop registers only those explicit records and ignores tools that set `disable_timeout`.
+
+The monitor reads only the matching task JSON beneath the active Kimi session. It accepts bounded finite task IDs, validates canonical paths, limits active and retained records, and expires a running task after 24 hours. When the task reaches a terminal state, the server persists a FIFO follow-up that asks Kimi to inspect the bounded same-session `output.log` before reporting success.
+
+Registration, terminal status, and report-queued state replay after a server restart. Queue persistence happens before the report marker, so recovery provides at-least-once follow-up. It does not guarantee exactly-once external model delivery.
+
+## Skills and subagents
+
+Skills are discovered from `%KIMI_CODE_HOME%\skills` (default `%USERPROFILE%\.kimi-code\skills`), `%USERPROFILE%\.agents\skills`, and the active project's `.kimi-code\skills` and `.agents\skills` directories. Folder skills use `SKILL.md`; flat Markdown skills are also supported.
+
+An install copies only a confirmed skill source inside the active workspace. The server rejects symlinks, traversal, invalid names, oversized or deeply nested bundles, excessive entry counts, and existing destinations. Installation does not alter credentials or create a competing skill store.
+
+The capability center's `coder`, `explore`, and `plan` entries are prompt shortcuts. Running subagent state is projected from actual Kimi `Agent` tool output and persisted background-task events, not from those shortcuts.
+
 ## MCP configuration
 
-Kimi MCP definitions are read from the standard `~/.kimi/mcp.json` store and translated into ACP session values. Standard HTTP, SSE, and stdio definitions are supported.
+User MCP definitions from `%KIMI_CODE_HOME%\mcp.json` are translated into ACP session values. Standard HTTP, SSE, and stdio definitions are supported.
 
-Raw URLs, headers, arguments, and environment values stay in the server process. The renderer receives only redacted transport and target metadata.
+The project root's `.mcp.json` and the active workspace's `.kimi-code\mcp.json` are discovered only for redacted review metadata. They are not attached automatically, so opening an untrusted repository cannot launch its MCP commands. Raw URLs, headers, arguments, and environment values stay in the server process.
 
 ACP SDK `0.23.0` cannot express Kimi's OAuth MCP mode, so OAuth definitions are displayed but are not attached until a compatible upstream path exists.
 

@@ -1,17 +1,25 @@
 #!/usr/bin/env node
 import { Readable, Writable } from "node:stream";
-import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 
 class FakeAgent implements acp.Agent {
   readonly #connection: acp.AgentSideConnection;
   readonly #sessions = new Map<string, { cwd: string; controller: AbortController; configOptions: acp.SessionConfigOption[] }>();
+  #forgotConfigOnce = false;
+  #forgotPromptOnce = false;
+  #rejectedBackgroundReportOnce = false;
 
   constructor(connection: acp.AgentSideConnection) {
     this.#connection = connection;
   }
 
   async initialize(): Promise<acp.InitializeResponse> {
+    const delay = Number(process.env.KIMI_FAKE_INITIALIZE_DELAY_MS ?? 0);
+    if (Number.isFinite(delay) && delay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(delay, 30_000)));
+    }
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
       agentInfo: { name: "Kimi Code Fake", version: "0.26.0-fixture" },
@@ -50,8 +58,17 @@ class FakeAgent implements acp.Agent {
   }
 
   async setSessionConfigOption(params: acp.SetSessionConfigOptionRequest): Promise<acp.SetSessionConfigOptionResponse> {
+    if (process.env.KIMI_FAKE_UNKNOWN_CONFIG_ONCE === "1" && !this.#forgotConfigOnce) {
+      this.#forgotConfigOnce = true;
+      this.#sessions.delete(params.sessionId);
+      throw acp.RequestError.invalidParams(undefined, `Unknown sessionId: ${params.sessionId}`);
+    }
     const session = this.#sessions.get(params.sessionId);
-    if (!session) throw new Error("Unknown fake session");
+    if (!session) throw acp.RequestError.invalidParams(undefined, `Unknown sessionId: ${params.sessionId}`);
+    const delay = Number(process.env.KIMI_FAKE_CONFIG_DELAY_MS ?? 0);
+    if (params.configId === "model" && Number.isFinite(delay) && delay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(delay, 30_000)));
+    }
     const values = new Map(session.configOptions.map((option) => [option.id, option.currentValue]));
     values.set(String(params.configId), params.value);
     session.configOptions = fakeConfigOptions(values, values.get("model") === "kimi-k3-fast");
@@ -61,8 +78,13 @@ class FakeAgent implements acp.Agent {
   }
 
   async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
+    if (process.env.KIMI_FAKE_UNKNOWN_PROMPT_ONCE === "1" && !this.#forgotPromptOnce) {
+      this.#forgotPromptOnce = true;
+      this.#sessions.delete(params.sessionId);
+      throw acp.RequestError.invalidParams(undefined, `Unknown sessionId: ${params.sessionId}`);
+    }
     const session = this.#sessions.get(params.sessionId);
-    if (!session) throw new Error("Unknown fake session");
+    if (!session) throw acp.RequestError.invalidParams(undefined, `Unknown sessionId: ${params.sessionId}`);
     if (params.prompt.some((block) => block.type === "text" && block.text === "__CLOSE_ACP__")) process.exit(0);
     const readPath = params.prompt.find((block) => block.type === "text" && block.text.startsWith("__READ_TEXT_FILE__:"));
     if (readPath?.type === "text") {
@@ -70,9 +92,80 @@ class FakeAgent implements acp.Agent {
       await this.#update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: result.content } });
       return { stopReason: "end_turn" };
     }
+    const rangedRead = params.prompt.find((block) => block.type === "text" && block.text.startsWith("__READ_TEXT_FILE_RANGE__:"));
+    const rangedMatch = rangedRead?.type === "text" && /^__READ_TEXT_FILE_RANGE__:(\d+):(\d+):(.*)$/s.exec(rangedRead.text);
+    if (rangedMatch) {
+      const result = await this.#connection.readTextFile({
+        sessionId: params.sessionId,
+        path: rangedMatch[3]!,
+        line: Number(rangedMatch[1]),
+        limit: Number(rangedMatch[2]),
+      });
+      await this.#update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: result.content } });
+      return { stopReason: "end_turn" };
+    }
     const writePath = params.prompt.find((block) => block.type === "text" && block.text.startsWith("__WRITE_TEXT_FILE__:"));
     if (writePath?.type === "text") {
       await this.#connection.writeTextFile({ sessionId: params.sessionId, path: writePath.text.slice("__WRITE_TEXT_FILE__:".length), content: "changed" });
+      return { stopReason: "end_turn" };
+    }
+    const text = params.prompt.map((block) => block.type === "text" ? block.text : "").join("\n");
+    if (text.startsWith("A background task from the previous request has finished.")) {
+      if (process.env.KIMI_FAKE_BACKGROUND_REPORT_REJECT_ALWAYS === "1") {
+        throw new Error("Fake background report rejected permanently");
+      }
+      if (process.env.KIMI_FAKE_BACKGROUND_REPORT_REJECT_ONCE === "1" && !this.#rejectedBackgroundReportOnce) {
+        this.#rejectedBackgroundReportOnce = true;
+        throw new Error("Fake background report rejected");
+      }
+      const delay = Number(process.env.KIMI_FAKE_BACKGROUND_REPORT_DELAY_MS ?? 0);
+      if (Number.isFinite(delay) && delay > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(delay, 30_000)));
+      await this.#update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Background report delivered." } });
+      return { stopReason: "end_turn" };
+    }
+    if (text.includes("__BACKGROUND_TASK__")) {
+      const taskId = "bash-build1";
+      const path = fakeTaskPath(params.sessionId, taskId);
+      const completedBeforeTurn = text.includes("__BACKGROUND_TASK_COMPLETED__");
+      const task = {
+        taskId,
+        description: "Build APK",
+        status: completedBeforeTurn ? "completed" : "running",
+        detached: true,
+        startedAt: Date.now(),
+        timeoutMs: 60_000,
+        kind: "process",
+        pid: process.pid,
+        ...(completedBeforeTurn ? { endedAt: Date.now(), exitCode: 0 } : {}),
+      };
+      await mkdir(dirname(path), { recursive: true });
+      if (completedBeforeTurn) {
+        const output = join(dirname(path), taskId, "output.log");
+        await mkdir(dirname(output), { recursive: true });
+        await writeFile(output, "BUILD SUCCESSFUL", "utf8");
+      }
+      await writeFile(path, JSON.stringify(task), "utf8");
+      await this.#update(params.sessionId, {
+        sessionUpdate: "tool_call", toolCallId: "tool-background", title: "Starting background: build APK", kind: "execute", status: "in_progress",
+        rawInput: { command: "build-apk", description: "Build APK", run_in_background: true, timeout: 60 },
+      });
+      await this.#update(params.sessionId, {
+        sessionUpdate: "tool_call_update", toolCallId: "tool-background", status: "completed",
+        rawOutput: `task_id: ${taskId}\npid: ${process.pid}\ndescription: Build APK\nstatus: ${task.status}\nautomatic_notification: true`,
+      });
+      if (!text.includes("__BACKGROUND_TASK_PENDING__") && !completedBeforeTurn) {
+        setTimeout(() => {
+          const output = join(dirname(path), taskId, "output.log");
+          void mkdir(dirname(output), { recursive: true })
+            .then(() => writeFile(output, "BUILD SUCCESSFUL", "utf8"))
+            .then(() => writeFile(path, JSON.stringify({ ...task, status: "completed", endedAt: Date.now(), exitCode: 0 }), "utf8"));
+        }, 250);
+      }
+      await this.#update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The build is still running; I will report when it finishes." } });
+      if (text.includes("__BACKGROUND_TASK_STALL__")) {
+        await new Promise((resolve) => setTimeout(resolve, 30_000));
+      }
+      if (text.includes("__BACKGROUND_TASK_REJECT__")) throw new Error("Fake prompt rejected after starting a background task");
       return { stopReason: "end_turn" };
     }
     const controller = session.controller = new AbortController();
@@ -105,7 +198,11 @@ class FakeAgent implements acp.Agent {
         { optionId: "reject-always", name: "Never allow", kind: "reject_always" },
       ],
     });
-    if (controller.signal.aborted || permission.outcome.outcome === "cancelled") return { stopReason: "cancelled" };
+    if (controller.signal.aborted || permission.outcome.outcome === "cancelled") {
+      const delay = Number(process.env.KIMI_FAKE_CANCEL_RESPONSE_DELAY_MS ?? 0);
+      if (Number.isFinite(delay) && delay > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(delay, 30_000)));
+      return { stopReason: "cancelled" };
+    }
     if (permission.outcome.outcome === "selected" && permission.outcome.optionId.startsWith("reject")) {
       await this.#update(params.sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Permission rejected." } });
       return { stopReason: "end_turn" };
@@ -121,6 +218,12 @@ class FakeAgent implements acp.Agent {
   async #update(sessionId: string, update: acp.SessionUpdate): Promise<void> {
     await this.#connection.sessionUpdate({ sessionId, update });
   }
+}
+
+function fakeTaskPath(sessionId: string, taskId: string): string {
+  const home = process.env.KIMI_CODE_HOME ?? join(process.cwd(), ".kimi-code");
+  const sessionDirectory = sessionId.startsWith("session_") ? sessionId : `session_${sessionId}`;
+  return join(home, "sessions", "wd-test", sessionDirectory, "agents", "main", "tasks", `${taskId}.json`);
 }
 
 const stream = acp.ndJsonStream(

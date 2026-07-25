@@ -80,7 +80,11 @@ export class RuntimeIngestion {
 
   #enqueue(sessionId: string, operation: () => Promise<void>): Promise<void> {
     const queued = (this.#tails.get(sessionId) ?? Promise.resolve()).then(operation);
-    this.#tails.set(sessionId, queued.catch(() => undefined));
+    const tail = queued.catch(() => undefined);
+    this.#tails.set(sessionId, tail);
+    void tail.then(() => {
+      if (this.#tails.get(sessionId) === tail) this.#tails.delete(sessionId);
+    });
     return queued;
   }
 }
@@ -124,7 +128,9 @@ export function toDomainEvent(update: SessionUpdate, turnId: string): DomainEven
 }
 
 export function toolCallInput(update: SessionUpdate): unknown {
-  if (update.sessionUpdate !== "tool_call" || !("content" in update) || !Array.isArray(update.content)) return undefined;
+  if (update.sessionUpdate !== "tool_call") return undefined;
+  if ("rawInput" in update && update.rawInput !== undefined) return update.rawInput;
+  if (!("content" in update) || !Array.isArray(update.content)) return undefined;
   const text = update.content
     .map((item) => item && typeof item === "object" && "content" in item ? item.content : undefined)
     .find((content) => content && typeof content === "object" && "text" in content && typeof content.text === "string") as { text: string } | undefined;

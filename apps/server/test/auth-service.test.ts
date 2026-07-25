@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtemp } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { AuthService, clearKimiCredentials, hasKimiCredentials, parseLoginLine } from "../src/auth-service.js";
+import { AuthService, clearKimiCredentials, hasKimiCredentials, KIMI_INSTALL_URL, parseLoginLine } from "../src/auth-service.js";
 
 describe("AuthService", () => {
   it("extracts device pairing URLs and codes without reading credentials", () => {
@@ -25,5 +25,20 @@ describe("AuthService", () => {
     clearKimiCredentials(home);
     expect(hasKimiCredentials(home)).toBe(false);
     expect(await import("node:fs/promises").then(({ readFile }) => readFile(join(home, "credentials", "mcp-auth.json"), "utf8"))).toBe("keep me");
+  });
+
+  it("returns official manual installation guidance without executing remote code", async () => {
+    const home = await mkdtemp(join(tmpdir(), "kimi-auth-manual-install-"));
+    const events: unknown[] = [];
+    const service = new AuthService(join(home, "missing-kimi.exe"), home, (event) => events.push(event));
+    expect(service.beginInstall()).toMatchObject({
+      installed: false,
+      installRunning: false,
+      installMode: "manual",
+      installUrl: KIMI_INSTALL_URL,
+    });
+    expect(events).toEqual([]);
+    await writeFile(join(home, "missing-kimi.exe"), "installed");
+    expect(service.beginInstall()).toMatchObject({ installed: true, installRunning: false });
   });
 });

@@ -1,5 +1,5 @@
 import { createRequire as nodeCreateRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { McpServer } from "@agentclientprotocol/sdk";
 
@@ -11,6 +11,13 @@ export type DesktopPreviewCommand = {
   panelWidth?: number;
   viewportWidth?: number;
   viewportHeight?: number;
+};
+
+export type PreviewBridgeCommand = DesktopPreviewCommand | {
+  action: "request_skill_install";
+  cwd: string;
+  source: string;
+  name: string;
 };
 
 export function normalizeDesktopPreviewUrl(value: string): string | undefined {
@@ -38,7 +45,15 @@ export function clampPreviewViewportHeight(value: unknown): number {
   return Math.round(Math.min(1_200, Math.max(240, numeric(value, 900))));
 }
 
-export function createDesktopPreviewMcpServer(currentModuleUrl: string, bridgeUrl: string): McpServer {
+export function createDesktopPreviewMcpServer(
+  currentModuleUrl: string,
+  bridgeUrl: string,
+  workspace: string,
+  kimiHome: string,
+): McpServer {
+  if (!isAbsolute(workspace) || !isAbsolute(kimiHome)) {
+    throw new Error("Desktop MCP workspace and Kimi home must be absolute");
+  }
   const currentFile = fileURLToPath(currentModuleUrl);
   const sourceRuntime = currentFile.endsWith(".ts");
   const script = join(dirname(currentFile), sourceRuntime ? "preview-mcp.ts" : "preview-mcp.mjs");
@@ -49,7 +64,11 @@ export function createDesktopPreviewMcpServer(currentModuleUrl: string, bridgeUr
     name: desktopPreviewMcpName,
     command: process.execPath,
     args,
-    env: [{ name: "KIMI_DESKTOP_PREVIEW_BRIDGE", value: bridgeUrl }],
+    env: [
+      { name: "KIMI_DESKTOP_PREVIEW_BRIDGE", value: bridgeUrl },
+      { name: "KIMI_DESKTOP_SKILL_WORKSPACE", value: workspace },
+      { name: "KIMI_CODE_HOME", value: kimiHome },
+    ],
   };
 }
 

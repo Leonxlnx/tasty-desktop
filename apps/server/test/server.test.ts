@@ -47,7 +47,15 @@ describe("orchestration server", () => {
     const createReply = waitFor(socket, messages, (message) => message.id === 2);
     socket.send(JSON.stringify({ id: 2, method: "threads.create", params: { cwd: process.cwd() } }));
     const created = await createReply;
-    const threadId = ((created.result as { thread: { threadId: string } }).thread).threadId;
+    const createdThread = (created.result as { thread: { threadId: string; sessionId: string } }).thread;
+    const threadId = createdThread.threadId;
+    const duplicateResumeReply = waitFor(socket, messages, (message) => message.id === 91);
+    socket.send(JSON.stringify({
+      id: 91,
+      method: "threads.resume",
+      params: { threadId: `${threadId}-duplicate`, sessionId: createdThread.sessionId, cwd: process.cwd(), replay: false },
+    }));
+    expect(((await duplicateResumeReply).error as { message?: string } | undefined)?.message).toMatch(/already owned/i);
 
     const modelUpdated = waitFor(socket, messages, (message) => {
       const event = message.payload as { type?: string; payload?: { options?: Array<{ id: string; currentValue: unknown }> } } | undefined;
@@ -244,6 +252,13 @@ describe("orchestration server", () => {
     const firstApproval = waitFor(socket, messages, (message) => (message.payload as { type?: string } | undefined)?.type === "ApprovalRequested");
     socket.send(JSON.stringify({ id: 3, method: "threads.sendTurn", params: { threadId, text: "First task" } }));
     const firstRequest = (await firstApproval).payload as { payload: { requestId: string } };
+    const rejectedImage = waitFor(socket, messages, (message) => message.id === 40);
+    socket.send(JSON.stringify({
+      id: 40,
+      method: "threads.sendTurn",
+      params: { threadId, text: "Queued image", images: [{ name: "pixel.png", mimeType: "image/png", data: "AQID" }] },
+    }));
+    expect((await rejectedImage).error).toMatchObject({ message: expect.stringMatching(/image prompts cannot be queued/i) });
     const queuedUpdate = waitFor(socket, messages, (message) => {
       const payload = message.payload as { queue?: Array<{ text: string }> } | undefined;
       return message.channel === "thread.queueUpdated" && payload?.queue?.some((item) => item.text === "Second task") === true;
@@ -364,6 +379,695 @@ describe("orchestration server", () => {
     socket.close();
   });
 
+  it("self-heals forgotten ACP sessions and serializes config projection updates", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-session-heal-"));
+    await launchServer(serverPath, "45133", dataHome, children, {
+      KIMI_FAKE_UNKNOWN_CONFIG_ONCE: "1",
+      KIMI_FAKE_UNKNOWN_PROMPT_ONCE: "1",
+      KIMI_FAKE_CONFIG_DELAY_MS: "100",
+    });
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45133", messages);
+    const createdReply = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "threads.create", params: { cwd: process.cwd() } }));
+    const threadId = ((await createdReply).result as { thread: { threadId: string } }).thread.threadId;
+
+    const modelReply = waitFor(socket, messages, (message) => message.id === 2);
+    const staleThinkingReply = waitFor(socket, messages, (message) => message.id === 3);
+    socket.send(JSON.stringify({ id: 2, method: "threads.setConfigOption", params: { threadId, configId: "model", value: "kimi-k3-fast" } }));
+    socket.send(JSON.stringify({ id: 3, method: "threads.setConfigOption", params: { threadId, configId: "thinking", value: "off" } }));
+    const model = await modelReply;
+    expect(model.error).toBeUndefined();
+    expect(((model.result as { configOptions: Array<{ id: string; currentValue: unknown }> }).configOptions.find((option) => option.id === "model"))?.currentValue).toBe("kimi-k3-fast");
+    expect((await staleThinkingReply).error).toMatchObject({ message: expect.stringMatching(/not supported/i) });
+
+    const approval = waitFor(socket, messages, (message) => (message.payload as { type?: string } | undefined)?.type === "ApprovalRequested");
+    socket.send(JSON.stringify({ id: 4, method: "threads.sendTurn", params: { threadId, text: "Continue after forgotten session" } }));
+    const request = (await approval).payload as { payload: { requestId: string } };
+    const completed = waitFor(socket, messages, (message) => (message.payload as { type?: string; payload?: { stopReason?: string } } | undefined)?.type === "TurnCompleted"
+      && (message.payload as { payload?: { stopReason?: string } }).payload?.stopReason === "end_turn");
+    socket.send(JSON.stringify({ id: 5, method: "threads.respondToRequest", params: { threadId, requestId: request.payload.requestId, optionId: "allow-once" } }));
+    await completed;
+    expect(messages.filter((message) => (message.payload as { type?: string } | undefined)?.type === "TurnStarted")).toHaveLength(1);
+    expect(messages.filter((message) => (message.payload as { type?: string } | undefined)?.type === "ApprovalRequested")).toHaveLength(1);
+    socket.close();
+  });
+
+  it("honors an explicit empty default workspace and atomically pauses sends for updates", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-update-lock-"));
+    await launchServer(serverPath, "45134", dataHome, children, { KIMI_DEFAULT_CWD: "" });
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45134", messages);
+    const bootstrap = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "env.bootstrap", params: {} }));
+    expect((await bootstrap).result).toMatchObject({ defaultCwd: "" });
+    const createdReply = waitFor(socket, messages, (message) => message.id === 2);
+    socket.send(JSON.stringify({ id: 2, method: "threads.create", params: { cwd: process.cwd() } }));
+    const threadId = ((await createdReply).result as { thread: { threadId: string } }).thread.threadId;
+
+    const prepared = waitFor(socket, messages, (message) => message.id === 3);
+    socket.send(JSON.stringify({ id: 3, method: "env.prepareUpdate", params: {} }));
+    expect((await prepared).result).toEqual({ ready: true });
+    const confirmed = waitFor(socket, messages, (message) => message.id === 30);
+    socket.send(JSON.stringify({ id: 30, method: "env.confirmUpdate", params: {} }));
+    expect((await confirmed).result).toEqual({ ready: true });
+    const blockedSend = waitFor(socket, messages, (message) => message.id === 4);
+    socket.send(JSON.stringify({ id: 4, method: "threads.sendTurn", params: { threadId, text: "Must wait" } }));
+    expect((await blockedSend).error).toMatchObject({ message: expect.stringMatching(/update is prepared/i) });
+    const cancelled = waitFor(socket, messages, (message) => message.id === 5);
+    socket.send(JSON.stringify({ id: 5, method: "env.cancelUpdate", params: {} }));
+    expect((await cancelled).result).toEqual({ cancelled: true });
+
+    const approval = waitFor(socket, messages, (message) => (message.payload as { type?: string } | undefined)?.type === "ApprovalRequested");
+    socket.send(JSON.stringify({ id: 6, method: "threads.sendTurn", params: { threadId, text: "Run after update cancellation" } }));
+    await approval;
+    const refused = waitFor(socket, messages, (message) => message.id === 7);
+    socket.send(JSON.stringify({ id: 7, method: "env.prepareUpdate", params: {} }));
+    expect((await refused).error).toMatchObject({ message: expect.stringMatching(/activeTurns=1|approvals=1/) });
+    const stopped = waitFor(socket, messages, (message) => message.id === 8);
+    socket.send(JSON.stringify({ id: 8, method: "threads.interruptTurn", params: { threadId } }));
+    expect((await stopped).error).toBeUndefined();
+    socket.close();
+  });
+
+  it("keeps local thread history and queue controls available when ACP cannot start", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-local-recovery-"));
+    const kimiHome = await mkdtemp(join(tmpdir(), "kimi-home-local-recovery-"));
+    await mkdir(join(kimiHome, "credentials"), { recursive: true });
+    await writeFile(join(kimiHome, "credentials", "kimi-code.json"), "authenticated");
+    const first = await launchServer(serverPath, "45210", dataHome, children);
+    const firstMessages: Array<Record<string, unknown>> = [];
+    const firstSocket = await connect("45210", firstMessages);
+    const createdReply = waitFor(firstSocket, firstMessages, (message) => message.id === 1);
+    firstSocket.send(JSON.stringify({ id: 1, method: "threads.create", params: { cwd: process.cwd() } }));
+    const threadId = ((await createdReply).result as { thread: { threadId: string } }).thread.threadId;
+    firstSocket.close();
+    const firstExited = new Promise<void>((resolve) => first.once("exit", () => resolve()));
+    first.kill();
+    await firstExited;
+
+    await launchServer(serverPath, "45211", dataHome, children, {
+      KIMI_FAKE: "0",
+      KIMI_CODE_HOME: kimiHome,
+      KIMI_BINARY: join(dataHome, "missing-kimi.exe"),
+    });
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45211", messages);
+    const bootstrap = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "env.bootstrap", params: {} }));
+    expect(await bootstrap).toMatchObject({
+      result: {
+        auth: { authenticated: true },
+        degraded: true,
+        runtimeError: expect.stringMatching(/connection closed|missing-kimi|ENOENT|spawn/i),
+      },
+    });
+    const listed = waitFor(socket, messages, (message) => message.id === 2);
+    socket.send(JSON.stringify({ id: 2, method: "threads.list", params: {} }));
+    expect(((await listed).result as { threads: Array<{ threadId: string }> }).threads).toContainEqual(expect.objectContaining({ threadId }));
+
+    const renamed = waitFor(socket, messages, (message) => message.id === 3);
+    socket.send(JSON.stringify({ id: 3, method: "threads.rename", params: { threadId, title: "Offline recovery" } }));
+    expect(((await renamed).result as { thread: { title: string } }).thread.title).toBe("Offline recovery");
+    const checkpoints = waitFor(socket, messages, (message) => message.id === 4);
+    socket.send(JSON.stringify({ id: 4, method: "checkpoints.list", params: { threadId } }));
+    expect((await checkpoints).result).toEqual({ checkpoints: [] });
+
+    const firstQueued = waitFor(socket, messages, (message) => message.id === 5);
+    socket.send(JSON.stringify({ id: 5, method: "threads.sendTurn", params: { threadId, text: "Keep this queued" } }));
+    const firstQueuedId = ((await firstQueued).result as { queuedId: string }).queuedId;
+    const secondQueued = waitFor(socket, messages, (message) => message.id === 6);
+    socket.send(JSON.stringify({ id: 6, method: "threads.sendTurn", params: { threadId, text: "Edit this queued prompt" } }));
+    const secondQueuedId = ((await secondQueued).result as { queuedId: string }).queuedId;
+    const updated = waitFor(socket, messages, (message) => message.id === 7);
+    socket.send(JSON.stringify({ id: 7, method: "threads.updateQueuedTurn", params: { threadId, queuedId: secondQueuedId, text: "Edited while offline" } }));
+    expect(((await updated).result as { queued: Array<{ text: string }> }).queued).toContainEqual(expect.objectContaining({ text: "Edited while offline" }));
+    const removed = waitFor(socket, messages, (message) => message.id === 8);
+    socket.send(JSON.stringify({ id: 8, method: "threads.removeQueuedTurn", params: { threadId, queuedId: secondQueuedId } }));
+    expect((await removed).error).toBeUndefined();
+    const cleared = waitFor(socket, messages, (message) => message.id === 9);
+    socket.send(JSON.stringify({ id: 9, method: "threads.removeQueuedTurn", params: { threadId, queuedId: firstQueuedId } }));
+    expect((await cleared).error).toBeUndefined();
+    const deleted = waitFor(socket, messages, (message) => message.id === 10);
+    socket.send(JSON.stringify({ id: 10, method: "threads.delete", params: { threadId } }));
+    expect((await deleted).error).toBeUndefined();
+    socket.close();
+  }, 30_000);
+
+  it("owns update preparation per socket and blocks active terminal work", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-update-owner-"));
+    await launchServer(serverPath, "45212", dataHome, children);
+    const firstMessages: Array<Record<string, unknown>> = [];
+    const secondMessages: Array<Record<string, unknown>> = [];
+    const first = await connect("45212", firstMessages);
+    const second = await connect("45212", secondMessages);
+
+    const started = waitFor(first, firstMessages, (message) => message.id === 1);
+    first.send(JSON.stringify({ id: 1, method: "terminal.start", params: { cwd: process.cwd() } }));
+    const sessionId = ((await started).result as { sessionId: string }).sessionId;
+    const blockedByTerminal = waitFor(second, secondMessages, (message) => message.id === 2);
+    second.send(JSON.stringify({ id: 2, method: "env.prepareUpdate", params: {} }));
+    expect((await blockedByTerminal).error).toMatchObject({ message: expect.stringMatching(/terminals=1/) });
+    const stopped = waitFor(first, firstMessages, (message) => message.id === 3);
+    first.send(JSON.stringify({ id: 3, method: "terminal.stop", params: { sessionId } }));
+    await stopped;
+
+    const prepared = waitFor(second, secondMessages, (message) => message.id === 4);
+    second.send(JSON.stringify({ id: 4, method: "env.prepareUpdate", params: {} }));
+    expect((await prepared).result).toEqual({ ready: true });
+    const foreignConfirm = waitFor(first, firstMessages, (message) => message.id === 40);
+    first.send(JSON.stringify({ id: 40, method: "env.confirmUpdate", params: {} }));
+    expect((await foreignConfirm).error).toMatchObject({ message: expect.stringMatching(/only the app window/i) });
+    const ownerConfirm = waitFor(second, secondMessages, (message) => message.id === 41);
+    second.send(JSON.stringify({ id: 41, method: "env.confirmUpdate", params: {} }));
+    expect((await ownerConfirm).result).toEqual({ ready: true });
+    const foreignCancel = waitFor(first, firstMessages, (message) => message.id === 5);
+    first.send(JSON.stringify({ id: 5, method: "env.cancelUpdate", params: {} }));
+    expect((await foreignCancel).error).toMatchObject({ message: expect.stringMatching(/only the app window/i) });
+    const blockedStart = waitFor(first, firstMessages, (message) => message.id === 6);
+    first.send(JSON.stringify({ id: 6, method: "terminal.start", params: { cwd: process.cwd() } }));
+    expect((await blockedStart).error).toMatchObject({ message: expect.stringMatching(/update is prepared/i) });
+    const blockedWrite = waitFor(first, firstMessages, (message) => message.id === 7);
+    first.send(JSON.stringify({ id: 7, method: "terminal.write", params: { sessionId, command: "echo blocked" } }));
+    expect((await blockedWrite).error).toMatchObject({ message: expect.stringMatching(/update is prepared/i) });
+
+    const ownerClosed = new Promise<void>((resolve) => second.once("close", resolve));
+    second.close();
+    await ownerClosed;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const restarted = waitFor(first, firstMessages, (message) => message.id === 8);
+    first.send(JSON.stringify({ id: 8, method: "terminal.start", params: { cwd: process.cwd() } }));
+    const restartedSession = ((await restarted).result as { sessionId: string }).sessionId;
+    const finalStop = waitFor(first, firstMessages, (message) => message.id === 9);
+    first.send(JSON.stringify({ id: 9, method: "terminal.stop", params: { sessionId: restartedSession } }));
+    await finalStop;
+    first.close();
+  });
+
+  it("admits prompts after pending cross-window config writes", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-config-prompt-order-"));
+    await launchServer(serverPath, "45213", dataHome, children, { KIMI_FAKE_CONFIG_DELAY_MS: "300" });
+    const firstMessages: Array<Record<string, unknown>> = [];
+    const secondMessages: Array<Record<string, unknown>> = [];
+    const first = await connect("45213", firstMessages);
+    const second = await connect("45213", secondMessages);
+    const created = waitFor(first, firstMessages, (message) => message.id === 1);
+    first.send(JSON.stringify({ id: 1, method: "threads.create", params: { cwd: process.cwd() } }));
+    const threadId = ((await created).result as { thread: { threadId: string } }).thread.threadId;
+    const replies: string[] = [];
+    first.on("message", (data) => {
+      if ((JSON.parse(data.toString()) as { id?: number }).id === 2) replies.push("config");
+    });
+    second.on("message", (data) => {
+      if ((JSON.parse(data.toString()) as { id?: number }).id === 3) replies.push("prompt");
+    });
+
+    const config = waitFor(first, firstMessages, (message) => message.id === 2);
+    first.send(JSON.stringify({ id: 2, method: "threads.setConfigOption", params: { threadId, configId: "model", value: "kimi-k3-fast" } }));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const prompt = waitFor(second, secondMessages, (message) => message.id === 3);
+    second.send(JSON.stringify({ id: 3, method: "threads.sendTurn", params: { threadId, text: "Run after config" } }));
+    await prompt;
+    await config;
+    expect(replies).toEqual(["config", "prompt"]);
+    first.close();
+    second.close();
+  });
+
+  it("does not start an admitted queue head after remove, clear, or stop", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const actions = ["remove", "clear", "stop"] as const;
+    for (const [index, action] of actions.entries()) {
+      const dataHome = await mkdtemp(join(tmpdir(), `kimi-server-admission-${action}-`));
+      const firstPort = String(45135 + (index * 2));
+      const secondPort = String(45136 + (index * 2));
+      const first = await launchServer(serverPath, firstPort, dataHome, children);
+      const firstMessages: Array<Record<string, unknown>> = [];
+      const firstSocket = await connect(firstPort, firstMessages);
+      const created = waitFor(firstSocket, firstMessages, (message) => message.id === 1);
+      firstSocket.send(JSON.stringify({ id: 1, method: "threads.create", params: { cwd: process.cwd() } }));
+      const threadId = ((await created).result as { thread: { threadId: string } }).thread.threadId;
+      firstSocket.close();
+      const firstExited = new Promise<void>((resolve) => first.once("exit", () => resolve()));
+      first.kill();
+      await firstExited;
+
+      await launchServer(serverPath, secondPort, dataHome, children, { KIMI_FAKE_INITIALIZE_DELAY_MS: "400" });
+      const messages: Array<Record<string, unknown>> = [];
+      const socket = await connect(secondPort, messages);
+      const queued = waitFor(socket, messages, (message) => message.id === 2);
+      socket.send(JSON.stringify({ id: 2, method: "threads.sendTurn", params: { threadId, text: `Must not start: ${action}` } }));
+      const queuedId = ((await queued).result as { queuedId: string }).queuedId;
+      const cancelled = waitFor(socket, messages, (message) => message.id === 3);
+      socket.send(JSON.stringify(action === "remove"
+        ? { id: 3, method: "threads.removeQueuedTurn", params: { threadId, queuedId } }
+        : action === "clear"
+          ? { id: 3, method: "threads.clearQueue", params: { threadId } }
+          : { id: 3, method: "threads.interruptTurn", params: { threadId, clearQueue: false } }));
+      expect((await cancelled).error).toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      expect(messages.some((message) => {
+        const event = message.payload as { type?: string; payload?: { text?: string } } | undefined;
+        return event?.type === "TurnStarted" && event.payload?.text === `Must not start: ${action}`;
+      })).toBe(false);
+      const listed = waitFor(socket, messages, (message) => message.id === 4);
+      socket.send(JSON.stringify({ id: 4, method: "threads.list", params: {} }));
+      const thread = ((await listed).result as { threads: Array<{ threadId: string; running: boolean; queue: unknown[] }> })
+        .threads.find((candidate) => candidate.threadId === threadId);
+      expect(thread).toMatchObject({ running: false, queue: [] });
+      socket.close();
+    }
+  }, 30_000);
+
+  it("persists automatic background-task registration before the foreground turn settles", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-background-mid-turn-"));
+    const kimiHome = await mkdtemp(join(tmpdir(), "kimi-home-background-mid-turn-"));
+    const first = await launchServer(serverPath, "45141", dataHome, children, { KIMI_CODE_HOME: kimiHome });
+    const firstMessages: Array<Record<string, unknown>> = [];
+    const firstSocket = await connect("45141", firstMessages);
+    const bootstrap = waitFor(firstSocket, firstMessages, (message) => message.id === 1);
+    firstSocket.send(JSON.stringify({ id: 1, method: "env.bootstrap", params: {} }));
+    await bootstrap;
+    const created = waitFor(firstSocket, firstMessages, (message) => message.id === 2);
+    firstSocket.send(JSON.stringify({ id: 2, method: "threads.create", params: { cwd: process.cwd() } }));
+    const threadId = ((await created).result as { thread: { threadId: string } }).thread.threadId;
+    const registered = waitFor(firstSocket, firstMessages, (message) => {
+      const event = message.payload as { type?: string } | undefined;
+      return event?.type === "BackgroundTaskRegistered";
+    });
+    firstSocket.send(JSON.stringify({
+      id: 3,
+      method: "threads.sendTurn",
+      params: { threadId, text: "__BACKGROUND_TASK__ __BACKGROUND_TASK_PENDING__ __BACKGROUND_TASK_STALL__" },
+    }));
+    await registered;
+    expect(firstMessages.some((message) => (message.payload as { type?: string } | undefined)?.type === "TurnCompleted")).toBe(false);
+    firstSocket.close();
+    const firstExited = new Promise<void>((resolve) => first.once("exit", () => resolve()));
+    first.kill();
+    await firstExited;
+
+    await launchServer(serverPath, "45142", dataHome, children, { KIMI_CODE_HOME: kimiHome });
+    const secondMessages: Array<Record<string, unknown>> = [];
+    const secondSocket = await connect("45142", secondMessages);
+    const listed = waitFor(secondSocket, secondMessages, (message) => message.id === 4);
+    secondSocket.send(JSON.stringify({ id: 4, method: "threads.list", params: {} }));
+    const restored = ((await listed).result as { threads: Array<{
+      threadId: string;
+      backgroundTasks: Array<{ taskId: string; status: string }>;
+    }> }).threads.find((candidate) => candidate.threadId === threadId);
+    expect(restored?.backgroundTasks).toEqual([
+      expect.objectContaining({ taskId: "bash-build1", status: "running" }),
+    ]);
+    secondSocket.close();
+  }, 20_000);
+
+  it("durably retries a background report whose fire-and-forget prompt rejects immediately", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-background-report-retry-"));
+    const kimiHome = await mkdtemp(join(tmpdir(), "kimi-home-background-report-retry-"));
+    const first = await launchServer(serverPath, "45143", dataHome, children, {
+      KIMI_CODE_HOME: kimiHome,
+      KIMI_FAKE_BACKGROUND_REPORT_REJECT_ONCE: "1",
+    });
+    const firstMessages: Array<Record<string, unknown>> = [];
+    const firstSocket = await connect("45143", firstMessages);
+    const bootstrap = waitFor(firstSocket, firstMessages, (message) => message.id === 1);
+    firstSocket.send(JSON.stringify({ id: 1, method: "env.bootstrap", params: {} }));
+    await bootstrap;
+    const created = waitFor(firstSocket, firstMessages, (message) => message.id === 2);
+    firstSocket.send(JSON.stringify({ id: 2, method: "threads.create", params: { cwd: process.cwd() } }));
+    const threadId = ((await created).result as { thread: { threadId: string } }).thread.threadId;
+    const automatedTurn = waitFor(firstSocket, firstMessages, (message) => {
+      const event = message.payload as { type?: string; payload?: { origin?: string } } | undefined;
+      return event?.type === "TurnStarted" && event.payload?.origin === "background_task";
+    });
+    firstSocket.send(JSON.stringify({
+      id: 3,
+      method: "threads.sendTurn",
+      params: { threadId, text: "__BACKGROUND_TASK__ __BACKGROUND_TASK_COMPLETED__" },
+    }));
+    const started = await automatedTurn;
+    const automated = (started.payload as { payload: { turnId: string; sourceQueuedId: string } }).payload;
+    const failed = await waitFor(firstSocket, firstMessages, (message) => {
+      const event = message.payload as { type?: string; payload?: { turnId?: string; stopReason?: string } } | undefined;
+      return event?.type === "TurnCompleted"
+        && event.payload?.turnId === automated.turnId
+        && event.payload.stopReason === "error";
+    });
+    const failedSeq = Number(failed.seq);
+    const queuedAgain = await waitFor(firstSocket, firstMessages, (message) => {
+      const payload = message.payload as { queue?: Array<{ queuedId?: string; origin?: string }> } | undefined;
+      return message.channel === "thread.queueUpdated"
+        && Number(message.seq) > failedSeq
+        && payload?.queue?.some((item) => item.origin === "background_task" && item.queuedId === automated.sourceQueuedId) === true;
+    });
+    expect((queuedAgain.payload as { queue: unknown[] }).queue).toHaveLength(1);
+    const firstListed = waitFor(firstSocket, firstMessages, (message) => message.id === 30);
+    firstSocket.send(JSON.stringify({ id: 30, method: "threads.list", params: {} }));
+    const beforeRestart = ((await firstListed).result as { threads: Array<{ threadId: string; queue: Array<{ queuedId: string }> }> })
+      .threads.find((candidate) => candidate.threadId === threadId);
+    expect(beforeRestart?.queue).toEqual([expect.objectContaining({ queuedId: automated.sourceQueuedId })]);
+    firstSocket.close();
+    const firstExited = new Promise<void>((resolve) => first.once("exit", () => resolve()));
+    first.kill();
+    await firstExited;
+
+    await launchServer(serverPath, "45144", dataHome, children, { KIMI_CODE_HOME: kimiHome });
+    const secondMessages: Array<Record<string, unknown>> = [];
+    const secondSocket = await connect("45144", secondMessages);
+    const delivered = waitFor(secondSocket, secondMessages, (message) => {
+      return (message.payload as { type?: string } | undefined)?.type === "BackgroundTaskReportDelivered";
+    });
+    const secondBootstrap = waitFor(secondSocket, secondMessages, (message) => message.id === 4);
+    secondSocket.send(JSON.stringify({ id: 4, method: "env.bootstrap", params: {} }));
+    await secondBootstrap;
+    await delivered;
+    const listed = waitFor(secondSocket, secondMessages, (message) => message.id === 5);
+    secondSocket.send(JSON.stringify({ id: 5, method: "threads.list", params: {} }));
+    const restored = ((await listed).result as { threads: Array<{
+      threadId: string;
+      queue: unknown[];
+      backgroundTasks: Array<{ taskId: string; reportDeliveredAt?: string }>;
+    }> }).threads.find((candidate) => candidate.threadId === threadId);
+    expect(restored?.queue).toEqual([]);
+    expect(restored?.backgroundTasks).toEqual([
+      expect.objectContaining({ taskId: "bash-build1", reportDeliveredAt: expect.any(String) }),
+    ]);
+    secondSocket.close();
+  }, 30_000);
+
+  it("backs off permanently failing background reports and leaves user turns usable", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-background-report-cap-"));
+    const kimiHome = await mkdtemp(join(tmpdir(), "kimi-home-background-report-cap-"));
+    await launchServer(serverPath, "45146", dataHome, children, {
+      KIMI_CODE_HOME: kimiHome,
+      KIMI_FAKE_BACKGROUND_REPORT_REJECT_ALWAYS: "1",
+      KIMI_BACKGROUND_REPORT_RETRY_BASE_MS: "200",
+    });
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45146", messages);
+    const bootstrap = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "env.bootstrap", params: {} }));
+    await bootstrap;
+    const created = waitFor(socket, messages, (message) => message.id === 2);
+    socket.send(JSON.stringify({ id: 2, method: "threads.create", params: { cwd: process.cwd() } }));
+    const threadId = ((await created).result as { thread: { threadId: string } }).thread.threadId;
+    const firstFailure = waitFor(socket, messages, (message) => {
+      const event = message.payload as { type?: string; payload?: { origin?: string; stopReason?: string } } | undefined;
+      return event?.type === "TurnCompleted" && event.payload?.stopReason === "error";
+    });
+    socket.send(JSON.stringify({
+      id: 3,
+      method: "threads.sendTurn",
+      params: { threadId, text: "__BACKGROUND_TASK__ __BACKGROUND_TASK_COMPLETED__" },
+    }));
+    const firstFailed = await firstFailure;
+    const firstFailedSeq = Number(firstFailed.seq);
+    await waitFor(socket, messages, (message) => {
+      const payload = message.payload as { queue?: Array<{ origin?: string }> } | undefined;
+      return message.channel === "thread.queueUpdated"
+        && Number(message.seq) > firstFailedSeq
+        && payload?.queue?.some((item) => item.origin === "background_task") === true;
+    });
+
+    const firstList = waitFor(socket, messages, (message) => message.id === 4);
+    socket.send(JSON.stringify({ id: 4, method: "threads.list", params: {} }));
+    const afterFirstFailure = ((await firstList).result as { threads: Array<{
+      threadId: string;
+      queue: Array<{ origin: string }>;
+      backgroundTasks: Array<{ reportAttemptCount?: number; reportNextAttemptAt?: string }>;
+    }> }).threads.find((candidate) => candidate.threadId === threadId);
+    expect(afterFirstFailure?.queue).toEqual([expect.objectContaining({ origin: "background_task" })]);
+    expect(afterFirstFailure?.backgroundTasks[0]).toMatchObject({
+      reportAttemptCount: 1,
+      reportNextAttemptAt: expect.any(String),
+    });
+
+    const manualText = `__READ_TEXT_FILE__:${join(process.cwd(), "package.json")}`;
+    const manualStarted = waitFor(socket, messages, (message) => {
+      const event = message.payload as { type?: string; payload?: { text?: string } } | undefined;
+      return event?.type === "TurnStarted" && event.payload?.text === manualText;
+    });
+    socket.send(JSON.stringify({ id: 5, method: "threads.sendTurn", params: { threadId, text: manualText } }));
+    const manualTurnId = ((await manualStarted).payload as { payload: { turnId: string } }).payload.turnId;
+    await waitFor(socket, messages, (message) => {
+      const event = message.payload as { type?: string; payload?: { turnId?: string; stopReason?: string } } | undefined;
+      return event?.type === "TurnCompleted" && event.payload?.turnId === manualTurnId && event.payload.stopReason === "end_turn";
+    });
+
+    await waitFor(socket, messages, (message) => {
+      const event = message.payload as { type?: string; payload?: { failure?: string } } | undefined;
+      return event?.type === "BackgroundTaskReportCancelled" && typeof event.payload?.failure === "string";
+    });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(messages.filter((message) => {
+      return (message.payload as { type?: string } | undefined)?.type === "BackgroundTaskReportAttempted";
+    })).toHaveLength(5);
+    expect(messages.some((message) => {
+      const diagnostic = message.payload as { type?: string; message?: string } | undefined;
+      return message.channel === "server.diagnostics"
+        && diagnostic?.type === "diagnostic"
+        && diagnostic.message?.includes("failed after 5 attempts");
+    })).toBe(true);
+
+    const finalList = waitFor(socket, messages, (message) => message.id === 6);
+    socket.send(JSON.stringify({ id: 6, method: "threads.list", params: {} }));
+    const final = ((await finalList).result as { threads: Array<{
+      threadId: string;
+      queue: unknown[];
+      backgroundTasks: Array<{
+        reportAttemptCount?: number;
+        reportFailedAt?: string;
+        reportCancelledAt?: string;
+        reportLastError?: string;
+      }>;
+    }> }).threads.find((candidate) => candidate.threadId === threadId);
+    expect(final?.queue).toEqual([]);
+    expect(final?.backgroundTasks[0]).toMatchObject({
+      reportAttemptCount: 5,
+      reportFailedAt: expect.any(String),
+      reportCancelledAt: expect.any(String),
+      reportLastError: expect.stringMatching(/.+/),
+    });
+    socket.close();
+  }, 20_000);
+
+  it("requeues an automated background report when a user steers it", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-background-steer-"));
+    const kimiHome = await mkdtemp(join(tmpdir(), "kimi-home-background-steer-"));
+    await launchServer(serverPath, "45145", dataHome, children, {
+      KIMI_CODE_HOME: kimiHome,
+      KIMI_FAKE_BACKGROUND_REPORT_DELAY_MS: "500",
+    });
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45145", messages);
+    const bootstrap = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "env.bootstrap", params: {} }));
+    await bootstrap;
+    const created = waitFor(socket, messages, (message) => message.id === 2);
+    socket.send(JSON.stringify({ id: 2, method: "threads.create", params: { cwd: process.cwd() } }));
+    const threadId = ((await created).result as { thread: { threadId: string } }).thread.threadId;
+    const automatedTurn = waitFor(socket, messages, (message) => {
+      const event = message.payload as { type?: string; payload?: { origin?: string } } | undefined;
+      return event?.type === "TurnStarted" && event.payload?.origin === "background_task";
+    });
+    socket.send(JSON.stringify({
+      id: 3,
+      method: "threads.sendTurn",
+      params: { threadId, text: "__BACKGROUND_TASK__ __BACKGROUND_TASK_COMPLETED__" },
+    }));
+    await automatedTurn;
+    const steered = waitFor(socket, messages, (message) => {
+      const event = message.payload as { type?: string; payload?: { text?: string } } | undefined;
+      return event?.type === "TurnStarted" && event.payload?.text === "Handle this first";
+    });
+    const steerReply = waitFor(socket, messages, (message) => message.id === 4);
+    socket.send(JSON.stringify({
+      id: 4,
+      method: "threads.sendTurn",
+      params: { threadId, text: "Handle this first", mode: "steer" },
+    }));
+    expect((await steerReply).error).toBeUndefined();
+    await steered;
+    await waitFor(socket, messages, (message) => {
+      const payload = message.payload as { queue?: Array<{ origin?: string }> } | undefined;
+      return message.channel === "thread.queueUpdated"
+        && payload?.queue?.some((item) => item.origin === "background_task") === true;
+    });
+    expect(messages.some((message) => {
+      return (message.payload as { type?: string } | undefined)?.type === "BackgroundTaskReportCancelled";
+    })).toBe(false);
+    socket.close();
+  }, 20_000);
+
+  it("resumes a persisted background task and queues exactly one report after restart", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-background-"));
+    const kimiHome = await mkdtemp(join(tmpdir(), "kimi-home-background-"));
+    const first = await launchServer(serverPath, "45128", dataHome, children, { KIMI_CODE_HOME: kimiHome });
+    const firstMessages: Array<Record<string, unknown>> = [];
+    const firstSocket = await connect("45128", firstMessages);
+    const bootstrap = waitFor(firstSocket, firstMessages, (message) => message.id === 1);
+    firstSocket.send(JSON.stringify({ id: 1, method: "env.bootstrap", params: {} }));
+    await bootstrap;
+    const create = waitFor(firstSocket, firstMessages, (message) => message.id === 2);
+    firstSocket.send(JSON.stringify({ id: 2, method: "threads.create", params: { cwd: process.cwd() } }));
+    const thread = ((await create).result as { thread: { threadId: string; sessionId: string } }).thread;
+    const registered = waitFor(firstSocket, firstMessages, (message) => (message.payload as { type?: string } | undefined)?.type === "BackgroundTaskRegistered");
+    const completed = waitFor(firstSocket, firstMessages, (message) => (message.payload as { type?: string; payload?: { turnId?: string } } | undefined)?.type === "TurnCompleted");
+    firstSocket.send(JSON.stringify({ id: 3, method: "threads.sendTurn", params: { threadId: thread.threadId, text: "__BACKGROUND_TASK__ __BACKGROUND_TASK_PENDING__" } }));
+    await registered;
+    await completed;
+    firstSocket.close();
+    const firstExited = new Promise<void>((resolve) => first.once("exit", () => resolve()));
+    first.kill();
+    await firstExited;
+
+    const sessionDirectory = thread.sessionId.startsWith("session_") ? thread.sessionId : `session_${thread.sessionId}`;
+    const taskPath = join(kimiHome, "sessions", "wd-test", sessionDirectory, "agents", "main", "tasks", "bash-build1.json");
+    const outputPath = join(dirname(taskPath), "bash-build1", "output.log");
+    await mkdir(dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, "BUILD SUCCESSFUL", "utf8");
+    await writeFile(taskPath, JSON.stringify({
+      taskId: "bash-build1",
+      description: "Build APK",
+      status: "completed",
+      detached: true,
+      startedAt: Date.now() - 1_000,
+      endedAt: Date.now(),
+      timeoutMs: 60_000,
+      kind: "process",
+      exitCode: 0,
+    }), "utf8");
+
+    const second = await launchServer(serverPath, "45129", dataHome, children, {
+      KIMI_CODE_HOME: kimiHome,
+      KIMI_FAKE_BACKGROUND_REPORT_DELAY_MS: "5000",
+    });
+    const secondMessages: Array<Record<string, unknown>> = [];
+    const secondSocket = await connect("45129", secondMessages);
+    const interruptedAutomatedTurn = waitFor(secondSocket, secondMessages, (message) => {
+      const event = message.payload as { type?: string; payload?: { origin?: string } } | undefined;
+      return event?.type === "TurnStarted" && event.payload?.origin === "background_task";
+    });
+    const secondBootstrap = waitFor(secondSocket, secondMessages, (message) => message.id === 4);
+    secondSocket.send(JSON.stringify({ id: 4, method: "env.bootstrap", params: {} }));
+    await secondBootstrap;
+    await interruptedAutomatedTurn;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const inFlightList = waitFor(secondSocket, secondMessages, (message) => message.id === 5);
+    secondSocket.send(JSON.stringify({ id: 5, method: "threads.list", params: {} }));
+    const inFlight = ((await inFlightList).result as { threads: Array<{ threadId: string; queue: unknown[] }> })
+      .threads.find((candidate) => candidate.threadId === thread.threadId);
+    expect(inFlight?.queue).toEqual([]);
+    secondSocket.close();
+    const secondExited = new Promise<void>((resolve) => second.once("exit", () => resolve()));
+    second.kill();
+    await secondExited;
+    await writeFile(join(dataHome, "pending-queues.json"), "{corrupt", "utf8");
+    await writeFile(join(dataHome, "pending-queues.json.bak"), "{also-corrupt", "utf8");
+
+    await launchServer(serverPath, "45131", dataHome, children, { KIMI_CODE_HOME: kimiHome });
+    const thirdMessages: Array<Record<string, unknown>> = [];
+    const thirdSocket = await connect("45131", thirdMessages);
+    const retriedAutomatedTurn = waitFor(thirdSocket, thirdMessages, (message) => {
+      const event = message.payload as { type?: string; payload?: { origin?: string } } | undefined;
+      return event?.type === "TurnStarted" && event.payload?.origin === "background_task";
+    });
+    const delivered = waitFor(thirdSocket, thirdMessages, (message) => (message.payload as { type?: string } | undefined)?.type === "BackgroundTaskReportDelivered");
+    const thirdBootstrap = waitFor(thirdSocket, thirdMessages, (message) => message.id === 6);
+    thirdSocket.send(JSON.stringify({ id: 6, method: "env.bootstrap", params: {} }));
+    await thirdBootstrap;
+    await retriedAutomatedTurn;
+    await delivered;
+
+    const list = waitFor(thirdSocket, thirdMessages, (message) => message.id === 7);
+    thirdSocket.send(JSON.stringify({ id: 7, method: "threads.list", params: {} }));
+    const restored = ((await list).result as { threads: Array<{
+      threadId: string;
+      messages: Array<{ role: string; origin?: string; text: string }>;
+      queue: unknown[];
+      backgroundTasks: Array<{ taskId: string; status: string; reportQueued: boolean; reportDeliveredAt?: string }>;
+    }> }).threads.find((candidate) => candidate.threadId === thread.threadId);
+    expect(restored?.messages.filter((message) => message.role === "user" && message.origin === "background_task")).toHaveLength(2);
+    expect(restored?.messages.filter((message) => message.role === "assistant" && message.text === "Background report delivered.")).toHaveLength(1);
+    expect(restored?.queue).toEqual([]);
+    expect(restored?.backgroundTasks).toEqual([expect.objectContaining({
+      taskId: "bash-build1",
+      status: "completed",
+      reportQueued: true,
+      reportDeliveredAt: expect.any(String),
+    })]);
+    thirdSocket.close();
+
+    await launchServer(serverPath, "45132", dataHome, children, { KIMI_CODE_HOME: kimiHome });
+    const fourthMessages: Array<Record<string, unknown>> = [];
+    const fourthSocket = await connect("45132", fourthMessages);
+    const fourthBootstrap = waitFor(fourthSocket, fourthMessages, (message) => message.id === 8);
+    fourthSocket.send(JSON.stringify({ id: 8, method: "env.bootstrap", params: {} }));
+    await fourthBootstrap;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(fourthMessages.some((message) => {
+      const event = message.payload as { type?: string; payload?: { origin?: string } } | undefined;
+      return event?.type === "TurnStarted" && event.payload?.origin === "background_task";
+    })).toBe(false);
+    fourthSocket.close();
+  }, 45_000);
+
+  it("queues a finished background-task report even when the foreground prompt rejects", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-background-fast-"));
+    const kimiHome = await mkdtemp(join(tmpdir(), "kimi-home-background-fast-"));
+    await launchServer(serverPath, "45130", dataHome, children, { KIMI_CODE_HOME: kimiHome });
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45130", messages);
+    const bootstrap = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "env.bootstrap", params: {} }));
+    await bootstrap;
+    const create = waitFor(socket, messages, (message) => message.id === 2);
+    socket.send(JSON.stringify({ id: 2, method: "threads.create", params: { cwd: process.cwd() } }));
+    const threadId = ((await create).result as { thread: { threadId: string } }).thread.threadId;
+    const registered = waitFor(socket, messages, (message) => (message.payload as { type?: string } | undefined)?.type === "BackgroundTaskRegistered");
+    const finished = waitFor(socket, messages, (message) => (message.payload as { type?: string } | undefined)?.type === "BackgroundTaskFinished");
+    const automatedTurn = waitFor(socket, messages, (message) => {
+      const event = message.payload as { type?: string; payload?: { origin?: string } } | undefined;
+      return event?.type === "TurnStarted" && event.payload?.origin === "background_task";
+    });
+    const failedForeground = waitFor(socket, messages, (message) => {
+      const event = message.payload as { type?: string; payload?: { stopReason?: string } } | undefined;
+      return event?.type === "TurnCompleted" && event.payload?.stopReason === "error";
+    });
+    socket.send(JSON.stringify({
+      id: 3,
+      method: "threads.sendTurn",
+      params: { threadId, text: "__BACKGROUND_TASK__ __BACKGROUND_TASK_COMPLETED__ __BACKGROUND_TASK_REJECT__" },
+    }));
+    await registered;
+    await finished;
+    await failedForeground;
+    await automatedTurn;
+
+    const list = waitFor(socket, messages, (message) => message.id === 4);
+    socket.send(JSON.stringify({ id: 4, method: "threads.list", params: {} }));
+    const thread = ((await list).result as { threads: Array<{
+      threadId: string;
+      backgroundTasks: Array<{ taskId: string; status: string; reportQueued: boolean }>;
+    }> }).threads.find((candidate) => candidate.threadId === threadId);
+    expect(thread?.backgroundTasks).toEqual([
+      expect.objectContaining({ taskId: "bash-build1", status: "completed", reportQueued: true }),
+    ]);
+    socket.close();
+  }, 20_000);
+
   it("bootstraps onboarding when Kimi CLI is not installed", async () => {
     const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
     const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-onboarding-"));
@@ -401,6 +1105,46 @@ describe("orchestration server", () => {
     expect(((await reply).result as { authenticated: boolean }).authenticated).toBe(false);
     await expect(access(oauth)).rejects.toThrow();
     await expect(access(unrelated)).resolves.toBeUndefined();
+    socket.close();
+  });
+
+  it("lists scoped Kimi skills and installs a validated workspace bundle", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-skills-"));
+    const kimiHome = await mkdtemp(join(tmpdir(), "kimi-home-skills-"));
+    const workspace = await mkdtemp(join(tmpdir(), "kimi-workspace-skills-"));
+    const outside = await mkdtemp(join(tmpdir(), "kimi-outside-skills-"));
+    await mkdir(join(workspace, ".git"));
+    await mkdir(join(workspace, ".kimi-code", "skills", "project-skill"), { recursive: true });
+    await writeFile(join(workspace, ".kimi-code", "skills", "project-skill", "SKILL.md"), "---\nname: project-skill\ndescription: Project scoped\n---\n");
+    const source = join(workspace, "install-me");
+    await mkdir(source);
+    await writeFile(join(source, "SKILL.md"), "---\nname: installed-skill\ndescription: Installed safely\n---\n");
+    const external = join(outside, "external");
+    await mkdir(external);
+    await writeFile(join(external, "SKILL.md"), "---\nname: external\ndescription: Outside\n---\n");
+
+    await launchServer(serverPath, "45130", dataHome, children, { KIMI_CODE_HOME: kimiHome });
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45130", messages);
+
+    const listed = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "capabilities.list", params: { cwd: workspace } }));
+    const capabilities = (await listed).result as { skills: Array<{ name: string; scope: string }> };
+    expect(capabilities.skills).toContainEqual(expect.objectContaining({ name: "project-skill", scope: "project" }));
+
+    const installed = waitFor(socket, messages, (message) => message.id === 2);
+    socket.send(JSON.stringify({ id: 2, method: "skills.install", params: { cwd: workspace, source } }));
+    expect((await installed).result).toMatchObject({ skill: { name: "installed-skill", scope: "user" }, restartRequired: true });
+    await expect(access(join(kimiHome, "skills", "installed-skill", "SKILL.md"))).resolves.toBeUndefined();
+
+    const duplicate = waitFor(socket, messages, (message) => message.id === 3);
+    socket.send(JSON.stringify({ id: 3, method: "skills.install", params: { cwd: workspace, source } }));
+    expect((await duplicate).error).toMatchObject({ message: expect.stringMatching(/already installed/i) });
+
+    const rejected = waitFor(socket, messages, (message) => message.id === 4);
+    socket.send(JSON.stringify({ id: 4, method: "skills.install", params: { cwd: workspace, source: external } }));
+    expect((await rejected).error).toMatchObject({ message: expect.stringMatching(/inside the active workspace/i) });
     socket.close();
   });
 });

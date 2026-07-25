@@ -2,12 +2,31 @@ import type { PlanEntry, SessionConfigOption, SessionUpdate, Usage, UsageUpdate 
 import { EventStore, type StoredEvent } from "./event-store.js";
 import type { Checkpoint } from "./checkpoint-reactor.js";
 
-export type Message = { turnId: string; role: "user" | "assistant" | "thought"; text: string; seq?: number; updatedSeq?: number; resources?: string[]; images?: Array<{ name: string; mimeType: string }> };
+export type Message = { turnId: string; role: "user" | "assistant" | "thought"; text: string; seq?: number; updatedSeq?: number; origin?: "user" | "background_task"; sourceQueuedId?: string; resources?: string[]; images?: Array<{ name: string; mimeType: string }> };
 export type ToolCall = { toolCallId: string; turnId?: string; title?: string; kind?: string; status?: string; content?: unknown[]; locations?: unknown[]; rawInput?: unknown; rawOutput?: unknown };
 export type Approval = { requestId: string; turnId?: string; title: string; kind: "permission" | "question" | "plan_review"; options: Array<{ optionId: string; name: string; kind: string }> };
 export type TurnCheckpoint = Checkpoint & { diff?: string };
 export type ThreadUsage = { context?: UsageUpdate; tokens?: Usage };
 export type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: Usage };
+export type BackgroundTask = {
+  taskId: string;
+  queuedId: string;
+  turnId: string;
+  description: string;
+  status: "running" | "completed" | "failed" | "killed" | "lost" | "timed_out" | "expired";
+  registeredAt: string;
+  updatedAt: string;
+  endedAt?: number;
+  exitCode?: number | null;
+  /** Historical scheduling marker. Delivery is guaranteed only by reportDeliveredAt. */
+  reportQueued: boolean;
+  reportAttemptCount?: number;
+  reportNextAttemptAt?: string;
+  reportLastError?: string;
+  reportFailedAt?: string;
+  reportDeliveredAt?: string;
+  reportCancelledAt?: string;
+};
 export type ActivityEntry = {
   id: string;
   turnId: string;
@@ -42,6 +61,7 @@ export type ThreadProjection = {
   commands: unknown[];
   modeId: string | undefined;
   checkpoints: TurnCheckpoint[];
+  backgroundTasks: BackgroundTask[];
   usage: ThreadUsage;
 };
 
@@ -50,7 +70,7 @@ export type DomainEvent =
   | { type: "ThreadCreated"; payload: { sessionId: string; cwd: string; kind?: "project" | "chat"; title: string; configOptions?: SessionConfigOption[] } }
   | { type: "ThreadRenamed"; payload: { title: string } }
   | { type: "ThreadDeleted"; payload: Record<string, never> }
-  | { type: "TurnStarted"; payload: { turnId: string; text: string; title?: string; resources?: string[]; images?: Array<{ name: string; mimeType: string }> } }
+  | { type: "TurnStarted"; payload: { turnId: string; text: string; origin?: "user" | "background_task"; sourceQueuedId?: string; title?: string; resources?: string[]; images?: Array<{ name: string; mimeType: string }> } }
   | { type: "MessageAppended"; payload: Message }
   | { type: "MessageDelta"; payload: Message }
   | { type: "PlanReplaced"; payload: { entries: PlanEntry[] } }
@@ -64,6 +84,12 @@ export type DomainEvent =
   | { type: "ApprovalResolved"; payload: { requestId: string; optionId?: string } }
   | { type: "TurnCompleted"; payload: { turnId: string; stopReason: string; error?: string; usage?: Usage } }
   | { type: "TurnCancelled"; payload: { turnId: string } }
+  | { type: "BackgroundTaskRegistered"; payload: { taskId: string; queuedId: string; turnId: string; description: string } }
+  | { type: "BackgroundTaskFinished"; payload: { taskId: string; status: Exclude<BackgroundTask["status"], "running">; endedAt?: number; exitCode?: number | null } }
+  | { type: "BackgroundTaskReportQueued"; payload: { taskId: string } }
+  | { type: "BackgroundTaskReportAttempted"; payload: { taskId: string; attempt: number; nextAttemptAt: string } }
+  | { type: "BackgroundTaskReportDelivered"; payload: { taskId: string } }
+  | { type: "BackgroundTaskReportCancelled"; payload: { taskId: string; failure?: string } }
   | { type: "CheckpointCaptured"; payload: { checkpoint: Checkpoint; diff?: string } }
   | { type: "CheckpointReverted"; payload: { checkpoint: Checkpoint } };
 
@@ -80,6 +106,7 @@ export class OrchestrationEngine {
 
   async open(): Promise<void> {
     await this.#store.open((event) => this.#apply(event));
+    this.#reconcileSessionOwners();
     for (const thread of [...this.#threads.values()].filter((candidate) => candidate.running && candidate.activeTurnId)) {
       for (const approval of thread.approvals) await this.append(thread.threadId, { type: "ApprovalResolved", payload: { requestId: approval.requestId } });
       await this.append(thread.threadId, { type: "TurnCancelled", payload: { turnId: thread.activeTurnId! } });
@@ -93,9 +120,18 @@ export class OrchestrationEngine {
 
   append(threadId: string, event: DomainEvent): Promise<StoredEvent> {
     const operation = this.#tail.then(async () => {
+      if (event.type === "ThreadCreated" || event.type === "ThreadSnapshot") {
+        if (this.#threads.has(threadId)) throw new Error(`Thread ${threadId} already exists`);
+        const sessionId = event.type === "ThreadCreated" ? event.payload.sessionId : event.payload.thread.sessionId;
+        this.assertSessionAvailable(sessionId, threadId);
+      }
       const stored = await this.#store.append(threadId, event);
       this.#apply(stored);
-      this.#publish(stored);
+      try {
+        this.#publish(stored);
+      } catch (error) {
+        console.error(`[orchestration:publish] ${error instanceof Error ? error.message : String(error)}`);
+      }
       if (event.type === "TurnCompleted" || event.type === "TurnCancelled" || event.type === "ThreadDeleted") await this.#compactNow();
       return stored;
     });
@@ -116,7 +152,7 @@ export class OrchestrationEngine {
     this.#threadBySession.clear();
     for (const thread of compacted) {
       this.#threads.set(thread.threadId, thread);
-      this.#threadBySession.set(thread.sessionId, thread.threadId);
+      if (!this.#threadBySession.has(thread.sessionId)) this.#threadBySession.set(thread.sessionId, thread.threadId);
     }
   }
 
@@ -134,6 +170,17 @@ export class OrchestrationEngine {
     return thread ? cloneThread(thread) : undefined;
   }
 
+  assertSessionAvailable(sessionId: string, threadId: string): void {
+    const thread = this.#threads.get(threadId);
+    if (thread && thread.sessionId !== sessionId) {
+      throw new Error(`Thread ${threadId} belongs to a different ACP session`);
+    }
+    const owner = this.#threadBySession.get(sessionId);
+    if (owner && owner !== threadId) {
+      throw new Error(`ACP session ${sessionId} is already owned by thread ${owner}`);
+    }
+  }
+
   runtimeThreadForSession(sessionId: string): Pick<ThreadProjection, "threadId" | "activeTurnId"> | undefined {
     const threadId = this.#threadBySession.get(sessionId);
     const thread = threadId ? this.#threads.get(threadId) : undefined;
@@ -144,7 +191,7 @@ export class OrchestrationEngine {
     if (event.type === "ThreadSnapshot") {
       const thread = compactThread((event.payload as Extract<DomainEvent, { type: "ThreadSnapshot" }>["payload"]).thread);
       this.#threads.set(event.threadId, thread);
-      this.#threadBySession.set(thread.sessionId, event.threadId);
+      if (!this.#threadBySession.has(thread.sessionId)) this.#threadBySession.set(thread.sessionId, event.threadId);
       return;
     }
     if (event.type === "ThreadCreated") {
@@ -170,17 +217,22 @@ export class OrchestrationEngine {
         commands: [],
         modeId: undefined,
         checkpoints: [],
+        backgroundTasks: [],
         usage: {},
       } satisfies ThreadProjection;
       this.#threads.set(event.threadId, thread);
-      this.#threadBySession.set(thread.sessionId, event.threadId);
+      if (!this.#threadBySession.has(thread.sessionId)) this.#threadBySession.set(thread.sessionId, event.threadId);
       return;
     }
     const thread = this.#threads.get(event.threadId);
     if (!thread) return;
     if (event.type === "ThreadDeleted") {
       this.#threads.delete(event.threadId);
-      this.#threadBySession.delete(thread.sessionId);
+      if (this.#threadBySession.get(thread.sessionId) === event.threadId) {
+        this.#threadBySession.delete(thread.sessionId);
+        const replacement = [...this.#threads.entries()].find(([, candidate]) => candidate.sessionId === thread.sessionId);
+        if (replacement) this.#threadBySession.set(thread.sessionId, replacement[0]);
+      }
       return;
     }
     thread.updatedAt = event.createdAt;
@@ -198,6 +250,8 @@ export class OrchestrationEngine {
         thread.messages.push({
           turnId: String(payload.turnId), role: "user", text: String(payload.text),
           seq: event.seq, updatedSeq: event.seq,
+          ...(payload.origin === "background_task" ? { origin: "background_task" as const } : {}),
+          ...(typeof payload.sourceQueuedId === "string" ? { sourceQueuedId: payload.sourceQueuedId } : {}),
           ...(Array.isArray(payload.resources) && payload.resources.length ? { resources: payload.resources as string[] } : {}),
           ...(Array.isArray(payload.images) && payload.images.length ? { images: payload.images as Array<{ name: string; mimeType: string }> } : {}),
         });
@@ -274,6 +328,70 @@ export class OrchestrationEngine {
         Object.assign(thread.turns.findLast((turn) => turn.turnId === payload.turnId) ?? {}, { completedAt: event.createdAt, stopReason: "cancelled" });
         finishActivity(thread, String(payload.turnId), event.createdAt, true);
         break;
+      case "BackgroundTaskRegistered":
+        if (!thread.backgroundTasks.some((task) => task.taskId === payload.taskId)) {
+          thread.backgroundTasks.push({
+            taskId: String(payload.taskId),
+            queuedId: String(payload.queuedId),
+            turnId: String(payload.turnId),
+            description: String(payload.description),
+            status: "running",
+            registeredAt: event.createdAt,
+            updatedAt: event.createdAt,
+            reportQueued: false,
+          });
+        }
+        break;
+      case "BackgroundTaskFinished": {
+        const task = thread.backgroundTasks.find((candidate) => candidate.taskId === payload.taskId);
+        if (task && task.status === "running") {
+          task.status = payload.status as Exclude<BackgroundTask["status"], "running">;
+          task.updatedAt = event.createdAt;
+          if (typeof payload.endedAt === "number") task.endedAt = payload.endedAt;
+          if (typeof payload.exitCode === "number" || payload.exitCode === null) task.exitCode = payload.exitCode as number | null;
+        }
+        break;
+      }
+      case "BackgroundTaskReportQueued": {
+        const task = thread.backgroundTasks.find((candidate) => candidate.taskId === payload.taskId);
+        if (task) {
+          task.reportQueued = true;
+          task.updatedAt = event.createdAt;
+        }
+        break;
+      }
+      case "BackgroundTaskReportAttempted": {
+        const task = thread.backgroundTasks.find((candidate) => candidate.taskId === payload.taskId);
+        if (task && !task.reportDeliveredAt && !task.reportCancelledAt) {
+          task.reportAttemptCount = Number(payload.attempt);
+          task.reportNextAttemptAt = String(payload.nextAttemptAt);
+          task.updatedAt = event.createdAt;
+        }
+        break;
+      }
+      case "BackgroundTaskReportDelivered": {
+        const task = thread.backgroundTasks.find((candidate) => candidate.taskId === payload.taskId);
+        if (task && !task.reportCancelledAt) {
+          task.reportDeliveredAt = event.createdAt;
+          delete task.reportNextAttemptAt;
+          delete task.reportLastError;
+          task.updatedAt = event.createdAt;
+        }
+        break;
+      }
+      case "BackgroundTaskReportCancelled": {
+        const task = thread.backgroundTasks.find((candidate) => candidate.taskId === payload.taskId);
+        if (task && !task.reportDeliveredAt) {
+          task.reportCancelledAt = event.createdAt;
+          delete task.reportNextAttemptAt;
+          if (typeof payload.failure === "string" && payload.failure) {
+            task.reportFailedAt = event.createdAt;
+            task.reportLastError = payload.failure;
+          }
+          task.updatedAt = event.createdAt;
+        }
+        break;
+      }
       case "CheckpointCaptured": {
         const checkpoint = payload.checkpoint as Checkpoint;
         const stored: TurnCheckpoint = { ...checkpoint };
@@ -284,6 +402,19 @@ export class OrchestrationEngine {
       case "CheckpointReverted":
         thread.checkpoints.push(payload.checkpoint as Checkpoint);
         break;
+    }
+  }
+
+  #reconcileSessionOwners(): void {
+    this.#threadBySession.clear();
+    for (const [threadId, thread] of this.#threads) {
+      const owner = this.#threadBySession.get(thread.sessionId);
+      if (!owner) {
+        this.#threadBySession.set(thread.sessionId, threadId);
+        continue;
+      }
+      this.#threads.delete(threadId);
+      console.warn(`[orchestration:replay] Ignored duplicate thread ${threadId}; ACP session ${thread.sessionId} is owned by ${owner}`);
     }
   }
 }
@@ -427,9 +558,17 @@ export function compactToolCall(tool: ToolCall): ToolCall {
 
 function compactThread(thread: ThreadProjection): ThreadProjection {
   const compacted = cloneThread(thread);
+  compacted.backgroundTasks ??= [];
   compacted.messages = compacted.messages.filter((message) => message.role !== "thought");
   compacted.activity = compacted.activity.map((entry) => ({ ...entry, text: boundedText(entry.text, 4_000) }));
   compacted.tools = compacted.tools.map(compactToolCall);
+  const pending = compacted.backgroundTasks
+    .filter((task) => !task.reportDeliveredAt && !task.reportCancelledAt)
+    .slice(-20);
+  const reported = compacted.backgroundTasks
+    .filter((task) => task.reportDeliveredAt || task.reportCancelledAt)
+    .slice(-50);
+  compacted.backgroundTasks = [...pending, ...reported].sort((a, b) => a.registeredAt.localeCompare(b.registeredAt));
   return compacted;
 }
 

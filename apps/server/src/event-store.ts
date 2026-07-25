@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { access, appendFile, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readFile, rename, rm, truncate, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 import { z } from "zod";
@@ -21,6 +21,13 @@ export type StoredEvent = {
   createdAt: string;
 };
 
+function isIncompleteFinalRecord(line: string, error: unknown): boolean {
+  if (!(error instanceof SyntaxError) || !line.trimStart().startsWith("{")) return false;
+  if (/unexpected end of json input/i.test(error.message)) return true;
+  const position = /\bposition\s+(\d+)\b/i.exec(error.message)?.[1];
+  return position !== undefined && Number(position) >= line.length;
+}
+
 export class EventStore {
   readonly #path: string;
   readonly #seq = new Map<string, number>();
@@ -33,6 +40,7 @@ export class EventStore {
   async open(replay: (event: StoredEvent) => void): Promise<void> {
     await mkdir(dirname(this.#path), { recursive: true });
     await this.#recoverBackup();
+    await this.#recoverTornTail();
     this.#seq.clear();
     let input;
     try {
@@ -124,6 +132,28 @@ export class EventStore {
       await rename(backup, this.#path);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+
+  async #recoverTornTail(): Promise<void> {
+    let contents: Buffer;
+    try {
+      contents = await readFile(this.#path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (contents.length === 0 || contents[contents.length - 1] === 0x0a) return;
+
+    const tailStart = contents.lastIndexOf(0x0a) + 1;
+    const tail = contents.subarray(tailStart).toString("utf8");
+    if (!tail.trim()) return;
+
+    try {
+      const parsed = storedEventSchema.safeParse(JSON.parse(tail));
+      if (parsed.success) await appendFile(this.#path, "\n", "utf8");
+    } catch (error) {
+      if (isIncompleteFinalRecord(tail, error)) await truncate(this.#path, tailStart);
     }
   }
 }

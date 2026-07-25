@@ -8,13 +8,13 @@ Kimi Code Desktop is a local Windows harness around Kimi Code CLI. The desktop a
 
 `apps/desktop` owns the native window, folder dialogs, application lifecycle, bundled resources, update installation, and launch of the local orchestration process.
 
-Release builds bundle the Node.js runtime and generated server entrypoint. Tauri selects a free loopback port, creates a random per-launch connection token, launches the server, and terminates it with the window.
+Release builds bundle the Node.js runtime and generated server entrypoint. Tauri selects a free loopback port, creates a random per-launch connection token, launches the server, and terminates its full Windows process tree with the window. Recovery preserves a healthy sidecar by default; an explicit forced recovery terminates the old tree before starting a replacement.
 
 ### React projection
 
 `apps/web` renders state received from the orchestration server. It does not read Kimi credentials, execute Git, spawn terminal processes, or call Kimi network APIs.
 
-The renderer reconnects and requests a durable projection after a restart. Streaming chunks are presented under the turn that produced them and are compacted after completion.
+The renderer reconnects and requests a durable projection after a restart. Liveness-critical reads, session reattachment, and configuration calls have bounded waits; a late configuration effect still reconciles from durable events. Other side-effecting requests are not given a client timeout that could falsely report failure. Streaming chunks are presented under the turn that produced them and are compacted after completion.
 
 ### Orchestration server
 
@@ -24,6 +24,8 @@ The renderer reconnects and requests a durable projection after a restart. Strea
 - Durable events and thread projections
 - Authentication delegation
 - Prompt queueing, steering, and cancellation
+- Finite background-task monitoring and follow-up dispatch
+- Skill discovery and confirmed workspace-local installation
 - Workspace-bound file and image context
 - Git checkpoints and Git manager operations
 - Local terminal processes
@@ -44,9 +46,11 @@ Kimi Code CLI is the source of truth for:
 - MCP behavior and Kimi configuration
 - Subscription quota
 
-The desktop app projects the runtime catalog returned by ACP. It rejects unsupported values instead of simulating controls.
+The desktop app projects the runtime catalog returned by ACP. Kimi Code CLI `0.29.1` is the current reference runtime and can expose `Low`, `High`, and `Max` reasoning effort values. The app renders every offered value, accepts future values without a desktop release, and rejects unsupported values instead of simulating controls. A legacy binary value such as `Thinking On` is displayed as runtime-managed `Default`, not relabeled as `Max`.
 
-MCP definitions are read from Kimi's standard local store and translated into ACP session definitions. Raw URLs, headers, environment values, and arguments stay server-side. The renderer receives only redacted capability metadata.
+Skills are discovered from Kimi and Agents user directories plus their project-local equivalents. The built-in `coder`, `explore`, and `plan` actions are prompt shortcuts; the running-agent projection itself is built only from real Kimi `Agent` tool and background-task events.
+
+Only MCP definitions from Kimi's trusted user store are translated into ACP session definitions. Project `.mcp.json` and `.kimi-code/mcp.json` files are discovered as redacted, review-only metadata and are never attached automatically when a repository opens. Raw URLs, headers, environment values, and arguments stay server-side.
 
 ## Durable state
 
@@ -58,6 +62,9 @@ Thread activity is stored as validated JSONL events under the current user's app
 - Adjacent runtime chunks are coalesced.
 - Completed history is atomically replaced with bounded thread snapshots.
 - Queue state is stored separately and contains text only.
+- Background-task registration, terminal status, and report-queued state are part of the thread projection.
+
+When Kimi emits a finite task with `automatic_notification: true`, the server monitors its same-session task record. A terminal state first enters the durable FIFO and then records that the report was queued. On restart, unfinished registration and queue state are replayed and reconciled. This provides crash-recoverable at-least-once follow-up; it does not promise exactly-once delivery to an external model or process.
 
 This design keeps the local stack small while there is a single writer. A database becomes useful only if concurrent writers or indexed history queries become real requirements.
 
@@ -65,7 +72,9 @@ This design keeps the local stack small while there is a single writer. A databa
 
 File resources must resolve inside the active workspace, must be text, and must stay below configured size limits. Images are sent as ACP image blocks and are not stored in the persistent prompt queue.
 
-ACP writes remain workspace-only. ACP reads additionally allow one narrow Kimi-owned case: the active session may read its own background-subagent `output.log` beneath the Kimi session store. Canonical path checks reject traversal, symlink escapes, other session IDs, and every other out-of-workspace file.
+ACP writes remain workspace-only. Background monitoring has one narrow Kimi-owned read exception: the active session may inspect its own bounded task record and `output.log` beneath the Kimi session store. Canonical path checks reject traversal, symlink escapes, other session IDs, oversized records, and every other out-of-workspace file.
+
+Local skill installation accepts only a regular Markdown file or a directory containing `SKILL.md` inside the active workspace. Each ACP session receives a built-in `skill_install_local` MCP tool bound by the server to that session's canonical workspace. The tool accepts only an absolute local source path; it has no URL, download, overwrite, update, or uninstall mode. It never installs directly: the isolated preview bridge sends a request to normal app windows, the renderer opens the existing confirmation dialog, and only explicit user confirmation calls the installer. That call revalidates symlinks, names, path containment, size, depth, and entry counts before staging the copy in the Kimi skills directory. Existing skills are never overwritten.
 
 Git checkpoints use an alternate `GIT_INDEX_FILE`, `git write-tree`, and `git commit-tree`. They do not modify the user's branch or index. Revert applies the reverse diff for one turn so work that existed before the turn remains intact.
 

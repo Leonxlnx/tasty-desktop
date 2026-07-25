@@ -9,12 +9,16 @@ export type AuthStatus = {
   authenticated: boolean;
   loginRunning: boolean;
   installRunning: boolean;
+  installMode: "manual";
+  installUrl: string;
   home: string;
 };
 
 export type AuthEvent =
-  | { type: "progress"; operation: "install" | "login"; message: string; url?: string; code?: string }
-  | { type: "complete"; operation: "install" | "login" | "logout"; success: boolean; authenticated: boolean; message: string };
+  | { type: "progress"; operation: "login"; message: string; url?: string; code?: string }
+  | { type: "complete"; operation: "login" | "logout"; success: boolean; authenticated: boolean; message: string };
+
+export const KIMI_INSTALL_URL = "https://moonshotai.github.io/kimi-code/";
 
 const credentialPath = (home: string) => join(home, "credentials", "kimi-code.json");
 
@@ -39,7 +43,7 @@ export function parseLoginLine(line: string): { message: string; url?: string; c
 export class AuthService {
   readonly home: string;
   #child: ChildProcessWithoutNullStreams | undefined;
-  #operation: "install" | "login" | undefined;
+  #operation: "login" | undefined;
 
   constructor(
     private readonly binary: string,
@@ -54,24 +58,20 @@ export class AuthService {
       installed: existsSync(this.binary),
       authenticated: hasKimiCredentials(this.home),
       loginRunning: this.#operation === "login",
-      installRunning: this.#operation === "install",
+      installRunning: false,
+      installMode: "manual",
+      installUrl: KIMI_INSTALL_URL,
       home: this.home,
     };
   }
 
   beginInstall(): AuthStatus {
-    if (process.platform !== "win32") throw new Error("Automatic Kimi CLI installation is currently available on Windows only");
-    if (existsSync(this.binary)) throw new Error("Kimi Code CLI is already installed");
-    return this.start("install", "powershell.exe", [
-      "-NoProfile",
-      "-ExecutionPolicy", "Bypass",
-      "-Command", "Invoke-RestMethod https://code.kimi.com/install.ps1 | Invoke-Expression",
-    ]);
+    return this.status();
   }
 
   beginLogin(): AuthStatus {
     if (!existsSync(this.binary)) throw new Error("Install Kimi Code CLI before signing in");
-    return this.start("login", this.binary, ["login"]);
+    return this.start(this.binary, ["login"]);
   }
 
   logout(): AuthStatus {
@@ -90,8 +90,9 @@ export class AuthService {
     this.cancel();
   }
 
-  private start(operation: "install" | "login", command: string, args: string[]): AuthStatus {
+  private start(command: string, args: string[]): AuthStatus {
     if (this.#child) throw new Error("A Kimi setup operation is already running");
+    const operation = "login";
     const child = spawn(command, args, {
       env: { ...process.env, KIMI_CODE_NO_AUTO_UPDATE: "1", KIMI_CODE_HOME: this.home },
       stdio: ["pipe", "pipe", "pipe"],
@@ -107,12 +108,12 @@ export class AuthService {
     return this.status();
   }
 
-  private finish(operation: "install" | "login", success: boolean, message: string): void {
+  private finish(operation: "login", success: boolean, message: string): void {
     if (!this.#child || this.#operation !== operation) return;
     this.#child = undefined;
     this.#operation = undefined;
     const authenticated = hasKimiCredentials(this.home);
-    const completed = operation === "install" ? success && existsSync(this.binary) : success && authenticated;
+    const completed = success && authenticated;
     this.onEvent({ type: "complete", operation, success: completed, authenticated, message });
   }
 }
