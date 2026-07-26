@@ -7,7 +7,7 @@ import { ConnectionSupervisor, type ConnectionState, type ServerMessage } from "
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { Update } from "@tauri-apps/plugin-updater";
 
-type Message = { turnId: string; role: "user" | "assistant" | "thought"; text: string; seq?: number; updatedSeq?: number; resources?: string[]; images?: Array<{ name: string; mimeType: string }> };
+type Message = { turnId: string; role: "user" | "assistant" | "thought"; text: string; seq?: number; updatedSeq?: number; origin?: "user" | "background_task"; resources?: string[]; images?: Array<{ name: string; mimeType: string }> };
 type ConfigOption = { id: string; name: string; category?: string; type?: string; currentValue: string | boolean; options?: Array<{ value: string; name: string }> };
 type AvailableCommand = { name: string; description: string; input?: { hint?: string } | null };
 type ToolContent = { type: string; path?: string; oldText?: string; newText?: string; content?: { type: string; text?: string } };
@@ -36,7 +36,7 @@ type GitFile = { path: string; originalPath?: string; staged: boolean; unstaged:
 type GitStatus = { root: string; branch: string; upstream?: string; ahead: number; behind: number; files: GitFile[] };
 type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: NonNullable<Usage["tokens"]> };
 type ActivityEntry = { id: string; turnId: string; kind: "thought" | "tool"; status: "pending" | "in_progress" | "completed" | "failed"; text: string; toolCallId?: string; seq: number; updatedSeq?: number; createdAt: string; updatedAt: string };
-type QueuedPrompt = { queuedId: string; text: string; mode: "queue" | "steer"; createdAt: string; images: Array<{ name: string; mimeType: string }> };
+type QueuedPrompt = { queuedId: string; text: string; mode: "queue" | "steer"; createdAt: string; images: Array<{ name: string; mimeType: string }>; origin?: "user" | "background_task" };
 type DesktopPreviewCommand = { action: "open" | "resize"; url?: string; panelWidth?: number; viewportWidth?: number; viewportHeight?: number };
 type SkillInstallRequest = { cwd: string; source: string; name: string };
 type ProviderId = "kimi" | "codex" | "claude" | "cursor";
@@ -848,7 +848,7 @@ export function App() {
         if (event.type === "ToolCallCreated" && isSubagentTool(event.payload.tool as Tool | undefined)) setRailView("agents");
       } else if (message.channel === "thread.queueUpdated") {
         const payload = message.payload as { threadId: string; queue: QueuedPrompt[] };
-        setThreads((current) => current.map((thread) => thread.threadId === payload.threadId ? { ...thread, queue: payload.queue } : thread));
+        setThreads((current) => current.map((thread) => thread.threadId === payload.threadId ? { ...thread, queue: visibleQueuedPrompts(payload.queue) } : thread));
       } else if (message.channel === "preview.command") {
         applyAgentPreviewCommand(message.payload as DesktopPreviewCommand);
       } else if (message.channel === "skill.installRequested") {
@@ -3291,7 +3291,7 @@ function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPat
   onRevert: (turnId: string) => Promise<void>;
   onReview: () => void;
 }) {
-  const user = turn.messages.filter((message) => message.role === "user");
+  const user = turn.messages.filter((message) => message.role === "user" && message.origin !== "background_task");
   const { commentary, final } = turnAssistantMessages(turn);
   const report = final?.text ?? "";
   const failure = turn.record.error
@@ -3766,8 +3766,12 @@ export function normalizeThread(value: Thread): Thread {
     checkpoints: Array.isArray(thread.checkpoints) ? thread.checkpoints : [],
     backgroundTasks: Array.isArray(thread.backgroundTasks) ? thread.backgroundTasks : [],
     usage: thread.usage && typeof thread.usage === "object" ? thread.usage : {},
-    queue: Array.isArray(thread.queue) ? thread.queue : [],
+    queue: visibleQueuedPrompts(Array.isArray(thread.queue) ? thread.queue : []),
   };
+}
+
+export function visibleQueuedPrompts(queue: QueuedPrompt[]): QueuedPrompt[] {
+  return queue.filter((prompt) => prompt.origin !== "background_task");
 }
 
 function flattenOptions(option: ConfigOption): Array<{ value: string; name: string }> {
