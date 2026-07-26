@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Kimi Code Desktop",
-  "version": "0.9.0",
+  "productName": "Tasty",
+  "version": "0.10.0",
   "identifier": "com.kimicode.desktop",
   "build": {
     "beforeDevCommand": "pnpm -C ../.. dev:services",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Kimi Code",
+        "title": "Tasty",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
@@ -29,9 +29,9 @@
     "active": true,
     "targets": ["nsis"],
     "createUpdaterArtifacts": true,
-    "publisher": "Kimi Code Desktop contributors",
-    "shortDescription": "An unofficial desktop GUI for Kimi Code CLI",
-    "longDescription": "Use your own Kimi account and subscription through the official Kimi Code CLI in a native desktop coding workspace.",
+    "publisher": "Tasty contributors",
+    "shortDescription": "An open-source multi-provider coding agent harness",
+    "longDescription": "Use Kimi, OpenAI Codex, Anthropic Claude, or Cursor through their official local runtimes in one native coding workspace.",
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",

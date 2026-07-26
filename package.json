@@ -1,17 +1,17 @@
 {
-  "name": "kimi-code-desktop",
+  "name": "tasty-desktop",
   "private": true,
   "packageManager": "pnpm@10.13.1",
   "scripts": {
-    "dev": "pnpm --filter @kimi-code/desktop dev",
-    "dev:services": "pnpm --parallel --filter @kimi-code/server --filter @kimi-code/web dev",
-    "build": "pnpm --filter @kimi-code/desktop build",
-    "bundle": "pnpm --filter @kimi-code/desktop bundle",
-    "bundle:local": "pnpm --filter @kimi-code/desktop bundle:local",
-    "build:services": "pnpm --filter @kimi-code/server build && pnpm --filter @kimi-code/web build",
+    "dev": "pnpm --filter @tasty/desktop dev",
+    "dev:services": "pnpm --parallel --filter @tasty/server --filter @tasty/web dev",
+    "build": "pnpm --filter @tasty/desktop build",
+    "bundle": "pnpm --filter @tasty/desktop bundle",
+    "bundle:local": "pnpm --filter @tasty/desktop bundle:local",
+    "build:services": "pnpm --filter @tasty/server build && pnpm --filter @tasty/web build",
     "check:public": "node scripts/check-public-source.mjs",
     "prepare:bundle": "node scripts/prepare-bundle.mjs",
-    "typecheck": "pnpm --filter @kimi-code/server typecheck && pnpm --filter @kimi-code/web typecheck && pnpm --filter @kimi-code/desktop typecheck",
-    "test": "pnpm --filter @kimi-code/server test && pnpm --filter @kimi-code/web test && pnpm --filter @kimi-code/desktop test"
+    "typecheck": "pnpm --filter @tasty/server typecheck && pnpm --filter @tasty/web typecheck && pnpm --filter @tasty/desktop typecheck",
+    "test": "pnpm --filter @tasty/server test && pnpm --filter @tasty/web test && pnpm --filter @tasty/desktop test"
   }
 }

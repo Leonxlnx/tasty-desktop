@@ -115,7 +115,7 @@ const serverToken = process.env.KIMI_SERVER_TOKEN;
 const previewBridgeToken = process.env.KIMI_PREVIEW_BRIDGE_TOKEN || randomBytes(32).toString("hex");
 const configuredDefaultCwd = process.env.KIMI_DEFAULT_CWD ?? process.env.KIMI_WORKSPACE;
 const defaultCwd = configuredDefaultCwd === "" ? "" : resolve(configuredDefaultCwd ?? process.cwd());
-const configuredDataHome = resolve(process.env.KIMI_DESKTOP_HOME ?? join(process.env.APPDATA ?? homedir(), "KimiCodeDesktop"));
+const configuredDataHome = resolve(process.env.TASTY_HOME ?? process.env.KIMI_DESKTOP_HOME ?? join(process.env.APPDATA ?? homedir(), "KimiCodeDesktop"));
 const configuredKimiHome = resolve(process.env.KIMI_CODE_HOME ?? join(homedir(), ".kimi-code"));
 await mkdir(configuredDataHome, { recursive: true });
 await mkdir(configuredKimiHome, { recursive: true });
@@ -455,7 +455,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       reply(socket, request.id, { ...capabilities, mcpServers: [{
         name: desktopPreviewMcpName,
         transport: "stdio" as const,
-        target: "Built into Kimi Code Desktop",
+        target: "Built into Tasty",
         needsAuthorization: false,
         connectable: true,
       }, ...capabilities.mcpServers.filter((server) => server.name !== desktopPreviewMcpName)] });
@@ -1349,7 +1349,7 @@ server.on("connection", (socket, request) => {
       .finally(() => releaseUpdateLease(socket));
   });
 });
-server.on("listening", () => console.log(`Kimi Code orchestration server listening on ws://127.0.0.1:${port}`));
+server.on("listening", () => console.log(`Tasty orchestration server listening on ws://127.0.0.1:${port}`));
 
 function resolveKimiBinary(): string {
   if (process.env.KIMI_BINARY) {

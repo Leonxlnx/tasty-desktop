@@ -21,6 +21,7 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
+// Keep the legacy mutex so 0.9 and Tasty cannot both own the same data directory during an update.
 const SINGLE_INSTANCE_MUTEX: &str = r"Local\KimiCodeDesktop.com.kimicode.desktop";
 const ERROR_ALREADY_EXISTS: u32 = 183;
 
@@ -161,7 +162,7 @@ pub fn run() {
         Ok(Some(guard)) => guard,
         Ok(None) => return,
         Err(error) => {
-            eprintln!("Could not acquire the Kimi Code Desktop instance lock: {error}");
+            eprintln!("Could not acquire the Tasty instance lock: {error}");
             return;
         }
     };
@@ -227,7 +228,7 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building Kimi Code Desktop");
+        .expect("error while building Tasty");
 
     let mut instance_guard = Some(instance_guard);
     app.run(move |_handle, _event| {
@@ -255,6 +256,7 @@ fn spawn_server(runtime: &ServerRuntime) -> std::io::Result<Child> {
         .open(runtime.data_dir.join("orchestration-server.log"))?;
     Command::new(&runtime.node_path)
         .arg(&runtime.server_path)
+        .env("TASTY_HOME", &runtime.data_dir)
         .env("KIMI_DESKTOP_HOME", &runtime.data_dir)
         .env("KIMI_DEFAULT_CWD", "")
         .env("KIMI_CODE_NO_AUTO_UPDATE", "1")
