@@ -44,6 +44,18 @@ describe("event log replay", () => {
     expect(restarted.threads()).toEqual([]);
   });
 
+  it("preserves worktree metadata and reversible archive state", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "tasty-event-worktree-"));
+    const path = join(dir, "events.jsonl");
+    const engine = new OrchestrationEngine(new EventStore(path));
+    await engine.open();
+    await engine.append("thread-1", { type: "ThreadCreated", payload: { sessionId: "session-1", cwd: join(dir, "worktree"), worktree: { sourceCwd: dir, branch: "tasty/thread-1" }, title: "Isolated" } });
+    await engine.append("thread-1", { type: "ThreadArchived", payload: { archived: true } });
+    expect(engine.thread("thread-1")).toMatchObject({ worktree: { sourceCwd: dir, branch: "tasty/thread-1" }, archivedAt: expect.any(String) });
+    await engine.append("thread-1", { type: "ThreadArchived", payload: { archived: false } });
+    expect(engine.thread("thread-1")?.archivedAt).toBeUndefined();
+  });
+
   it("closes an interrupted turn when the server restarts", async () => {
     const dir = await mkdtemp(join(tmpdir(), "kimi-event-interrupted-"));
     const path = join(dir, "events.jsonl");

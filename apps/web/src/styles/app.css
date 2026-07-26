@@ -167,6 +167,15 @@ button:active:not(:disabled) { transform: scale(.975); }
 .thread-empty { margin: var(--space-3) var(--space-2); color: var(--color-text-tertiary); font-size: var(--text-xs); }
 .sidebar-empty { display: flex; align-items: center; gap: var(--space-2); width: 100%; border: 0; border-radius: var(--radius-sm); padding: var(--space-2); background: transparent; color: var(--color-text-tertiary); font-size: var(--text-xs); cursor: pointer; }
 .sidebar-empty:hover { background: var(--color-surface-1); color: var(--color-text-secondary); }
+.archived-threads { flex: 0 1 auto; max-height: 34%; margin: 3px 2px 1px; border-top: 1px solid var(--color-border); padding-top: 3px; overflow: hidden; }
+.archived-threads > summary { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto 14px; min-height: 30px; align-items: center; gap: 6px; border-radius: var(--radius-sm); padding: 0 6px; color: var(--color-text-tertiary); font-size: var(--text-xs); list-style: none; cursor: pointer; }
+.archived-threads > summary::-webkit-details-marker { display: none; }
+.archived-threads > summary:hover { background: var(--color-surface-1); color: var(--color-text-secondary); }
+.archived-threads > summary > svg { width: 14px; height: 14px; }
+.archived-threads > summary > svg:last-child { transition: transform var(--duration-normal) var(--ease-standard); }
+.archived-threads[open] > summary > svg:last-child { transform: rotate(90deg); }
+.archived-threads > div { max-height: 180px; overflow-x: hidden; overflow-y: auto; padding-top: 2px; }
+.archived-threads .thread { padding-left: 22px; color: var(--color-text-tertiary); }
 .sidebar-footer { display: grid; flex: 0 0 auto; gap: 2px; padding-top: 4px; border-top: 1px solid var(--color-border); }
 .settings-link { min-width: 0; }
 .sidebar-footer-actions { display: flex; min-width: 0; align-items: center; gap: 3px; }
@@ -212,6 +221,8 @@ button:active:not(:disabled) { transform: scale(.975); }
 .topbar-title strong { overflow: hidden; font-size: var(--text-md); font-weight: 650; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }
 .topbar-provider { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; color: var(--color-text-tertiary); font-size: 10px; }
 .topbar-provider .provider-mark { width: 18px; height: 18px; border-radius: 6px; font-size: 8px; }
+.worktree-badge { display: inline-flex; min-width: 0; max-width: 220px; align-items: center; gap: 5px; border: 1px solid var(--color-border); border-radius: var(--radius-pill); padding: 3px 7px; color: var(--color-text-tertiary); font: 10px/1.2 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worktree-badge svg { width: 12px; height: 12px; flex: 0 0 auto; }
 .topbar .topbar-actions { align-items: center; gap: var(--space-1); }
 .topbar-actions { display: flex; flex: 0 0 auto; }
 .thread-contextbar { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--space-2); padding: 5px 12px 5px var(--space-5); border-bottom: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-sidebar) 72%, transparent); animation: menu-in var(--duration-fast) var(--ease-out); }

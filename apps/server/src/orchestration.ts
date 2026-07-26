@@ -17,6 +17,7 @@ export type ThreadGoal = {
 export type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: Usage };
 export type TurnPhase = "idle" | "preparing" | "running" | "stopping" | "checkpointing" | "blocked" | "failed";
 export type TurnLifecycle = { phase: TurnPhase; updatedAt: string; turnId?: string; queuedId?: string; error?: string };
+export type ThreadWorktree = { sourceCwd: string; branch: string };
 export type BackgroundTask = {
   taskId: string;
   queuedId: string;
@@ -55,6 +56,7 @@ export type ThreadProjection = {
   provider: ProviderId;
   parentThreadId?: string;
   cwd: string;
+  worktree?: ThreadWorktree;
   kind: "project" | "chat";
   title: string;
   createdAt: string;
@@ -76,14 +78,16 @@ export type ThreadProjection = {
   backgroundTasks: BackgroundTask[];
   usage: ThreadUsage;
   goal?: ThreadGoal;
+  archivedAt?: string;
 };
 
 export type DomainEvent =
   | { type: "ThreadSnapshot"; payload: { thread: ThreadProjection } }
-  | { type: "ThreadCreated"; payload: { sessionId: string; provider?: ProviderId; parentThreadId?: string; cwd: string; kind?: "project" | "chat"; title: string; configOptions?: SessionConfigOption[] } }
+  | { type: "ThreadCreated"; payload: { sessionId: string; provider?: ProviderId; parentThreadId?: string; cwd: string; worktree?: ThreadWorktree; kind?: "project" | "chat"; title: string; configOptions?: SessionConfigOption[] } }
   | { type: "ThreadRenamed"; payload: { title: string } }
   | { type: "ThreadGoalSet"; payload: { objective: string; status?: ThreadGoal["status"] } }
   | { type: "ThreadGoalCleared"; payload: Record<string, never> }
+  | { type: "ThreadArchived"; payload: { archived: boolean } }
   | { type: "ThreadDeleted"; payload: Record<string, never> }
   | { type: "TurnPhaseChanged"; payload: { phase: TurnPhase; turnId?: string; queuedId?: string; error?: string } }
   | { type: "TurnStarted"; payload: { turnId: string; text: string; origin?: "user" | "background_task"; sourceQueuedId?: string; title?: string; resources?: string[]; images?: Array<{ name: string; mimeType: string }> } }
@@ -221,6 +225,7 @@ export class OrchestrationEngine {
         provider: payload.provider ?? "kimi",
         ...(payload.parentThreadId ? { parentThreadId: payload.parentThreadId } : {}),
         cwd: payload.cwd,
+        ...(payload.worktree ? { worktree: payload.worktree } : {}),
         kind: payload.kind === "chat" ? "chat" : "project",
         title: payload.title,
         createdAt: event.createdAt,
@@ -276,6 +281,10 @@ export class OrchestrationEngine {
       }
       case "ThreadGoalCleared":
         delete thread.goal;
+        break;
+      case "ThreadArchived":
+        if (payload.archived) thread.archivedAt = event.createdAt;
+        else delete thread.archivedAt;
         break;
       case "TurnPhaseChanged": {
         const turnId = typeof payload.turnId === "string" ? payload.turnId : undefined;

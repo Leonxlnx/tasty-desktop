@@ -50,7 +50,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("auth.logout"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi") }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("providers.list"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("threads.list"), params: z.object({ cwd: z.string().optional(), provider: z.enum(["kimi", "codex", "claude", "cursor"]).optional() }).default({}) }),
-  z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi"), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
+  z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), isolate: z.boolean().default(false), provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi"), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
   z.object({ id, method: z.literal("threads.createSide"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120).optional() }) }),
   z.object({ id, method: z.literal("threads.resume"), params: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), cwd: z.string().min(1), provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi"), replay: z.boolean().default(false) }) }),
   z.object({ id, method: z.literal("threads.rename"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120) }) }),
@@ -58,6 +58,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("threads.clearGoal"), params: z.object({ threadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("subagents.inspect"), params: z.object({ threadId: z.string().min(1), agentThreadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("threads.delete"), params: z.object({ threadId: z.string().min(1) }) }),
+  z.object({ id, method: z.literal("threads.archive"), params: z.object({ threadId: z.string().min(1), archived: z.boolean() }) }),
   z.object({ id, method: z.literal("threads.sendTurn"), params: z.object({
     threadId: z.string().min(1), text: z.string().min(1), mentions: z.array(z.string()).max(20).default([]),
     images: z.array(z.object({ name: z.string().min(1), mimeType: z.string().regex(/^image\//), data: z.string().min(1).max(30_000_000) })).max(5).default([]),
@@ -570,20 +571,29 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       const provider = request.params.provider;
       const acp = await ensureRuntime(provider);
       if (!request.params.standalone && !request.params.cwd) throw new Error("Workspace path is required for a project chat");
-      const targetCwd = request.params.standalone ? standaloneChatCwd : resolve(request.params.cwd!);
-      if (request.params.standalone) await mkdir(targetCwd, { recursive: true });
-      const session = await acp.newSession(targetCwd);
-      let configOptions = session.configOptions ?? [];
-      if (!hasConfiguredModel(configOptions)) throw new Error(`${providerName(provider)} has no configured model. Complete provider sign-in, then retry.`);
-      for (const [configId, value] of sanitizeSessionConfig(request.params.config, configOptions)) {
-        if (!sanitizeSessionConfig({ [configId]: value }, configOptions).length) continue;
-        const applied = await acp.setConfigOption(session.sessionId, configId, value);
-        if (applied.configOptions) configOptions = applied.configOptions;
-      }
-      if (provider === "kimi") void rememberLiveConfigOptions(configOptions);
+      if (request.params.standalone && request.params.isolate) throw new Error("Standalone chats do not use Git worktrees");
       const threadId = crypto.randomUUID();
-      await engine.append(threadId, { type: "ThreadCreated", payload: { sessionId: session.sessionId, provider, cwd: targetCwd, kind: request.params.standalone ? "chat" : "project", title: request.params.standalone ? "New chat" : "New Tasty session", configOptions } });
-      reply(socket, request.id, { thread: engine.thread(threadId) });
+      const createdWorktree = request.params.isolate
+        ? await git.createWorktree(request.params.cwd!, join(dataHome, "worktrees", threadId), threadId.slice(0, 12))
+        : undefined;
+      const targetCwd = request.params.standalone ? standaloneChatCwd : createdWorktree?.cwd ?? resolve(request.params.cwd!);
+      if (request.params.standalone) await mkdir(targetCwd, { recursive: true });
+      try {
+        const session = await acp.newSession(targetCwd);
+        let configOptions = session.configOptions ?? [];
+        if (!hasConfiguredModel(configOptions)) throw new Error(`${providerName(provider)} has no configured model. Complete provider sign-in, then retry.`);
+        for (const [configId, value] of sanitizeSessionConfig(request.params.config, configOptions)) {
+          if (!sanitizeSessionConfig({ [configId]: value }, configOptions).length) continue;
+          const applied = await acp.setConfigOption(session.sessionId, configId, value);
+          if (applied.configOptions) configOptions = applied.configOptions;
+        }
+        if (provider === "kimi") void rememberLiveConfigOptions(configOptions);
+        await engine.append(threadId, { type: "ThreadCreated", payload: { sessionId: session.sessionId, provider, cwd: targetCwd, ...(createdWorktree ? { worktree: { sourceCwd: createdWorktree.sourceCwd, branch: createdWorktree.branch } } : {}), kind: request.params.standalone ? "chat" : "project", title: request.params.standalone ? "New chat" : "New Tasty session", configOptions } });
+        reply(socket, request.id, { thread: engine.thread(threadId) });
+      } catch (error) {
+        if (createdWorktree) await git.discardNewWorktree(createdWorktree).catch((cleanupError) => emitDiagnostic("error", cleanupError, "worktree-cleanup"));
+        throw error;
+      }
       return;
     }
     if (request.method === "threads.resume") {
@@ -622,6 +632,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
           provider: thread.provider,
           parentThreadId: thread.threadId,
           cwd: thread.cwd,
+          ...(thread.worktree ? { worktree: thread.worktree } : {}),
           kind: thread.kind,
           title: request.params.title ?? `Side chat · ${thread.title}`,
           configOptions,
@@ -632,6 +643,14 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     }
     if (request.method === "threads.rename") {
       await engine.append(thread.threadId, { type: "ThreadRenamed", payload: { title: request.params.title } });
+      reply(socket, request.id, { thread: engine.thread(thread.threadId) });
+      return;
+    }
+    if (request.method === "threads.archive") {
+      const hasPendingWork = thread.running || queueAdmissions.has(thread.threadId) || (turnQueues.get(thread.threadId)?.length ?? 0) > 0 || thread.approvals.length > 0
+        || thread.backgroundTasks.some((task) => !task.reportDeliveredAt && !task.reportCancelledAt);
+      if (request.params.archived && hasPendingWork) throw new Error("Finish or stop active work before archiving this chat");
+      await engine.append(thread.threadId, { type: "ThreadArchived", payload: { archived: request.params.archived } });
       reply(socket, request.id, { thread: engine.thread(thread.threadId) });
       return;
     }
@@ -665,6 +684,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "threads.sendTurn") {
+      if (thread.archivedAt) throw new Error("Restore this chat before sending another task");
       await waitForSessionConfig(thread.sessionId);
       const existingQueue = turnQueues.get(thread.threadId) ?? [];
       if (request.params.images.length && (thread.running || queueAdmissions.has(thread.threadId) || existingQueue.length)) {
@@ -680,18 +700,23 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         origin: "user",
       };
       const queue = existingQueue;
-      if (queued.mode === "steer" && thread.running) queue.unshift(queued);
+      const startingAdmission = queueAdmissions.get(thread.threadId);
+      const steering = queued.mode === "steer" && (thread.running || Boolean(startingAdmission));
+      if (steering) queue.unshift(queued);
       else queue.push(queued);
       turnQueues.set(thread.threadId, queue);
       await persistQueues();
       publishQueue(thread.threadId);
-      if (queued.mode === "steer" && thread.running) {
+      if (steering && thread.running) {
         await resolveThreadApprovals(thread.threadId);
         const acp = runtimeForLocalCancellation(thread.provider);
         await cancelThreadTurn(acp, thread);
       }
-      else void runNextQueued(thread.threadId);
-      reply(socket, request.id, { accepted: true, queuedId: queued.queuedId, queued: thread.running || queue.length > 1 });
+      else if (steering && startingAdmission) {
+        startingAdmission.cancelled = true;
+        requestQueueRestart(thread.threadId, startingAdmission);
+      } else void runNextQueued(thread.threadId);
+      reply(socket, request.id, { accepted: true, queuedId: queued.queuedId, queued: thread.running || Boolean(startingAdmission) || queue.length > 1 });
       return;
     }
     if (request.method === "threads.updateQueuedTurn") {

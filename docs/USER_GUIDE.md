@@ -22,11 +22,14 @@ Creating a chat first creates a draft. It becomes a durable provider session onl
 
 Project menu actions can:
 
+- Create a new isolated chat in its own Git worktree and `tasty/*` branch
 - Rename the sidebar label
 - Remove the project from the sidebar without touching its folder
 - Delete the app's chat history for that project
 
-Chat menu actions can rename, stop, open, or delete a chat. Right-clicking a project or chat opens the same menu as its three-dot action.
+Chat menu actions can rename, stop, archive, restore, open, or delete a chat. Archived chats appear in the reversible **Archived** section. Tasty refuses to archive a chat while turns, approvals, queued prompts, or background reports are still pending. Archiving and deleting chat history never delete its Git worktree or branch silently. Right-clicking a project or chat opens the same menu as its three-dot action.
+
+An isolated chat shows its branch in the top bar. Its agent, terminal, Git changes, checkpoints, and preview run from the worktree, while the chat remains grouped under the source project in the sidebar.
 
 ## Compose a prompt
 
@@ -122,6 +125,8 @@ The app checks the signed update feed at startup. When a newer version is availa
 Published update packages are verified with Tauri updater signatures. Windows SmartScreen may still warn until the project also uses a Microsoft Authenticode certificate.
 
 ## Troubleshooting
+
+Settings includes **Diagnostics > Export support bundle**. The JSON file is saved locally and contains bounded, redacted runtime errors plus version and active-work counts. It is never uploaded automatically. Review it before sharing.
 
 ### No model is available
 

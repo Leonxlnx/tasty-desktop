@@ -1,10 +1,13 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { access, mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { WebSocket, type RawData } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
+
+const exec = promisify(execFile);
 
 describe("orchestration server", () => {
   const children: ReturnType<typeof spawn>[] = [];
@@ -403,6 +406,49 @@ describe("orchestration server", () => {
     await completed;
     socket.close();
   });
+
+  it("creates explicit isolated worktree chats and archives them reversibly", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "tasty-server-worktree-home-"));
+    const workspace = await mkdtemp(join(tmpdir(), "tasty-server-worktree-source-"));
+    await exec("git", ["-C", workspace, "init"]);
+    await exec("git", ["-C", workspace, "config", "user.name", "Test"]);
+    await exec("git", ["-C", workspace, "config", "user.email", "test@example.invalid"]);
+    await writeFile(join(workspace, "tracked.txt"), "base\n", "utf8");
+    await exec("git", ["-C", workspace, "add", "."]);
+    await exec("git", ["-C", workspace, "commit", "-m", "base"]);
+    await launchServer(serverPath, "45214", dataHome, children);
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45214", messages);
+
+    const createdReply = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "threads.create", params: { cwd: workspace, isolate: true } }));
+    const created = ((await createdReply).result as { thread: { threadId: string; cwd: string; worktree: { sourceCwd: string; branch: string } } }).thread;
+    expect(created.cwd).toContain(join(await realpath(dataHome), "worktrees"));
+    expect(created.worktree).toMatchObject({ sourceCwd: await realpath(workspace), branch: expect.stringMatching(/^tasty\//) });
+    await expect(access(join(created.cwd, "tracked.txt"))).resolves.toBeUndefined();
+
+    const approval = waitFor(socket, messages, (message) => (message.payload as { type?: string } | undefined)?.type === "ApprovalRequested");
+    socket.send(JSON.stringify({ id: 2, method: "threads.sendTurn", params: { threadId: created.threadId, text: "Keep this active" } }));
+    const requestId = ((await approval).payload as { payload: { requestId: string } }).payload.requestId;
+    const blocked = waitFor(socket, messages, (message) => message.id === 3);
+    socket.send(JSON.stringify({ id: 3, method: "threads.archive", params: { threadId: created.threadId, archived: true } }));
+    expect((await blocked).error).toMatchObject({ message: expect.stringMatching(/active work/i) });
+
+    const completed = waitFor(socket, messages, (message) => (message.payload as { type?: string } | undefined)?.type === "TurnCompleted");
+    socket.send(JSON.stringify({ id: 4, method: "threads.respondToRequest", params: { threadId: created.threadId, requestId, optionId: "allow-once" } }));
+    await completed;
+    const archived = waitFor(socket, messages, (message) => message.id === 5);
+    socket.send(JSON.stringify({ id: 5, method: "threads.archive", params: { threadId: created.threadId, archived: true } }));
+    expect(((await archived).result as { thread: { archivedAt?: string } }).thread.archivedAt).toBeTruthy();
+    const rejected = waitFor(socket, messages, (message) => message.id === 6);
+    socket.send(JSON.stringify({ id: 6, method: "threads.sendTurn", params: { threadId: created.threadId, text: "Must restore first" } }));
+    expect((await rejected).error).toMatchObject({ message: expect.stringMatching(/restore/i) });
+    const restored = waitFor(socket, messages, (message) => message.id === 7);
+    socket.send(JSON.stringify({ id: 7, method: "threads.archive", params: { threadId: created.threadId, archived: false } }));
+    expect(((await restored).result as { thread: { archivedAt?: string } }).thread.archivedAt).toBeUndefined();
+    socket.close();
+  }, 30_000);
 
   it("self-heals forgotten ACP sessions and serializes config projection updates", async () => {
     const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");

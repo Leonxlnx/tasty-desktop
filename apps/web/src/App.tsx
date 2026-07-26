@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { ArrowCounterClockwise, ArrowSquareOut, ArrowsClockwise, ArrowUp, Brain, Browser, Broom, Bug, CaretDown, CaretRight, ChatCircleDots, Check, Circle, Copy, CornersIn, CornersOut, Cpu, DotsThree, DownloadSimple, FileText, FolderOpen, FolderSimple, Gauge, GearSix, GitBranch, GitCommit, Hammer, ImageSquare, Info, MagnifyingGlass, Minus, Palette, PaperPlaneRight, Paperclip, PencilSimple, PlugsConnected, Plus, Robot, ShieldCheck, SidebarSimple, SignIn, SignOut, SlidersHorizontal, Square, Stop, TerminalWindow, Trash, UserCircle, WarningCircle, X } from "@phosphor-icons/react";
+import { Archive, ArrowCounterClockwise, ArrowSquareOut, ArrowsClockwise, ArrowUp, Brain, Browser, Broom, Bug, CaretDown, CaretRight, ChatCircleDots, Check, Circle, Copy, CornersIn, CornersOut, Cpu, DotsThree, DownloadSimple, FileText, FolderOpen, FolderSimple, Gauge, GearSix, GitBranch, GitCommit, Hammer, ImageSquare, Info, MagnifyingGlass, Minus, Palette, PaperPlaneRight, Paperclip, PencilSimple, PlugsConnected, Plus, Robot, ShieldCheck, SidebarSimple, SignIn, SignOut, SlidersHorizontal, Square, Stop, TerminalWindow, Trash, UserCircle, WarningCircle, X } from "@phosphor-icons/react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -44,7 +44,7 @@ type TurnPhase = "idle" | "preparing" | "running" | "stopping" | "checkpointing"
 type TurnLifecycle = { phase: TurnPhase; updatedAt: string; turnId?: string; queuedId?: string; error?: string };
 type ThreadGoal = { objective: string; updatedAt: string };
 type Thread = {
-  threadId: string; sessionId: string; provider: ProviderId; parentThreadId?: string; goal?: ThreadGoal; cwd: string; kind: "project" | "chat"; title: string; createdAt: string; updatedAt: string; running: boolean;
+  threadId: string; sessionId: string; provider: ProviderId; parentThreadId?: string; goal?: ThreadGoal; cwd: string; worktree?: { sourceCwd: string; branch: string }; kind: "project" | "chat"; title: string; createdAt: string; updatedAt: string; archivedAt?: string; running: boolean;
   activeTurnId: string | undefined; stopReason: string | undefined; lifecycle: TurnLifecycle; turns: TurnRecord[]; messages: Message[]; plan: Array<{ content: string; status: string }>;
   activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; configOptions: ConfigOption[]; commands: AvailableCommand[]; modeId: string | undefined; checkpoints: Checkpoint[]; backgroundTasks: BackgroundTask[]; usage?: Usage; queue: QueuedPrompt[];
 };
@@ -84,7 +84,7 @@ type Preferences = {
   provider: ProviderId;
 };
 type ProjectGroup = { cwd: string; name: string; threads: Thread[]; runtimeSessions: RuntimeSession[] };
-type DraftChat = { kind: "project" | "chat"; cwd?: string };
+type DraftChat = { kind: "project" | "chat"; cwd?: string; isolate?: boolean };
 type ConfigTarget =
   | { key: string; kind: "thread"; threadId: string }
   | { key: string; kind: "draft"; draft: DraftChat };
@@ -994,21 +994,21 @@ export function App() {
   }, [activeThread, configDefaults, draftChat, preferences.composerConfig]);
 
   useEffect(() => {
-    if (!runtimeReady || !activeThread || activeThread.running) return;
+    if (!runtimeReady || !activeThread || activeThread.archivedAt || isThreadBusy(activeThread)) return;
     let cancelled = false;
     void call("threads.resume", { threadId: activeThread.threadId, sessionId: activeThread.sessionId, cwd: activeThread.cwd, provider: activeThread.provider, replay: false })
       .catch((error: Error) => { if (!cancelled) setDiagnostic(error.message); });
     return () => { cancelled = true; };
-  }, [activeThread?.cwd, activeThread?.running, activeThread?.sessionId, activeThread?.threadId, call, runtimeReady]);
+  }, [activeThread?.archivedAt, activeThread?.cwd, activeThread?.lifecycle.phase, activeThread?.running, activeThread?.sessionId, activeThread?.threadId, call, runtimeReady]);
 
-  function createThread(targetCwd = cwd) {
+  function createThread(targetCwd = cwd, isolate = false) {
     if (!targetCwd) return;
     setCwd(targetCwd);
     rememberWorkspace(targetCwd);
     setNavView("projects");
     setCapabilityCenterOpen(false);
     setActiveThreadId(undefined);
-    setDraftChat({ kind: "project", cwd: targetCwd });
+    setDraftChat({ kind: "project", cwd: targetCwd, ...(isolate ? { isolate: true } : {}) });
     setDiagnostics([]);
     window.setTimeout(() => composerInput.current?.focus(), 0);
   }
@@ -1076,6 +1076,11 @@ export function App() {
 
   function selectThread(thread: Thread) {
     if (thread.kind === "chat") clearProjectPanels();
+    else {
+      const projectCwd = thread.worktree?.sourceCwd ?? thread.cwd;
+      setCwd(projectCwd);
+      rememberWorkspace(projectCwd);
+    }
     setCapabilityCenterOpen(false);
     setDraftChat(undefined);
     setActiveThreadId(thread.threadId);
@@ -1134,6 +1139,7 @@ export function App() {
     try {
       const created = activeThread ? undefined : await call("threads.create", {
         ...(draftChat?.kind === "chat" ? { standalone: true } : { cwd: draftChat?.cwd }),
+        ...(draftChat?.isolate ? { isolate: true } : {}),
         provider: preferences.provider,
         ...(Object.keys(draftConfig).length ? { config: draftConfig } : {}),
       }) as { thread: Thread };
@@ -1169,6 +1175,18 @@ export function App() {
 
   function stopThread(threadId: string) {
     void call("threads.interruptTurn", { threadId, clearQueue: true }).catch((error: Error) => setDiagnostic(error.message));
+  }
+
+  async function archiveThread(thread: Thread, archived: boolean) {
+    try {
+      const result = await call("threads.archive", { threadId: thread.threadId, archived }) as { thread: Thread };
+      const updated = normalizeThread(result.thread);
+      setThreads((current) => current.map((item) => item.threadId === updated.threadId ? updated : item));
+      if (archived && activeThreadId === thread.threadId) setActiveThreadId(undefined);
+      if (!archived) selectThread(updated);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function createSideThread(title?: string) {
@@ -1773,8 +1791,9 @@ export function App() {
   }
 
   const projectedRuntimeSessions = useMemo(() => filterRuntimeSessions(runtimeSessions, threads, preferences.hiddenSessions), [preferences.hiddenSessions, runtimeSessions, threads]);
-  const standaloneThreads = useMemo(() => threads.filter((thread) => thread.kind === "chat"), [threads]);
-  const projectThreads = useMemo(() => threads.filter((thread) => thread.kind !== "chat"), [threads]);
+  const archivedThreads = useMemo(() => threads.filter((thread) => Boolean(thread.archivedAt)), [threads]);
+  const standaloneThreads = useMemo(() => threads.filter((thread) => thread.kind === "chat" && !thread.archivedAt), [threads]);
+  const projectThreads = useMemo(() => threads.filter((thread) => thread.kind !== "chat" && !thread.archivedAt), [threads]);
   const standaloneRuntimeSessions = useMemo(() => projectedRuntimeSessions.filter((session) => session.kind === "chat"), [projectedRuntimeSessions]);
   const projectRuntimeSessions = useMemo(() => projectedRuntimeSessions.filter((session) => session.kind !== "chat"), [projectedRuntimeSessions]);
   const visibleThreads = useMemo(() => filterByTitle(standaloneThreads, threadFilter), [standaloneThreads, threadFilter]);
@@ -1962,6 +1981,7 @@ export function App() {
                 <span className="row-actions">
                   <button className="project-new" type="button" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} disabled={!runtimeReady} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void createThread(project.cwd); }}><Plus /></button>
                   <ItemActions open={itemMenu?.kind === "project" && itemMenu.id === project.cwd} label={`Manage ${project.name}`} onToggle={() => setItemMenu((current) => current?.kind === "project" && current.id === project.cwd ? undefined : { kind: "project", id: project.cwd })} items={[
+                    { label: "New isolated chat", icon: <GitBranch />, onSelect: () => createThread(project.cwd, true) },
                     { label: "Rename project", icon: <PencilSimple />, onSelect: () => setManageDialog({ kind: "rename-project", cwd: project.cwd, name: project.name }) },
                     { label: "Remove from sidebar", icon: <X />, onSelect: () => setManageDialog({ kind: "remove-project", cwd: project.cwd, name: project.name }) },
                     ...(project.threads.length ? [{ label: `Delete ${project.threads.length} chat${project.threads.length === 1 ? "" : "s"}`, icon: <Trash />, danger: true, onSelect: () => setManageDialog({ kind: "delete-project-chats" as const, cwd: project.cwd, name: project.name, threadIds: project.threads.map((thread) => thread.threadId), sessionIds: project.threads.map((thread) => thread.sessionId) }) }] : []),
@@ -1969,17 +1989,21 @@ export function App() {
                 </span>
               </summary>
               <div className="project-threads">
-                {threadTreeOrder(project.threads).map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} side={Boolean(thread.parentThreadId)} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
+                {threadTreeOrder(project.threads).map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} side={Boolean(thread.parentThreadId)} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onArchive={() => void archiveThread(thread, true)} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
                 {project.runtimeSessions.map((session) => <RuntimeSessionNavItem session={session} key={session.sessionId} menuOpen={itemMenu?.kind === "session" && itemMenu.id === session.sessionId} onSelect={() => void resumeSession(session)} onMenu={(forceOpen) => changeRuntimeSessionMenu(session.sessionId, forceOpen)} onRename={() => void renameRuntimeSession(session)} onRemove={() => setManageDialog({ kind: "remove-runtime-session", sessionId: session.sessionId, name: session.title ?? "Agent session" })} />)}
               </div>
             </details>) : <>
-              {threadTreeOrder(visibleThreads).map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} chat side={Boolean(thread.parentThreadId)} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
+              {threadTreeOrder(visibleThreads).map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} chat side={Boolean(thread.parentThreadId)} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onArchive={() => void archiveThread(thread, true)} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
               {visibleRuntimeSessions.map((session) => <RuntimeSessionNavItem session={session} chat key={session.sessionId} menuOpen={itemMenu?.kind === "session" && itemMenu.id === session.sessionId} onSelect={() => void resumeSession(session)} onMenu={(forceOpen) => changeRuntimeSessionMenu(session.sessionId, forceOpen)} onRename={() => void renameRuntimeSession(session)} onRemove={() => setManageDialog({ kind: "remove-runtime-session", sessionId: session.sessionId, name: session.title ?? "Agent chat" })} />)}
             </>}
             {!bootstrapping && threadFilter && (navView === "projects" ? !visibleProjects.length : !visibleThreads.length && !visibleRuntimeSessions.length) && <p className="thread-empty">No matches</p>}
             {!bootstrapping && !threadFilter && navView === "projects" && !visibleProjects.length && <button className="sidebar-empty" type="button" onClick={() => void chooseWorkspace()}><FolderOpen /> Open your first folder</button>}
             {!bootstrapping && !threadFilter && navView === "chats" && !visibleThreads.length && !visibleRuntimeSessions.length && <button className="sidebar-empty" type="button" disabled={!runtimeReady} onClick={createStandaloneChat}><ChatCircleDots /> Start a chat</button>}
           </div>
+          {!bootstrapping && archivedThreads.length > 0 && <details className="archived-threads">
+            <summary><Archive /><span>Archived</span><small>{archivedThreads.length}</small><CaretRight /></summary>
+            <div>{archivedThreads.slice(0, 20).map((thread) => <ThreadNavItem archived chat={thread.kind === "chat"} thread={thread} active={false} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => void archiveThread(thread, false)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onArchive={() => void archiveThread(thread, false)} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}</div>
+          </details>}
         </div>
 
         <footer className="sidebar-footer">
@@ -1997,7 +2021,7 @@ export function App() {
 
       <section className="conversation">
         <header className="topbar">
-          <div className="topbar-title"><strong>{capabilityCenterOpen ? "Capabilities" : activeThread?.title ?? (draftChat ? "New chat" : navView === "chats" ? "Chats" : cwd ? workspaceName(cwd) : "Tasty")}</strong>{!capabilityCenterOpen && <span className="topbar-provider"><ProviderMark provider={providerId} />{providerName(providerId)}</span>}</div>
+          <div className="topbar-title"><strong>{capabilityCenterOpen ? "Capabilities" : activeThread?.title ?? (draftChat ? "New chat" : navView === "chats" ? "Chats" : cwd ? workspaceName(cwd) : "Tasty")}</strong>{!capabilityCenterOpen && <span className="topbar-provider"><ProviderMark provider={providerId} />{providerName(providerId)}</span>}{!capabilityCenterOpen && (activeThread?.worktree || draftChat?.isolate) && <span className="worktree-badge" title={activeThread?.worktree ? `${activeThread.worktree.branch} · ${activeThread.cwd}` : "A new isolated Git worktree will be created when you send the first task"}><GitBranch />{activeThread?.worktree?.branch ?? "Isolated worktree"}</span>}</div>
           <div className="topbar-actions">
             {railAvailable && !capabilityCenterOpen && <button className={`panel-toggle rail-master-toggle ${railView ? "active" : ""}`} type="button" title={railView ? "Close work panel" : "Open work panel"} aria-label={railView ? "Close work panel" : "Open work panel"} aria-expanded={Boolean(railView)} onClick={() => setRailView((current) => current ? undefined : activeThread?.kind === "chat" ? "agents" : agentRuns.some((run) => run.status === "running") ? "agents" : "git")}><SidebarSimple /></button>}
           </div>
@@ -2294,11 +2318,12 @@ function ItemActions({ open, label, items, onToggle }: { open: boolean; label: s
   </span>;
 }
 
-function ThreadNavItem({ thread, active, chat = false, side = false, menuOpen, onSelect, onMenu, onStop, onRename, onDelete }: { thread: Thread; active: boolean; chat?: boolean; side?: boolean; menuOpen: boolean; onSelect: () => void; onMenu: (forceOpen?: boolean) => void; onStop: () => void; onRename: () => void; onDelete: () => void }) {
+function ThreadNavItem({ thread, active, chat = false, side = false, archived = false, menuOpen, onSelect, onMenu, onStop, onRename, onArchive, onDelete }: { thread: Thread; active: boolean; chat?: boolean; side?: boolean; archived?: boolean; menuOpen: boolean; onSelect: () => void; onMenu: (forceOpen?: boolean) => void; onStop: () => void; onRename: () => void; onArchive: () => void; onDelete: () => void }) {
   const busy = isThreadBusy(thread);
   const items = [
     ...(busy ? [{ label: "Stop task", icon: <Stop weight="fill" />, onSelect: onStop }] : []),
     { label: "Rename chat", icon: <PencilSimple />, onSelect: onRename },
+    { label: archived ? "Restore chat" : "Archive chat", icon: <Archive />, onSelect: onArchive },
     { label: "Delete chat", icon: <Trash />, danger: true, onSelect: onDelete },
   ];
   return <div className={`thread-row-wrap ${side ? "side-thread-row" : ""} ${active ? "active" : ""}`} onContextMenu={(event) => { event.preventDefault(); onMenu(true); }}>
@@ -2913,10 +2938,11 @@ function uniquePaths(paths: string[]): string[] {
 export function groupProjects(projectPaths: string[], threads: Thread[], runtimeSessions: RuntimeSession[], aliases: Record<string, string> = {}): ProjectGroup[] {
   const projectThreads = threads.filter((thread) => thread.kind !== "chat");
   const projectSessions = runtimeSessions.filter((session) => session.kind !== "chat");
-  return uniquePaths([...projectPaths, ...projectThreads.map((thread) => thread.cwd), ...projectSessions.map((session) => session.cwd)]).filter((cwd) => !isInternalWorkspace(cwd)).map((cwd) => ({
+  const projectCwd = (thread: Thread) => thread.worktree?.sourceCwd ?? thread.cwd;
+  return uniquePaths([...projectPaths, ...projectThreads.map(projectCwd), ...projectSessions.map((session) => session.cwd)]).filter((cwd) => !isInternalWorkspace(cwd)).map((cwd) => ({
     cwd,
     name: aliases[pathKey(cwd)] || workspaceName(cwd),
-    threads: projectThreads.filter((thread) => samePath(thread.cwd, cwd)),
+    threads: projectThreads.filter((thread) => samePath(projectCwd(thread), cwd)),
     runtimeSessions: projectSessions.filter((session) => samePath(session.cwd, cwd)),
   }));
 }
@@ -3597,7 +3623,7 @@ export function applyEvents(threads: Thread[], events: StoredEvent[]): Thread[] 
   const mutable = new Map<string, Thread>();
   for (const event of events) {
     if (event.type === "ThreadCreated") {
-      const payload = event.payload as { sessionId: string; provider?: ProviderId; parentThreadId?: string; cwd: string; kind?: "project" | "chat"; title: string; configOptions: ConfigOption[] };
+      const payload = event.payload as { sessionId: string; provider?: ProviderId; parentThreadId?: string; cwd: string; worktree?: { sourceCwd: string; branch: string }; kind?: "project" | "chat"; title: string; configOptions: ConfigOption[] };
       const created: Thread = { threadId: event.threadId, ...payload, provider: normalizeProvider(payload.provider), kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, lifecycle: { phase: "idle", updatedAt: event.createdAt }, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], backgroundTasks: [], usage: {}, queue: [] };
       mutable.set(event.threadId, created);
       nextThreads = [created, ...nextThreads.filter((thread) => thread.threadId !== event.threadId)];
@@ -3627,6 +3653,10 @@ function mutateThread(next: Thread, event: StoredEvent): void {
   if (event.type === "ThreadRenamed") next.title = String(payload.title);
   else if (event.type === "ThreadGoalSet") next.goal = { objective: String(payload.objective), updatedAt: event.createdAt };
   else if (event.type === "ThreadGoalCleared") delete next.goal;
+  else if (event.type === "ThreadArchived") {
+    if (payload.archived) next.archivedAt = event.createdAt;
+    else delete next.archivedAt;
+  }
   else if (event.type === "TurnPhaseChanged") {
     const turnId = typeof payload.turnId === "string" ? payload.turnId : undefined;
     const terminal = payload.phase === "idle" || payload.phase === "blocked" || payload.phase === "failed";
@@ -3796,10 +3826,12 @@ export function normalizeThread(value: Thread): Thread {
       updatedAt: typeof thread.goal.updatedAt === "string" ? thread.goal.updatedAt : createdAt,
     } } : {}),
     cwd: String(thread.cwd ?? ""),
+    ...(thread.worktree && typeof thread.worktree.sourceCwd === "string" && typeof thread.worktree.branch === "string" ? { worktree: { sourceCwd: thread.worktree.sourceCwd, branch: thread.worktree.branch } } : {}),
     kind: thread.kind === "chat" ? "chat" : "project",
     title: typeof thread.title === "string" && thread.title ? thread.title : "Agent session",
     createdAt,
     updatedAt: typeof thread.updatedAt === "string" ? thread.updatedAt : createdAt,
+    ...(typeof thread.archivedAt === "string" ? { archivedAt: thread.archivedAt } : {}),
     running,
     activeTurnId: typeof thread.activeTurnId === "string" ? thread.activeTurnId : undefined,
     stopReason: typeof thread.stopReason === "string" ? thread.stopReason : undefined,

@@ -328,6 +328,13 @@ describe("project navigation", () => {
     expect(groupProjects([], threads, [])).toEqual([]);
     expect(reorderPaths(["E:/one", "E:/two", "E:/three"], "E:/three", "E:/one")).toEqual(["E:/three", "E:/one", "E:/two"]);
   });
+
+  it("groups isolated worktree chats under their source project", () => {
+    const thread = normalizeThread({ threadId: "isolated", sessionId: "session", cwd: "D:/tasty/worktrees/isolated", worktree: { sourceCwd: "E:/project", branch: "tasty/isolated" }, title: "Isolated" } as never);
+    const projects = groupProjects(["E:/project"], [thread], []);
+    expect(projects).toHaveLength(1);
+    expect(projects[0]).toMatchObject({ cwd: "E:/project", threads: [{ threadId: "isolated", cwd: "D:/tasty/worktrees/isolated" }] });
+  });
 });
 
 describe("workspace panel sizing", () => {
@@ -583,6 +590,13 @@ describe("legacy thread ingress", () => {
       threadId: "side", sessionId: "session", provider: "codex", parentThreadId: "main", cwd: "C:\\work", title: "Investigate",
       goal: { objective: "Find the regression", updatedAt: "2026-07-26T00:00:00.000Z" },
     } as never)).toMatchObject({ provider: "codex", parentThreadId: "main", goal: { objective: "Find the regression" } });
+  });
+
+  it("preserves isolated worktree and archive metadata", () => {
+    expect(normalizeThread({
+      threadId: "archived", sessionId: "session", cwd: "D:/worktree", title: "Archived",
+      worktree: { sourceCwd: "E:/project", branch: "tasty/archived" }, archivedAt: "2026-07-27T00:00:00.000Z",
+    } as never)).toMatchObject({ worktree: { sourceCwd: "E:/project", branch: "tasty/archived" }, archivedAt: "2026-07-27T00:00:00.000Z" });
   });
 });
 

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { resolve } from "node:path";
+import { mkdir, realpath } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -68,6 +69,20 @@ export class GitService {
     await this.#run(status.root, ["commit", "-m", trimmed]);
     const commit = await this.#run(status.root, ["rev-parse", "--short", "HEAD"]);
     return { commit, status: await this.status(status.root) };
+  }
+
+  async createWorktree(cwd: string, destination: string, id: string): Promise<{ cwd: string; sourceCwd: string; branch: string }> {
+    const sourceCwd = await this.#root(cwd);
+    const target = resolve(destination);
+    const branch = `tasty/${id.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 40)}`;
+    await mkdir(dirname(target), { recursive: true });
+    await this.#run(sourceCwd, ["worktree", "add", "-b", branch, target, "HEAD"]);
+    return { cwd: await realpath(target), sourceCwd, branch };
+  }
+
+  async discardNewWorktree(worktree: { cwd: string; sourceCwd: string; branch: string }): Promise<void> {
+    await this.#run(worktree.sourceCwd, ["worktree", "remove", "--force", resolve(worktree.cwd)]);
+    await this.#run(worktree.sourceCwd, ["branch", "-D", worktree.branch]);
   }
 
   async #root(cwd: string): Promise<string> {

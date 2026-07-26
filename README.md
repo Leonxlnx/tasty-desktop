@@ -35,12 +35,13 @@ See [Provider runtimes](docs/PROVIDERS.md) for supported behavior and current li
 ## What it does
 
 - Opens local projects with multiple resumable chats per folder
+- Can create an explicit isolated Git worktree and branch for a project chat
 - Keeps standalone chats separate from project files and Git state
 - Creates goal-backed work with `/goal <objective>` and clears it with `/goal clear`
 - Creates nested side chats with `/side [title]`
 - Streams Markdown answers and plain-language progress while keeping commands and tool output compact and collapsible
 - Queues prompts with Enter and steers active work with Ctrl+Enter
-- Supports stop, edit and retry, copy, revert, rename, remove, and delete workflows
+- Supports stop, edit and retry, copy, revert, rename, archive, restore, remove, and delete workflows
 - Shows runtime-provided models, reasoning effort, permissions, context, and Kimi quota without inventing unavailable controls
 - Projects subagent activity into an Agents panel and opens supported Codex subagent transcripts
 - Includes Git changes, terminal, file inspection, and an agent-controlled localhost preview panel
@@ -83,6 +84,7 @@ The idle send shortcut can be changed in General settings.
 - App preview accepts only `localhost` and `127.0.0.1` URLs.
 - Preview screenshots use an isolated temporary Edge profile, never the user's normal browser profile.
 - Tasty has no application telemetry.
+- Redacted support bundles are written locally only after an explicit export action.
 
 Read [SECURITY.md](SECURITY.md) before reporting a vulnerability.
 
