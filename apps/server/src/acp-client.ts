@@ -100,7 +100,7 @@ export class AcpClient {
         fs: { readTextFile: true, writeTextFile: true },
         terminal: false,
       },
-      clientInfo: { name: "kimi-code-desktop", title: "Kimi Code Desktop", version: "0.9.0" },
+      clientInfo: { name: "tasty", title: "Tasty", version: "0.10.0" },
     }));
   }
 

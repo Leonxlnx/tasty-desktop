@@ -1,15 +1,15 @@
 import type { ContentBlock, SessionConfigOption, Usage } from "@agentclientprotocol/sdk";
 
-export type RuntimeSession = { sessionId: string; cwd?: string; title?: string; configOptions?: SessionConfigOption[] };
-export type RuntimePromptResult = { stopReason: string; usage?: Usage };
+export type RuntimeSession = { sessionId: string; cwd?: string | null; title?: string | null; configOptions?: SessionConfigOption[] | null };
+export type RuntimePromptResult = { stopReason: string; usage?: Usage | null };
 
 export interface AgentRuntime {
   start(): Promise<unknown>;
   newSession(cwd: string): Promise<RuntimeSession>;
   listSessions(cwd?: string): Promise<{ sessions: RuntimeSession[] }>;
-  resumeSession(sessionId: string, cwd: string): Promise<RuntimeSession>;
-  loadSession(sessionId: string, cwd: string): Promise<RuntimeSession>;
-  setConfigOption(sessionId: string, configId: string, value: string | boolean): Promise<{ configOptions?: SessionConfigOption[] }>;
+  resumeSession(sessionId: string, cwd: string): Promise<{ configOptions?: SessionConfigOption[] | null }>;
+  loadSession(sessionId: string, cwd: string): Promise<{ configOptions?: SessionConfigOption[] | null }>;
+  setConfigOption(sessionId: string, configId: string, value: string | boolean): Promise<{ configOptions?: SessionConfigOption[] | null }>;
   prompt(sessionId: string, prompt: ContentBlock[]): Promise<RuntimePromptResult>;
   hasSession(sessionId: string): boolean;
   isOpen(): boolean;

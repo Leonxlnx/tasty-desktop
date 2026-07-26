@@ -8,9 +8,11 @@ import type { ContentBlock, SessionConfigOption } from "@agentclientprotocol/sdk
 import { WebSocketServer, type VerifyClientCallbackSync, type WebSocket } from "ws";
 import { z } from "zod";
 import { AcpClient, isUnknownAcpSessionError, type RuntimeEvent } from "./acp-client.js";
+import type { AgentRuntime } from "./agent-runtime.js";
+import { CodexRuntime } from "./codex-runtime.js";
 import { ConfigDefaults, sanitizeSessionConfig } from "./config-defaults.js";
 import { EventStore } from "./event-store.js";
-import { OrchestrationEngine, titleFromPrompt, type ThreadProjection } from "./orchestration.js";
+import { OrchestrationEngine, titleFromPrompt, type ProviderId, type ThreadProjection } from "./orchestration.js";
 import { hasConfiguredModel, RuntimeIngestion } from "./runtime-ingestion.js";
 import { CheckpointReactor, findGitBinary, type Checkpoint } from "./checkpoint-reactor.js";
 import { listWorkspaceFiles, readWorkspaceFile } from "./workspace-files.js";
@@ -22,6 +24,7 @@ import { TerminalService } from "./terminal-service.js";
 import { installKimiSkill, readKimiCapabilities, readKimiMcpServers } from "./kimi-capabilities.js";
 import { createDesktopPreviewMcpServer, desktopPreviewMcpName, isPreviewBridgeRequest, normalizeDesktopPreviewUrl } from "./desktop-preview.js";
 import { readRecoverableJson, writeRecoverableJson } from "./recoverable-json.js";
+import { providerDescriptors, providerName, requireProviderBinary, resolveProviderBinary } from "./provider-runtime.js";
 import {
   BackgroundTaskMonitor,
   MAX_ACTIVE_BACKGROUND_TASKS,
@@ -42,10 +45,11 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("auth.beginLogin"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("auth.cancel"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("auth.logout"), params: z.object({}).default({}) }),
-  z.object({ id, method: z.literal("threads.list"), params: z.object({ cwd: z.string().optional() }).default({}) }),
-  z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
+  z.object({ id, method: z.literal("providers.list"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("threads.list"), params: z.object({ cwd: z.string().optional(), provider: z.enum(["kimi", "codex", "claude", "cursor"]).optional() }).default({}) }),
+  z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi"), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
   z.object({ id, method: z.literal("threads.createSide"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120).optional() }) }),
-  z.object({ id, method: z.literal("threads.resume"), params: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), cwd: z.string().min(1), replay: z.boolean().default(false) }) }),
+  z.object({ id, method: z.literal("threads.resume"), params: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), cwd: z.string().min(1), provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi"), replay: z.boolean().default(false) }) }),
   z.object({ id, method: z.literal("threads.rename"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120) }) }),
   z.object({ id, method: z.literal("threads.setGoal"), params: z.object({ threadId: z.string().min(1), objective: z.string().trim().min(1).max(20_000) }) }),
   z.object({ id, method: z.literal("threads.clearGoal"), params: z.object({ threadId: z.string().min(1) }) }),
@@ -62,7 +66,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("threads.interruptTurn"), params: z.object({ threadId: z.string().min(1), clearQueue: z.boolean().default(true) }) }),
   z.object({ id, method: z.literal("threads.respondToRequest"), params: z.object({ threadId: z.string().min(1), requestId: z.string().min(1), optionId: z.string().optional() }) }),
   z.object({ id, method: z.literal("threads.setConfigOption"), params: z.object({ threadId: z.string().min(1), configId: z.string().min(1), value: z.union([z.string(), z.boolean()]) }) }),
-  z.object({ id, method: z.literal("runtime.configDefaults"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("runtime.configDefaults"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi") }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("checkpoints.list"), params: z.object({ threadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("checkpoints.revert"), params: z.object({ threadId: z.string().min(1), turnId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("files.tree"), params: z.object({ cwd: z.string().min(1), query: z.string().max(200).default("") }) }),
@@ -150,9 +154,9 @@ const sessionResumes = new Map<string, Promise<SessionConfigOption[]>>();
 const sessionConfigWrites = new Map<string, Promise<void>>();
 type UpdateLease = { owner: WebSocket };
 let queueWrite: Promise<void> = Promise.resolve();
-let runtime: AcpClient | undefined;
-let runtimeStart: Promise<AcpClient> | undefined;
-let initializeResult: Awaited<ReturnType<AcpClient["start"]>> | undefined;
+const runtimes = new Map<ProviderId, AgentRuntime>();
+const runtimeStarts = new Map<ProviderId, Promise<AgentRuntime>>();
+const initializeResults = new Map<ProviderId, unknown>();
 let quotaRead: Promise<Awaited<ReturnType<typeof readKimiQuota>>> | undefined;
 let configDefaultsLive = false;
 let updateLease: UpdateLease | undefined;
@@ -206,27 +210,53 @@ function releaseUpdateLease(owner: WebSocket): boolean {
   return true;
 }
 
-async function ensureRuntime(): Promise<AcpClient> {
-  if (runtime?.isOpen()) return runtime;
-  if (runtimeStart) return runtimeStart;
-  runtimeStart = startRuntime().finally(() => { runtimeStart = undefined; });
-  return runtimeStart;
+async function ensureRuntime(provider: ProviderId = "kimi"): Promise<AgentRuntime> {
+  const current = runtimes.get(provider);
+  if (current?.isOpen()) return current;
+  const pending = runtimeStarts.get(provider);
+  if (pending) return pending;
+  const starting = startRuntime(provider).finally(() => runtimeStarts.delete(provider));
+  runtimeStarts.set(provider, starting);
+  return starting;
 }
 
-async function startRuntime(): Promise<AcpClient> {
-  const stale = runtime;
-  runtime = undefined;
-  initializeResult = undefined;
-  configDefaultsLive = false;
+async function startRuntime(provider: ProviderId): Promise<AgentRuntime> {
+  const stale = runtimes.get(provider);
+  runtimes.delete(provider);
+  initializeResults.delete(provider);
+  if (provider === "kimi") configDefaultsLive = false;
   await stale?.close();
   const currentFile = fileURLToPath(import.meta.url);
-  const useFake = process.env.KIMI_FAKE === "1";
+  const useFake = provider === "kimi" && process.env.KIMI_FAKE === "1";
   const fakePath = join(dirname(currentFile), currentFile.endsWith(".ts") ? "fake-acp.ts" : "fake-acp.js");
-  const client = new AcpClient({
-    binary: useFake ? process.execPath : resolveKimiBinary(),
-    args: useFake ? (currentFile.endsWith(".ts") ? ["--import", "tsx", fakePath] : [fakePath]) : ["acp"],
-    kimiCodeHome: kimiHome,
-    mcpServers: async (workspace) => {
+  let client: AgentRuntime;
+  const runtimeEvents = {
+    onEvent: async (event: RuntimeEvent) => {
+      try {
+        await onRuntimeEvent(provider, event);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[${provider}:event] ${message}`);
+        pushAll("server.diagnostics", { type: "diagnostic", level: "error", message: `Runtime event persistence failed: ${message.slice(0, 2_000)}` });
+        throw error;
+      }
+    },
+    onClose: () => {
+      if (runtimes.get(provider) !== client) return;
+      runtimes.delete(provider);
+      initializeResults.delete(provider);
+      if (provider === "kimi") configDefaultsLive = false;
+      sessionResumes.clear();
+    },
+  };
+  if (provider === "codex") {
+    client = new CodexRuntime({ binary: requireProviderBinary("codex"), ...runtimeEvents });
+  } else if (provider === "kimi" || provider === "cursor") {
+    client = new AcpClient({
+      binary: useFake ? process.execPath : requireProviderBinary(provider),
+      args: useFake ? (currentFile.endsWith(".ts") ? ["--import", "tsx", fakePath] : [fakePath]) : ["acp"],
+      ...(provider === "kimi" ? { kimiCodeHome: kimiHome } : {}),
+      ...(provider === "kimi" ? { mcpServers: async (workspace: string) => {
       const configured = await readKimiMcpServers(kimiHome);
       return [
         createDesktopPreviewMcpServer(
@@ -237,28 +267,15 @@ async function startRuntime(): Promise<AcpClient> {
         ),
         ...configured.filter((server) => server.name !== desktopPreviewMcpName),
       ];
-    },
-    onEvent: async (event) => {
-      try {
-        await onRuntimeEvent(event);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(`[kimi-acp:event] ${message}`);
-        pushAll("server.diagnostics", { type: "diagnostic", level: "error", message: `Runtime event persistence failed: ${message.slice(0, 2_000)}` });
-        throw error;
-      }
-    },
-    onClose: () => {
-      if (runtime !== client) return;
-      runtime = undefined;
-      initializeResult = undefined;
-      configDefaultsLive = false;
-      sessionResumes.clear();
-    },
-  });
+      } } : {}),
+      ...runtimeEvents,
+    });
+  } else {
+    throw new Error("Anthropic Claude runtime is not ready in this build");
+  }
   try {
-    initializeResult = await client.start();
-    runtime = client;
+    initializeResults.set(provider, await client.start());
+    runtimes.set(provider, client);
     return client;
   } catch (error) {
     await client.close();
@@ -266,9 +283,9 @@ async function startRuntime(): Promise<AcpClient> {
   }
 }
 
-async function onRuntimeEvent(event: RuntimeEvent): Promise<void> {
+async function onRuntimeEvent(provider: ProviderId, event: RuntimeEvent): Promise<void> {
   if (event.type === "diagnostic") {
-    (event.level === "error" ? console.error : console.info)(`[kimi-acp:${event.level}] ${event.message}`);
+    (event.level === "error" ? console.error : console.info)(`[${provider}:${event.level}] ${event.message}`);
     if (event.level === "error") pushAll("server.diagnostics", event);
     return;
   }
@@ -347,8 +364,9 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       }
       for (const threadId of turnQueues.keys()) void runNextQueued(threadId);
       reply(socket, request.id, {
-        initialize: initializeResult,
+        initialize: initializeResults.get("kimi"),
         binary: runtimeBinaryDescription(),
+        providers: providerDescriptors(),
         defaultCwd,
         auth: authStatus,
         degraded: Boolean(runtimeError),
@@ -437,27 +455,35 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       }, ...capabilities.mcpServers.filter((server) => server.name !== desktopPreviewMcpName)] });
       return;
     }
+    if (request.method === "providers.list") {
+      reply(socket, request.id, { providers: providerDescriptors().map((provider) => ({
+        ...provider,
+        runtimeReady: Boolean(runtimes.get(provider.id)?.isOpen()),
+      })) });
+      return;
+    }
     if (request.method === "skills.install") {
       reply(socket, request.id, await installKimiSkill(kimiHome, request.params.cwd, request.params.source));
       return;
     }
     if (request.method === "runtime.configDefaults") {
+      const provider = request.params.provider;
       const cached = await configDefaults.load();
-      const fromThreads = engine.threads().map((thread) => thread.configOptions).find((options) => options.length);
+      const fromThreads = engine.threads().filter((thread) => thread.provider === provider).map((thread) => thread.configOptions).find((options) => options.length);
       const fallback = cached ?? fromThreads ?? [];
-      if (configDefaultsLive) {
+      if (provider === "kimi" && configDefaultsLive) {
         reply(socket, request.id, { configOptions: fallback });
         return;
       }
-      if (process.env.KIMI_FAKE !== "1" && !auth.status().authenticated) {
+      if (provider === "kimi" && process.env.KIMI_FAKE !== "1" && !auth.status().authenticated) {
         reply(socket, request.id, { configOptions: fallback });
         return;
       }
       try {
-        const acp = await ensureRuntime();
+        const acp = await ensureRuntime(provider);
         await mkdir(configProbeCwd, { recursive: true });
         const probed = (await acp.newSession(configProbeCwd)).configOptions ?? [];
-        await rememberLiveConfigOptions(probed);
+        if (provider === "kimi") await rememberLiveConfigOptions(probed);
         reply(socket, request.id, { configOptions: probed });
       } catch {
         reply(socket, request.id, { configOptions: fallback });
@@ -491,7 +517,8 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     }
     if (request.method === "threads.list") {
       let runtimeSessions: unknown[] = [];
-      const acp = runtimeForLocalCancellation();
+      const provider = request.params.provider ?? "kimi";
+      const acp = runtimeForLocalCancellation(provider);
       if (acp) {
         try {
           runtimeSessions = (await acp.listSessions(request.params.cwd)).sessions.filter((session) => !isInternalProbeSession(session)).map(classifyRuntimeSession);
@@ -500,7 +527,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         }
       }
       const threads = await Promise.all(engine.threads().map(async (thread) => {
-        const local = await readLatestKimiUsage(kimiHome, thread.sessionId);
+        const local = thread.provider === "kimi" ? await readLatestKimiUsage(kimiHome, thread.sessionId) : undefined;
         const projected = { ...thread, queue: queueSummary(thread.threadId) };
         return local ? { ...projected, usage: { context: local.context, tokens: local.tokens } } : projected;
       }));
@@ -508,36 +535,38 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "threads.create") {
-      const acp = await ensureRuntime();
+      const provider = request.params.provider;
+      const acp = await ensureRuntime(provider);
       if (!request.params.standalone && !request.params.cwd) throw new Error("Workspace path is required for a project chat");
       const targetCwd = request.params.standalone ? standaloneChatCwd : resolve(request.params.cwd!);
       if (request.params.standalone) await mkdir(targetCwd, { recursive: true });
       const session = await acp.newSession(targetCwd);
       let configOptions = session.configOptions ?? [];
-      if (!hasConfiguredModel(configOptions)) throw new Error("Kimi Code has no configured model. Complete login with an active Kimi Code membership, then retry.");
+      if (!hasConfiguredModel(configOptions)) throw new Error(`${providerName(provider)} has no configured model. Complete provider sign-in, then retry.`);
       for (const [configId, value] of sanitizeSessionConfig(request.params.config, configOptions)) {
         if (!sanitizeSessionConfig({ [configId]: value }, configOptions).length) continue;
         const applied = await acp.setConfigOption(session.sessionId, configId, value);
         if (applied.configOptions) configOptions = applied.configOptions;
       }
-      void rememberLiveConfigOptions(configOptions);
+      if (provider === "kimi") void rememberLiveConfigOptions(configOptions);
       const threadId = crypto.randomUUID();
-      await engine.append(threadId, { type: "ThreadCreated", payload: { sessionId: session.sessionId, cwd: targetCwd, kind: request.params.standalone ? "chat" : "project", title: request.params.standalone ? "New chat" : "New Kimi session", configOptions } });
+      await engine.append(threadId, { type: "ThreadCreated", payload: { sessionId: session.sessionId, provider, cwd: targetCwd, kind: request.params.standalone ? "chat" : "project", title: request.params.standalone ? "New chat" : "New Tasty session", configOptions } });
       reply(socket, request.id, { thread: engine.thread(threadId) });
       return;
     }
     if (request.method === "threads.resume") {
-      const acp = await ensureRuntime();
       const existing = engine.thread(request.params.threadId);
+      const provider = existing?.provider ?? request.params.provider;
+      const acp = await ensureRuntime(provider);
       engine.assertSessionAvailable(request.params.sessionId, request.params.threadId);
       const configOptions = existing && !request.params.replay
         ? await ensureThreadSession(acp, existing)
         : (request.params.replay
           ? await acp.loadSession(request.params.sessionId, resolve(request.params.cwd))
           : await acp.resumeSession(request.params.sessionId, resolve(request.params.cwd))).configOptions ?? [];
-      if (!hasConfiguredModel(configOptions)) throw new Error("Kimi Code has no configured model. Complete login with an active Kimi Code membership, then retry.");
-      void rememberLiveConfigOptions(configOptions);
-      if (!existing) await engine.append(request.params.threadId, { type: "ThreadCreated", payload: { sessionId: request.params.sessionId, cwd: resolve(request.params.cwd), kind: isStandaloneChatPath(request.params.cwd) ? "chat" : "project", title: "Resumed Kimi session", configOptions } });
+      if (!hasConfiguredModel(configOptions)) throw new Error(`${providerName(provider)} has no configured model. Complete provider sign-in, then retry.`);
+      if (provider === "kimi") void rememberLiveConfigOptions(configOptions);
+      if (!existing) await engine.append(request.params.threadId, { type: "ThreadCreated", payload: { sessionId: request.params.sessionId, provider, cwd: resolve(request.params.cwd), kind: isStandaloneChatPath(request.params.cwd) ? "chat" : "project", title: "Resumed Tasty session", configOptions } });
       else if (request.params.replay) await engine.append(existing.threadId, { type: "ConfigOptionsReplaced", payload: { options: configOptions } });
       reply(socket, request.id, { thread: engine.thread(request.params.threadId) });
       return;
@@ -545,7 +574,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     const thread = engine.thread(request.params.threadId);
     if (!thread) throw new Error(`Unknown thread ${request.params.threadId}`);
     if (request.method === "threads.createSide") {
-      const acp = await ensureRuntime();
+      const acp = await ensureRuntime(thread.provider);
       const session = await acp.newSession(thread.cwd);
       let configOptions = session.configOptions ?? [];
       const inherited = Object.fromEntries(thread.configOptions.map((option) => [option.id, option.currentValue]));
@@ -581,7 +610,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       await persistQueues();
       publishQueue(thread.threadId);
       if (thread.running) {
-        const acp = await runtimeForLocalCancellation();
+        const acp = runtimeForLocalCancellation(thread.provider);
         await cancelThreadTurn(acp, thread);
       }
       await ingestion.flush(thread.sessionId);
@@ -626,7 +655,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       publishQueue(thread.threadId);
       if (queued.mode === "steer" && thread.running) {
         await resolveThreadApprovals(thread.threadId);
-        const acp = await runtimeForLocalCancellation();
+        const acp = runtimeForLocalCancellation(thread.provider);
         await cancelThreadTurn(acp, thread);
       }
       else void runNextQueued(thread.threadId);
@@ -657,7 +686,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       publishQueue(thread.threadId);
       if (thread.running) {
         await resolveThreadApprovals(thread.threadId);
-        const acp = await runtimeForLocalCancellation();
+        const acp = runtimeForLocalCancellation(thread.provider);
         await cancelThreadTurn(acp, thread);
       } else {
         void runNextQueued(thread.threadId);
@@ -712,7 +741,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "threads.respondToRequest") {
-      const acp = await ensureRuntime();
+      const acp = await ensureRuntime(thread.provider);
       await engine.append(thread.threadId, { type: "ApprovalResolved", payload: request.params.optionId ? { requestId: request.params.requestId, optionId: request.params.optionId } : { requestId: request.params.requestId } });
       acp.respondToPermission(request.params.requestId, request.params.optionId);
       reply(socket, request.id, {});
@@ -742,14 +771,14 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         publishQueue(thread.threadId);
       }
       await resolveThreadApprovals(thread.threadId);
-      const acp = await runtimeForLocalCancellation();
+      const acp = runtimeForLocalCancellation(thread.provider);
       await cancelThreadTurn(acp, thread);
       requestQueueRestart(thread.threadId, admission);
       reply(socket, request.id, {});
       return;
     }
     const configOptions = await serializeSessionConfig(thread.sessionId, async () => {
-      const acp = await ensureRuntime();
+      const acp = await ensureRuntime(thread.provider);
       const current = engine.thread(thread.threadId);
       if (!current) throw new Error(`Unknown thread ${thread.threadId}`);
       const liveOptions = await ensureThreadSession(acp, current);
@@ -757,7 +786,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       const applicable = sanitizeSessionConfig({ [request.params.configId]: request.params.value }, liveOptions);
       if (!applicable.length) {
         if (option && String(option.currentValue) === String(request.params.value)) return liveOptions;
-        throw new Error(`${request.params.configId} is not supported by this Kimi session`);
+        throw new Error(`${request.params.configId} is not supported by this ${providerName(current.provider)} session`);
       }
       const result = await retryUnknownSessionOnce(
         acp,
@@ -766,7 +795,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       );
       const options = result.configOptions ?? engine.thread(current.threadId)?.configOptions ?? liveOptions;
       await engine.append(current.threadId, { type: "ConfigOptionsReplaced", payload: { options } });
-      await rememberLiveConfigOptions(options);
+      if (current.provider === "kimi") await rememberLiveConfigOptions(options);
       return engine.thread(current.threadId)?.configOptions ?? options;
     });
     reply(socket, request.id, { configOptions });
@@ -814,7 +843,7 @@ async function resolveThreadApprovals(threadId: string): Promise<void> {
   }
 }
 
-async function cancelThreadTurn(acp: AcpClient | undefined, thread: ThreadProjection): Promise<void> {
+async function cancelThreadTurn(acp: AgentRuntime | undefined, thread: ThreadProjection): Promise<void> {
   const turnId = thread.activeTurnId;
   if (!turnId) return;
   if (acp) {
@@ -824,7 +853,7 @@ async function cancelThreadTurn(acp: AcpClient | undefined, thread: ThreadProjec
       pushAll("server.diagnostics", {
         type: "diagnostic",
         level: "error",
-        message: `Kimi cancel notification failed; reconciling locally: ${error instanceof Error ? error.message : String(error)}`,
+        message: `${providerName(thread.provider)} cancel notification failed; reconciling locally: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
   }
@@ -835,7 +864,8 @@ async function cancelThreadTurn(acp: AcpClient | undefined, thread: ThreadProjec
   void runNextQueued(thread.threadId);
 }
 
-function runtimeForLocalCancellation(): AcpClient | undefined {
+function runtimeForLocalCancellation(provider: ProviderId): AgentRuntime | undefined {
+  const runtime = runtimes.get(provider);
   return runtime?.isOpen() ? runtime : undefined;
 }
 
@@ -889,12 +919,12 @@ async function startQueuedTurn(threadId: string, admission: QueueAdmission): Pro
   const pendingThread = engine.thread(threadId);
   if (!pendingThread) throw new Error(`Unknown thread ${threadId}`);
   await waitForSessionConfig(pendingThread.sessionId);
-  const acp = await ensureRuntime();
+  const acp = await ensureRuntime(pendingThread.provider);
   const thread = engine.thread(threadId);
   if (!thread) throw new Error(`Unknown thread ${threadId}`);
   if (thread.running) throw new Error("A turn is already running");
   const configOptions = await ensureThreadSession(acp, thread);
-  if (!hasConfiguredModel(configOptions)) throw new Error("Kimi Code has no configured model. Complete login with an active Kimi Code membership, then retry.");
+  if (!hasConfiguredModel(configOptions)) throw new Error(`${providerName(thread.provider)} has no configured model. Complete provider sign-in, then retry.`);
   const turnId = crypto.randomUUID();
   const prompt: ContentBlock[] = [{ type: "text", text: queued.text }];
   const resourcePaths: string[] = [];
@@ -1120,7 +1150,7 @@ async function queueBackgroundTaskReport(
     publishQueue(threadId);
   }
   if (!task.reportQueued) await engine.append(threadId, { type: "BackgroundTaskReportQueued", payload: { taskId } });
-  if (dispatch && runtime?.isOpen()) void runNextQueued(threadId);
+  if (dispatch && runtimes.get(thread.provider)?.isOpen()) void runNextQueued(threadId);
 }
 
 async function markBackgroundTaskReportAttempted(threadId: string, queuedId: string): Promise<void> {
@@ -1225,7 +1255,7 @@ function backgroundTaskReportPrompt(
   return lines.join("\n");
 }
 
-async function ensureThreadSession(acp: AcpClient, thread: ThreadProjection): Promise<SessionConfigOption[]> {
+async function ensureThreadSession(acp: AgentRuntime, thread: ThreadProjection): Promise<SessionConfigOption[]> {
   if (acp.hasSession(thread.sessionId)) return thread.configOptions;
   const pending = sessionResumes.get(thread.sessionId);
   if (pending) return pending;
@@ -1239,17 +1269,17 @@ async function ensureThreadSession(acp: AcpClient, thread: ThreadProjection): Pr
 }
 
 async function retryUnknownSessionOnce<T>(
-  acp: AcpClient,
+  acp: AgentRuntime,
   thread: ThreadProjection,
-  operation: (client: AcpClient) => Promise<T>,
+  operation: (client: AgentRuntime) => Promise<T>,
 ): Promise<T> {
   try {
     return await operation(acp);
   } catch (error) {
-    if (!isUnknownAcpSessionError(error)) throw error;
+    if (!isUnknownAcpSessionError(error) && !/unknown .*?(?:session|thread)/i.test(error instanceof Error ? error.message : String(error))) throw error;
     const current = engine.thread(thread.threadId);
     if (!current) throw new Error(`Unknown thread ${thread.threadId}`);
-    const client = await ensureRuntime();
+    const client = await ensureRuntime(thread.provider);
     await ensureThreadSession(client, current);
     return operation(client);
   }
@@ -1366,17 +1396,17 @@ async function shutdown(): Promise<void> {
   for (const threadId of backgroundReportRetryTimers.keys()) clearBackgroundReportRetry(threadId);
   await persistQueues();
   await ingestion.flushAll();
-  await runtime?.close();
+  await Promise.all([...runtimes.values()].map((runtime) => runtime.close()));
   server.close();
 }
 
-async function resetRuntime(): Promise<void> {
-  await runtimeStart?.catch(() => undefined);
-  runtimeStart = undefined;
-  await runtime?.close();
-  runtime = undefined;
-  initializeResult = undefined;
-  configDefaultsLive = false;
+async function resetRuntime(provider: ProviderId = "kimi"): Promise<void> {
+  await runtimeStarts.get(provider)?.catch(() => undefined);
+  runtimeStarts.delete(provider);
+  await runtimes.get(provider)?.close();
+  runtimes.delete(provider);
+  initializeResults.delete(provider);
+  if (provider === "kimi") configDefaultsLive = false;
 }
 
 async function handleAuthEvent(event: import("./auth-service.js").AuthEvent): Promise<void> {
