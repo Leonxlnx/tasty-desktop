@@ -7,6 +7,13 @@ export type ToolCall = { toolCallId: string; turnId?: string; title?: string; ki
 export type Approval = { requestId: string; turnId?: string; title: string; kind: "permission" | "question" | "plan_review"; options: Array<{ optionId: string; name: string; kind: string }> };
 export type TurnCheckpoint = Checkpoint & { diff?: string };
 export type ThreadUsage = { context?: UsageUpdate; tokens?: Usage };
+export type ProviderId = "kimi" | "codex" | "claude" | "cursor";
+export type ThreadGoal = {
+  objective: string;
+  status: "active" | "complete";
+  createdAt: string;
+  updatedAt: string;
+};
 export type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: Usage };
 export type BackgroundTask = {
   taskId: string;
@@ -43,6 +50,8 @@ export type ActivityEntry = {
 export type ThreadProjection = {
   threadId: string;
   sessionId: string;
+  provider: ProviderId;
+  parentThreadId?: string;
   cwd: string;
   kind: "project" | "chat";
   title: string;
@@ -63,12 +72,15 @@ export type ThreadProjection = {
   checkpoints: TurnCheckpoint[];
   backgroundTasks: BackgroundTask[];
   usage: ThreadUsage;
+  goal?: ThreadGoal;
 };
 
 export type DomainEvent =
   | { type: "ThreadSnapshot"; payload: { thread: ThreadProjection } }
-  | { type: "ThreadCreated"; payload: { sessionId: string; cwd: string; kind?: "project" | "chat"; title: string; configOptions?: SessionConfigOption[] } }
+  | { type: "ThreadCreated"; payload: { sessionId: string; provider?: ProviderId; parentThreadId?: string; cwd: string; kind?: "project" | "chat"; title: string; configOptions?: SessionConfigOption[] } }
   | { type: "ThreadRenamed"; payload: { title: string } }
+  | { type: "ThreadGoalSet"; payload: { objective: string; status?: ThreadGoal["status"] } }
+  | { type: "ThreadGoalCleared"; payload: Record<string, never> }
   | { type: "ThreadDeleted"; payload: Record<string, never> }
   | { type: "TurnStarted"; payload: { turnId: string; text: string; origin?: "user" | "background_task"; sourceQueuedId?: string; title?: string; resources?: string[]; images?: Array<{ name: string; mimeType: string }> } }
   | { type: "MessageAppended"; payload: Message }
@@ -199,6 +211,8 @@ export class OrchestrationEngine {
       const thread = {
         threadId: event.threadId,
         sessionId: payload.sessionId,
+        provider: payload.provider ?? "kimi",
+        ...(payload.parentThreadId ? { parentThreadId: payload.parentThreadId } : {}),
         cwd: payload.cwd,
         kind: payload.kind === "chat" ? "chat" : "project",
         title: payload.title,
@@ -240,6 +254,20 @@ export class OrchestrationEngine {
     switch (event.type) {
       case "ThreadRenamed":
         thread.title = String(payload.title);
+        break;
+      case "ThreadGoalSet": {
+        const objective = String(payload.objective).trim();
+        const createdAt = thread.goal?.createdAt ?? event.createdAt;
+        thread.goal = {
+          objective,
+          status: payload.status === "complete" ? "complete" : "active",
+          createdAt,
+          updatedAt: event.createdAt,
+        };
+        break;
+      }
+      case "ThreadGoalCleared":
+        delete thread.goal;
         break;
       case "TurnStarted":
         thread.running = true;
@@ -558,6 +586,7 @@ export function compactToolCall(tool: ToolCall): ToolCall {
 
 function compactThread(thread: ThreadProjection): ThreadProjection {
   const compacted = cloneThread(thread);
+  compacted.provider ??= "kimi";
   compacted.backgroundTasks ??= [];
   compacted.messages = compacted.messages.filter((message) => message.role !== "thought");
   compacted.activity = compacted.activity.map((entry) => ({ ...entry, text: boundedText(entry.text, 4_000) }));

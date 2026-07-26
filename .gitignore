@@ -6,6 +6,8 @@ target/
 .turbo/
 .vite/
 tmp/
+.tmp/
+.pnpm-store/
 .env
 .env.*
 !.env.example

@@ -49,6 +49,17 @@ describe("orchestration server", () => {
     const created = await createReply;
     const createdThread = (created.result as { thread: { threadId: string; sessionId: string } }).thread;
     const threadId = createdThread.threadId;
+    expect((created.result as { thread: { provider: string } }).thread.provider).toBe("kimi");
+    const goalReply = waitFor(socket, messages, (message) => message.id === 92);
+    socket.send(JSON.stringify({ id: 92, method: "threads.setGoal", params: { threadId, objective: "Ship the provider foundation" } }));
+    expect(((await goalReply).result as { thread: { goal: { objective: string } } }).thread.goal.objective).toBe("Ship the provider foundation");
+    const sideReply = waitFor(socket, messages, (message) => message.id === 93);
+    socket.send(JSON.stringify({ id: 93, method: "threads.createSide", params: { threadId } }));
+    expect(((await sideReply).result as { thread: { provider: string; parentThreadId: string; cwd: string } }).thread).toMatchObject({
+      provider: "kimi",
+      parentThreadId: threadId,
+      cwd: process.cwd(),
+    });
     const duplicateResumeReply = waitFor(socket, messages, (message) => message.id === 91);
     socket.send(JSON.stringify({
       id: 91,

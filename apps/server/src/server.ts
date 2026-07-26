@@ -44,8 +44,11 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("auth.logout"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("threads.list"), params: z.object({ cwd: z.string().optional() }).default({}) }),
   z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
+  z.object({ id, method: z.literal("threads.createSide"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120).optional() }) }),
   z.object({ id, method: z.literal("threads.resume"), params: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), cwd: z.string().min(1), replay: z.boolean().default(false) }) }),
   z.object({ id, method: z.literal("threads.rename"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120) }) }),
+  z.object({ id, method: z.literal("threads.setGoal"), params: z.object({ threadId: z.string().min(1), objective: z.string().trim().min(1).max(20_000) }) }),
+  z.object({ id, method: z.literal("threads.clearGoal"), params: z.object({ threadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("threads.delete"), params: z.object({ threadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("threads.sendTurn"), params: z.object({
     threadId: z.string().min(1), text: z.string().min(1), mentions: z.array(z.string()).max(20).default([]),
@@ -541,6 +544,31 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     }
     const thread = engine.thread(request.params.threadId);
     if (!thread) throw new Error(`Unknown thread ${request.params.threadId}`);
+    if (request.method === "threads.createSide") {
+      const acp = await ensureRuntime();
+      const session = await acp.newSession(thread.cwd);
+      let configOptions = session.configOptions ?? [];
+      const inherited = Object.fromEntries(thread.configOptions.map((option) => [option.id, option.currentValue]));
+      for (const [configId, value] of sanitizeSessionConfig(inherited, configOptions)) {
+        const applied = await acp.setConfigOption(session.sessionId, configId, value);
+        if (applied.configOptions) configOptions = applied.configOptions;
+      }
+      const threadId = crypto.randomUUID();
+      await engine.append(threadId, {
+        type: "ThreadCreated",
+        payload: {
+          sessionId: session.sessionId,
+          provider: thread.provider,
+          parentThreadId: thread.threadId,
+          cwd: thread.cwd,
+          kind: thread.kind,
+          title: request.params.title ?? `Side chat · ${thread.title}`,
+          configOptions,
+        },
+      });
+      reply(socket, request.id, { thread: engine.thread(threadId) });
+      return;
+    }
     if (request.method === "threads.rename") {
       await engine.append(thread.threadId, { type: "ThreadRenamed", payload: { title: request.params.title } });
       reply(socket, request.id, { thread: engine.thread(thread.threadId) });
@@ -655,6 +683,16 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       publishQueue(thread.threadId);
       requestQueueRestart(thread.threadId, admission);
       reply(socket, request.id, {});
+      return;
+    }
+    if (request.method === "threads.setGoal") {
+      await engine.append(thread.threadId, { type: "ThreadGoalSet", payload: { objective: request.params.objective } });
+      reply(socket, request.id, { thread: engine.thread(thread.threadId) });
+      return;
+    }
+    if (request.method === "threads.clearGoal") {
+      await engine.append(thread.threadId, { type: "ThreadGoalCleared", payload: {} });
+      reply(socket, request.id, { thread: engine.thread(thread.threadId) });
       return;
     }
     if (request.method === "threads.clearQueue") {

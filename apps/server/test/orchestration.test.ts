@@ -29,10 +29,39 @@ describe("orchestration engine", () => {
     const engine = new OrchestrationEngine(new EventStore(join(dir, "events.jsonl")));
     await engine.open();
     await engine.append("legacy", { type: "ThreadCreated", payload: { sessionId: "s-1", cwd: "C:/work", title: "Old chat" } });
+    expect(engine.thread("legacy")?.provider).toBe("kimi");
     const thread = engine.thread("legacy");
     expect(thread?.configOptions).toEqual([]);
     expect(thread?.activity).toEqual([]);
     expect(thread?.kind).toBe("project");
+  });
+
+  it("persists provider ownership, side-thread lineage, and goals", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "tasty-thread-meta-"));
+    const engine = new OrchestrationEngine(new EventStore(join(dir, "events.jsonl")));
+    await engine.open();
+    await engine.append("side", {
+      type: "ThreadCreated",
+      payload: {
+        sessionId: "codex-side-session",
+        provider: "codex",
+        parentThreadId: "parent",
+        cwd: "C:/work",
+        title: "Side chat",
+      },
+    });
+    await engine.append("side", { type: "ThreadGoalSet", payload: { objective: "Verify the provider layer" } });
+    await engine.drain();
+
+    const restored = new OrchestrationEngine(new EventStore(join(dir, "events.jsonl")));
+    await restored.open();
+    expect(restored.thread("side")).toMatchObject({
+      provider: "codex",
+      parentThreadId: "parent",
+      goal: { objective: "Verify the provider layer", status: "active" },
+    });
+    await restored.append("side", { type: "ThreadGoalCleared", payload: {} });
+    expect(restored.thread("side")?.goal).toBeUndefined();
   });
 
   it("rejects a second live thread for the same ACP session", async () => {
