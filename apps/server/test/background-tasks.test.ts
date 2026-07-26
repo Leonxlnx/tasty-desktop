@@ -38,6 +38,7 @@ describe("background task monitoring", () => {
       },
     ], "turn-1")).toEqual([
       { taskId: "bash-build1", description: "Build APK" },
+      { taskId: "bash-done1", description: "Finished quickly" },
     ]);
   });
 

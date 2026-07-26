@@ -43,10 +43,10 @@ type KimiTaskRecord = {
 export function backgroundTaskCandidates(tools: CandidateTool[], turnId: string): BackgroundTaskCandidate[] {
   const completedInTurn = new Set<string>();
   for (const tool of tools) {
-    if (tool.turnId !== turnId || typeof tool.rawOutput !== "string") continue;
+    if (tool.turnId !== turnId || !isRecord(tool.rawInput) || typeof tool.rawOutput !== "string") continue;
     const taskId = tool.rawOutput.match(/^task_id:\s*((?:bash|agent)-[a-z0-9]+)\s*$/im)?.[1];
     const status = tool.rawOutput.match(/^status:\s*(completed|failed|killed|lost|timed_out)\s*$/im)?.[1];
-    if (taskId && status) completedInTurn.add(taskId);
+    if (taskId && status && tool.rawInput.task_id === taskId) completedInTurn.add(taskId);
   }
   const found = new Map<string, BackgroundTaskCandidate>();
   for (const tool of tools) {
