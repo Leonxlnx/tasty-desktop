@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, latestTimelineItemId, localServerUrl, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, presentDiagnostic, projectTurns, promptShortcutMode, railForStandaloneChat, reorderPaths, serverWebSocketUrl, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, latestTimelineItemId, localServerUrl, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, presentDiagnostic, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reorderPaths, serverWebSocketUrl, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
 
 describe("agent skill install requests", () => {
   it("opens confirmation only for a source inside the requested workspace", () => {
@@ -169,6 +169,15 @@ describe("harness commands", () => {
     expect(parseHarnessCommand("/goal clear")).toEqual({ name: "goal", clear: true });
     expect(parseHarnessCommand("/side Explore auth")).toEqual({ name: "side", title: "Explore auth" });
     expect(parseHarnessCommand("explain /goal syntax")).toBeUndefined();
+  });
+});
+
+describe("provider readiness", () => {
+  it("allows installed credential-managed CLIs with unknown status but rejects known signed-out providers", () => {
+    expect(providerUsable({ installed: true, authenticated: null } as never)).toBe(true);
+    expect(providerUsable({ installed: true, authenticated: true } as never)).toBe(true);
+    expect(providerUsable({ installed: true, authenticated: false } as never)).toBe(false);
+    expect(providerUsable({ installed: false, authenticated: true } as never)).toBe(false);
   });
 });
 
@@ -515,6 +524,14 @@ describe("legacy thread ingress", () => {
     expect(thread.usage).toEqual({});
     expect(thread.queue).toEqual([]);
     expect(thread.kind).toBe("project");
+    expect(thread.provider).toBe("kimi");
+  });
+
+  it("preserves provider, parent, and goal metadata", () => {
+    expect(normalizeThread({
+      threadId: "side", sessionId: "session", provider: "codex", parentThreadId: "main", cwd: "C:\\work", title: "Investigate",
+      goal: { objective: "Find the regression", updatedAt: "2026-07-26T00:00:00.000Z" },
+    } as never)).toMatchObject({ provider: "codex", parentThreadId: "main", goal: { objective: "Find the regression" } });
   });
 });
 

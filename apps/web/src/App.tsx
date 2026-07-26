@@ -51,6 +51,11 @@ type AuthState = {
   installed: boolean; authenticated: boolean; loginRunning: boolean; installRunning: boolean; installMode: "manual"; installUrl: string; home: string;
   event?: { type: "progress" | "complete"; operation: "login" | "logout"; message: string; url?: string; code?: string; success?: boolean };
 };
+type ProviderState = {
+  id: ProviderId; provider: ProviderId; name: string; protocol: "acp" | "app-server" | "stream-json"; installed: boolean;
+  authenticated: boolean | null; loginRunning: boolean; runtimeReady: boolean; installUrl: string; account?: string; message?: string;
+  event?: AuthState["event"];
+};
 type Preferences = {
   density: "comfortable" | "compact";
   sendKey: "enter" | "ctrl-enter";
@@ -73,6 +78,7 @@ type Preferences = {
   hiddenSessions: string[];
   composerConfig: Record<string, string>;
   yoloAcknowledged: boolean;
+  provider: ProviderId;
 };
 type ProjectGroup = { cwd: string; name: string; threads: Thread[]; runtimeSessions: RuntimeSession[] };
 type DraftChat = { kind: "project" | "chat"; cwd?: string };
@@ -100,7 +106,7 @@ const preferenceKey = "kimi-code-desktop.preferences.v1";
 const defaultPreferences: Preferences = {
   density: "comfortable", sendKey: "enter", workspace: "", onboardingDone: false, sidebarCollapsed: false, projects: [], zoom: 1,
   theme: "system", font: "system", fontSize: 15, accent: "neutral", paletteVersion: 4, sidebarSide: "left", railSide: "right", sidebarWidth: 272, railWidth: 420,
-  projectAliases: {}, hiddenProjects: [], hiddenSessions: [], composerConfig: {}, yoloAcknowledged: false,
+  projectAliases: {}, hiddenProjects: [], hiddenSessions: [], composerConfig: {}, yoloAcknowledged: false, provider: "kimi",
 };
 const collapsedSidebarWidth = 60;
 let terminalEntryId = 0;
@@ -274,7 +280,7 @@ export function App() {
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [showOnboarding, setShowOnboarding] = useState(() => !loadPreferences().onboardingDone);
   const [cwd, setCwd] = useState(() => loadPreferences().workspace);
-  const [runtimeReady, setRuntimeReady] = useState(false);
+  const [kimiRuntimeReady, setKimiRuntimeReady] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [startupDelayed, setStartupDelayed] = useState(false);
   const [threads, setThreads] = useState<Thread[]>([]);
@@ -283,6 +289,7 @@ export function App() {
   const [prompt, setPrompt] = useState("");
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
   const [auth, setAuth] = useState<AuthState>();
+  const [providers, setProviders] = useState<ProviderState[]>([]);
   const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
   const [images, setImages] = useState<PendingImage[]>([]);
   const [selectedFile, setSelectedFile] = useState<{ path: string; content: string }>();
@@ -333,6 +340,9 @@ export function App() {
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
 
   const activeThread = threads.find((thread) => thread.threadId === activeThreadId);
+  const providerId = activeThread?.provider ?? preferences.provider;
+  const providerState = providers.find((provider) => provider.id === providerId);
+  const runtimeReady = providerId === "kimi" ? Boolean(auth?.authenticated && kimiRuntimeReady) : providerUsable(providerState);
   const promptTrigger = useMemo(() => composerTrigger(prompt), [prompt]);
   const composerProjectCwd = activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : undefined;
   const fileSuggestionQuery = promptTrigger?.kind === "file" ? promptTrigger.query : undefined;
@@ -634,6 +644,10 @@ export function App() {
   }, [cwd, navView, runtimeReady]);
 
   const call = useCallback((method: string, params: Record<string, unknown> = {}) => supervisor.current?.request(method, params) ?? Promise.reject(new Error("Server is not connected")), []);
+  const refreshProviders = useCallback(async () => {
+    const result = await call("providers.list") as { providers: ProviderState[] };
+    setProviders(result.providers.map((provider) => ({ ...provider, id: normalizeProvider(provider.id ?? provider.provider), provider: normalizeProvider(provider.provider ?? provider.id) })));
+  }, [call]);
   const recoverLocalServer = useCallback(async (force = false) => {
     if (serverRestarting.current) return;
     serverRestarting.current = true;
@@ -704,6 +718,10 @@ export function App() {
   useEffect(() => {
     if (connection === "connected") void refreshCapabilities();
   }, [connection, refreshCapabilities]);
+
+  useEffect(() => {
+    if (connection === "connected") void refreshProviders().catch((error: Error) => setDiagnostic(error.message));
+  }, [connection, refreshProviders, setDiagnostic]);
 
   const refreshGit = useCallback(async () => {
     if (!workspaceCwd) return;
@@ -839,17 +857,22 @@ export function App() {
         setAuth(status);
         if (status.event?.message) setDiagnostic(status.event.message);
         if (status.event?.type === "complete" && status.event.operation === "logout") {
-          setRuntimeReady(false);
+          setKimiRuntimeReady(false);
           setQuota(undefined);
           return;
         }
         if (status.authenticated && status.event?.type === "complete") {
           void call("env.bootstrap").then((result) => {
             const environment = result as { initialize?: unknown; runtimeError?: string };
-            setRuntimeReady(Boolean(environment.initialize));
+            setKimiRuntimeReady(Boolean(environment.initialize));
             if (environment.runtimeError) setDiagnostic(`Kimi runtime unavailable: ${environment.runtimeError}`);
           }).catch((error: Error) => setDiagnostic(error.message));
         }
+        void refreshProviders().catch(() => undefined);
+      } else if (message.channel === "provider.authStatus") {
+        const status = message.payload as ProviderState & { event?: AuthState["event"] };
+        setProviders((current) => current.map((provider) => provider.id === status.provider ? { ...provider, ...status, id: status.provider } : provider));
+        if (status.event?.message) setDiagnostic(status.event.message);
       } else if (message.channel === "terminal.output") {
         const event = message.payload as TerminalEvent;
         const text = event.type === "exit" ? `Process exited${event.code == null ? "" : ` with code ${event.code}`}\n` : cleanTerminalOutput(event.text ?? "");
@@ -857,7 +880,7 @@ export function App() {
         if (event.type === "exit") setTerminalSession((current) => current?.sessionId === event.sessionId ? undefined : current);
       }
     }
-  }, [serverLookupAttempt]);
+  }, [refreshProviders, serverLookupAttempt]);
 
   useEffect(() => {
     if (connection === "connected") {
@@ -889,11 +912,10 @@ export function App() {
     void call("env.bootstrap").then((result) => {
       const environment = result as { initialize?: unknown; auth: AuthState; runtimeError?: string };
       setAuth(environment.auth);
-      setRuntimeReady(Boolean(environment.initialize));
+      setKimiRuntimeReady(Boolean(environment.initialize));
       if (environment.runtimeError) setDiagnostic(`Kimi runtime unavailable: ${environment.runtimeError}`);
-      if (!environment.auth.authenticated) return { threads: [], runtimeSessions: [] };
-      void refreshQuota();
-      return call("threads.list");
+      if (environment.auth.authenticated) void refreshQuota();
+      return call("threads.list", { provider: preferences.provider });
     }).then((result) => {
       const listed = result as { threads: Thread[]; runtimeSessions: RuntimeSession[] };
       const incoming = listed.threads.map(normalizeThread);
@@ -901,17 +923,17 @@ export function App() {
       setRuntimeSessions(listed.runtimeSessions);
       setActiveThreadId((current) => current ?? incoming[0]?.threadId);
     }).catch((error: Error) => setDiagnostic(error.message)).finally(() => setBootstrapping(false));
-  }, [call, connection, refreshQuota]);
+  }, [call, connection, preferences.provider, refreshQuota]);
 
   useEffect(() => {
-    if (connection !== "connected" || bootstrapping || runtimeReady || !auth?.authenticated) return;
+    if (providerId !== "kimi" || connection !== "connected" || bootstrapping || runtimeReady || !auth?.authenticated) return;
     const timer = window.setInterval(() => {
       void call("env.bootstrap").then((result) => {
-        if ((result as { initialize?: unknown }).initialize) setRuntimeReady(true);
+        if ((result as { initialize?: unknown }).initialize) setKimiRuntimeReady(true);
       }).catch(() => undefined);
     }, 12_000);
     return () => window.clearInterval(timer);
-  }, [auth?.authenticated, bootstrapping, call, connection, runtimeReady]);
+  }, [auth?.authenticated, bootstrapping, call, connection, providerId, runtimeReady]);
 
   useEffect(() => {
     if (fileSuggestionQuery === undefined || !composerProjectCwd) {
@@ -931,15 +953,20 @@ export function App() {
   }, [call, composerProjectCwd, fileSuggestionQuery]);
 
   useEffect(() => {
+    setConfigDefaults([]);
+    setDraftConfig({});
+  }, [providerId]);
+
+  useEffect(() => {
     if (!runtimeReady || configDefaults.length) return;
     let cancelled = false;
-    void call("runtime.configDefaults").then((result) => {
+    void call("runtime.configDefaults", { provider: providerId }).then((result) => {
       if (cancelled) return;
       const options = (result as { configOptions?: unknown }).configOptions;
       if (Array.isArray(options)) setConfigDefaults(options as ConfigOption[]);
     }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [call, configDefaults.length, runtimeReady]);
+  }, [call, configDefaults.length, providerId, runtimeReady]);
 
   useEffect(() => {
     if (!draftChat || activeThread) return;
@@ -949,7 +976,7 @@ export function App() {
   useEffect(() => {
     if (!runtimeReady || !activeThread || activeThread.running) return;
     let cancelled = false;
-    void call("threads.resume", { threadId: activeThread.threadId, sessionId: activeThread.sessionId, cwd: activeThread.cwd, replay: false })
+    void call("threads.resume", { threadId: activeThread.threadId, sessionId: activeThread.sessionId, cwd: activeThread.cwd, provider: activeThread.provider, replay: false })
       .catch((error: Error) => { if (!cancelled) setDiagnostic(error.message); });
     return () => { cancelled = true; };
   }, [activeThread?.cwd, activeThread?.running, activeThread?.sessionId, activeThread?.threadId, call, runtimeReady]);
@@ -964,6 +991,12 @@ export function App() {
     setDraftChat({ kind: "project", cwd: targetCwd });
     setDiagnostics([]);
     window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function selectProvider(provider: ProviderId) {
+    if (activeThread || provider === preferences.provider) return;
+    setPreferences((current) => ({ ...current, provider }));
+    setDiagnostics([]);
   }
 
   function clearProjectPanels() {
@@ -1026,6 +1059,7 @@ export function App() {
     setCapabilityCenterOpen(false);
     setDraftChat(undefined);
     setActiveThreadId(thread.threadId);
+    setPreferences((current) => current.provider === thread.provider ? current : { ...current, provider: thread.provider });
     setNavView(thread.kind === "chat" ? "chats" : "projects");
   }
 
@@ -1035,7 +1069,7 @@ export function App() {
         setCwd(session.cwd);
         rememberWorkspace(session.cwd);
       }
-      const result = await call("threads.resume", { threadId: session.sessionId, sessionId: session.sessionId, cwd: session.cwd, replay: false }) as { thread: Thread };
+      const result = await call("threads.resume", { threadId: session.sessionId, sessionId: session.sessionId, cwd: session.cwd, provider: preferences.provider, replay: false }) as { thread: Thread };
       const thread = normalizeThread(result.thread);
       setThreads((current) => current.some((item) => item.threadId === thread.threadId) ? current : [thread, ...current]);
       selectThread(thread);
@@ -1080,6 +1114,7 @@ export function App() {
     try {
       const created = activeThread ? undefined : await call("threads.create", {
         ...(draftChat?.kind === "chat" ? { standalone: true } : { cwd: draftChat?.cwd }),
+        provider: preferences.provider,
         ...(Object.keys(draftConfig).length ? { config: draftConfig } : {}),
       }) as { thread: Thread };
       const thread = activeThread ?? normalizeThread(created!.thread);
@@ -1517,30 +1552,46 @@ export function App() {
     }
   }
 
-  async function beginLogin() {
+  async function beginLogin(provider: ProviderId = preferences.provider) {
     try {
-      setAuth((current) => current ? { ...current, loginRunning: true } : current);
-      setAuth(await call("auth.beginLogin") as AuthState);
+      if (provider === "kimi") {
+        setAuth((current) => current ? { ...current, loginRunning: true } : current);
+        setAuth(await call("auth.beginLogin", { provider }) as AuthState);
+      } else {
+        const status = await call("auth.beginLogin", { provider }) as ProviderState;
+        setProviders((current) => current.map((item) => item.id === provider ? { ...item, ...status, id: provider } : item));
+      }
     } catch (error) {
       setDiagnostic(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function installCli() {
+  async function installCli(provider: ProviderId = preferences.provider) {
     try {
-      const status = await call("env.installCli") as AuthState;
-      setAuth(status);
-      await openExternalLink(status.installUrl);
+      if (provider === "kimi") {
+        const status = await call("env.installCli") as AuthState;
+        setAuth(status);
+        await openExternalLink(status.installUrl);
+      } else {
+        const target = providers.find((item) => item.id === provider)?.installUrl;
+        if (!target) throw new Error("Provider install guide is unavailable");
+        await openExternalLink(target);
+      }
     } catch (error) {
       setDiagnostic(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function logout() {
+  async function logout(provider: ProviderId = preferences.provider) {
     try {
-      setAuth(await call("auth.logout") as AuthState);
-      setRuntimeReady(false);
-      setQuota(undefined);
+      if (provider === "kimi") {
+        setAuth(await call("auth.logout", { provider }) as AuthState);
+        setKimiRuntimeReady(false);
+        setQuota(undefined);
+      } else {
+        const status = await call("auth.logout", { provider }) as ProviderState;
+        setProviders((current) => current.map((item) => item.id === provider ? { ...item, ...status, id: provider } : item));
+      }
       setSettingsCategory("account");
       setSettingsOpen(true);
     } catch (error) {
@@ -1820,7 +1871,7 @@ export function App() {
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void chooseWorkspace(); }}><span>Open Folder…</span><kbd>Ctrl O</kbd></button>
               <span className="menu-separator" role="separator" />
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void runWindowAction("close"); }}><span>Close Window</span><kbd>Ctrl W</kbd></button>
-              <button type="button" role="menuitem" disabled={!auth?.authenticated} onClick={() => { setOpenMenu(undefined); void logout(); }}>Log Out</button>
+              <button type="button" role="menuitem" disabled={!providerState?.installed} onClick={() => { setOpenMenu(undefined); void logout(providerId); }}>Log Out of {providerName(providerId)}</button>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void exitApp(); }}>Exit</button>
             </div>}
           </div>
@@ -1946,7 +1997,7 @@ export function App() {
             timelinePinned.current = pinned;
             setShowJumpToLatest(!pinned && Boolean(activeThread && turnViews.length));
           }}>
-            {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} canInstallSkill={Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding && auth ? <Onboarding auth={auth} cwd={cwd} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={() => void call("auth.cancel")} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !auth?.authenticated ? <AuthCard auth={auth} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel")} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
+            {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} canInstallSkill={Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding ? <Onboarding providers={providers} selected={preferences.provider} cwd={cwd} onProvider={selectProvider} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={(provider) => void call("auth.cancel", { provider })} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !runtimeReady && (!activeThread || !turnViews.length) ? <ProviderGate provider={providerState} onInstall={() => installCli(providerId)} onLogin={() => beginLogin(providerId)} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel", { provider: providerId })} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
             {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{turnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={() => { setRailView("git"); void refreshGit(); }} />)}</div>}
           </div>
           {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}><CaretDown /> Jump to latest</button>}
@@ -1961,7 +2012,7 @@ export function App() {
             steerDisabled={configMutationPending}
             onSteer={(queuedId) => steerQueuedPrompt(activeThread.threadId, queuedId)}
           /> : null}
-          <textarea ref={composerInput} role="combobox" aria-autocomplete="list" aria-controls={suggestionsOpen ? "composer-suggestions" : undefined} aria-expanded={suggestionsOpen} aria-activedescendant={activeSuggestionId} aria-label={activeThread?.running ? "Task prompt. Enter queues. Control Enter steers." : "Task prompt"} title={activeThread?.running ? "Enter to queue · Ctrl+Enter to steer" : undefined} value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={updateMutationsBlocked ? "Updating Kimi Code Desktop…" : !runtimeReady ? "Reconnecting to Kimi runtime…" : activeThread?.running ? "Queue the next instruction (Ctrl+Enter to steer)" : activeThread?.kind === "chat" || draftChat?.kind === "chat" ? "Message Kimi" : activeThread || draftChat ? "Ask Kimi to work in this project" : "Start a chat first"} disabled={!auth?.authenticated || !runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} />
+          <textarea ref={composerInput} role="combobox" aria-autocomplete="list" aria-controls={suggestionsOpen ? "composer-suggestions" : undefined} aria-expanded={suggestionsOpen} aria-activedescendant={activeSuggestionId} aria-label={activeThread?.running ? "Task prompt. Enter queues. Control Enter steers." : "Task prompt"} title={activeThread?.running ? "Enter to queue · Ctrl+Enter to steer" : undefined} value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={updateMutationsBlocked ? "Updating Tasty…" : !runtimeReady ? `Connect ${providerName(providerId)} to continue…` : activeThread?.running ? "Queue the next instruction (Ctrl+Enter to steer)" : activeThread?.kind === "chat" || draftChat?.kind === "chat" ? `Message ${providerName(providerId)}` : activeThread || draftChat ? `Ask ${providerName(providerId)} to work in this project` : "Start a chat first"} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} />
           {suggestionsOpen && (commandSuggestions.length > 0 || skillSuggestions.length > 0) && <div className="mention-menu command-mention-menu" id="composer-suggestions" role="listbox" aria-label={promptTrigger?.kind === "skill" ? "Installed Kimi skills" : "Kimi commands"}>
             <small>{promptTrigger?.kind === "skill" ? "Installed skills" : "Commands from Kimi Code"}</small>
             {promptTrigger?.kind === "skill"
@@ -1973,8 +2024,8 @@ export function App() {
           <div className="composer-footer">
             <div ref={composerTools} className="composer-tools">
               <input ref={fileInput} type="file" accept="image/*" multiple hidden onChange={(event) => void attachImages(event.target.files)} />
-              <button className={`composer-action ${composerMenuOpen ? "active" : ""}`} type="button" title="Add context and Kimi capabilities" aria-label="Add context and Kimi capabilities" aria-haspopup="menu" aria-expanded={composerMenuOpen} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} onClick={() => setComposerMenuOpen((current) => !current)}><Plus /></button>
-              <button className={`composer-action composer-skill-action ${promptTrigger?.prefix === "/" ? "active" : ""}`} type="button" title="Use a Kimi command (/)" aria-label="Toggle Kimi commands" aria-pressed={promptTrigger?.prefix === "/"} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} onClick={toggleComposerCommandPicker}>/</button>
+              <button className={`composer-action ${composerMenuOpen ? "active" : ""}`} type="button" title="Add context and capabilities" aria-label="Add context and capabilities" aria-haspopup="menu" aria-expanded={composerMenuOpen} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} onClick={() => setComposerMenuOpen((current) => !current)}><Plus /></button>
+              <button className={`composer-action composer-skill-action ${promptTrigger?.prefix === "/" ? "active" : ""}`} type="button" title="Use a command (/)" aria-label="Toggle commands" aria-pressed={promptTrigger?.prefix === "/"} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} onClick={toggleComposerCommandPicker}>/</button>
               {composerMenuOpen && <div className="composer-tools-menu" role="menu" onKeyDown={moveMenuFocus}>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void attachWorkspaceFiles()}><Paperclip /><span><strong>Add files…</strong><small>{composerProjectCwd ? "Attach files from this project" : "Available inside a project"}</small></span></button>
                 <button type="button" role="menuitem" onClick={() => { setComposerMenuOpen(false); fileInput.current?.click(); }}><ImageSquare /><span><strong>Add images…</strong><small>Attach up to five images</small></span></button>
@@ -1994,8 +2045,9 @@ export function App() {
               </div>
             </div>
             <div className="composer-controls">
+              {(activeThread || draftChat) && <ProviderPicker providers={providers} selected={providerId} locked={Boolean(activeThread)} disabled={updateMutationsBlocked || configMutationPending} onSelect={selectProvider} />}
               {(activeThread || draftChat) && <ComposerConfig options={composerOptions} busyId={configBusyId} disabled={!runtimeReady || updateMutationsBlocked || configMutationPending} onChange={changeConfig} />}
-              <button className={`icon-button primary composer-submit ${primaryComposerAction === "stop" ? "composer-stop" : ""}`} type={primaryComposerAction === "stop" ? "button" : "submit"} aria-label={composerPrimaryLabel(primaryComposerAction)} title={composerPrimaryLabel(primaryComposerAction)} disabled={!auth?.authenticated || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked || (primaryComposerAction !== "stop" && (!composerSubmitReady || !prompt.trim()))} onClick={primaryComposerAction === "stop" && activeThread ? () => stopThread(activeThread.threadId) : undefined}>{primaryComposerAction === "stop" ? <Stop weight="fill" /> : <ArrowUp weight="bold" />}</button>
+              <button className={`icon-button primary composer-submit ${primaryComposerAction === "stop" ? "composer-stop" : ""}`} type={primaryComposerAction === "stop" ? "button" : "submit"} aria-label={composerPrimaryLabel(primaryComposerAction)} title={composerPrimaryLabel(primaryComposerAction)} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked || (primaryComposerAction !== "stop" && (!composerSubmitReady || !prompt.trim()))} onClick={primaryComposerAction === "stop" && activeThread ? () => stopThread(activeThread.threadId) : undefined}>{primaryComposerAction === "stop" ? <Stop weight="fill" /> : <ArrowUp weight="bold" />}</button>
             </div>
           </div>
         </form>}
@@ -2285,6 +2337,27 @@ type ComposerControl = {
   disabled?: boolean;
   choices: Array<{ value: string; name: string; description?: string; danger?: boolean }>;
 };
+
+function ProviderPicker({ providers, selected, locked, disabled, onSelect }: { providers: ProviderState[]; selected: ProviderId; locked: boolean; disabled: boolean; onSelect: (provider: ProviderId) => void }) {
+  const [open, setOpen] = useState(false);
+  const provider = providers.find((item) => item.id === selected);
+  const choices = providers.map((item) => ({
+    value: item.id,
+    name: item.name,
+    description: !item.installed ? "CLI not installed" : item.authenticated === false ? "Sign in required" : item.account ?? `${item.protocol} runtime`,
+  }));
+  const control: ComposerControl = {
+    id: "provider",
+    label: "Provider",
+    icon: <Robot />,
+    tooltip: locked ? "Provider is fixed for this chat" : "AI provider for the new chat",
+    current: provider?.name ?? providerName(selected),
+    value: selected,
+    choices,
+    disabled: locked || disabled || !choices.length,
+  };
+  return <div className="provider-picker"><ConfigControl control={control} open={open} onToggle={() => setOpen((current) => !current)} onClose={() => setOpen(false)} onPick={(value) => { onSelect(normalizeProvider(value)); setOpen(false); }} /></div>;
+}
 
 export function ComposerConfig({ options, busyId, disabled = false, onChange }: { options: ConfigOption[]; busyId?: string | undefined; disabled?: boolean; onChange: (configId: string, value: string) => void }) {
   const [openId, setOpenId] = useState<string>();
@@ -2667,26 +2740,39 @@ function SubagentsRail({ runs, onUseAgent, onOpenCenter }: { runs: SubagentRun[]
   </section>;
 }
 
-function Onboarding({ auth, cwd, onInstall, onLogin, onOpenUrl, onChooseWorkspace, onCancel, onFinish, onSkip }: {
-  auth: AuthState; cwd: string; onInstall: () => Promise<void>; onLogin: () => Promise<void>; onOpenUrl: (url: string) => Promise<void>;
-  onChooseWorkspace: () => Promise<void>; onCancel: () => void; onFinish: () => void; onSkip: () => void;
+function Onboarding({ providers, selected, cwd, onProvider, onInstall, onLogin, onOpenUrl, onChooseWorkspace, onCancel, onFinish, onSkip }: {
+  providers: ProviderState[]; selected: ProviderId; cwd: string; onProvider: (provider: ProviderId) => void; onInstall: (provider: ProviderId) => Promise<void>; onLogin: (provider: ProviderId) => Promise<void>; onOpenUrl: (url: string) => Promise<void>;
+  onChooseWorkspace: () => Promise<void>; onCancel: (provider: ProviderId) => void; onFinish: () => void; onSkip: () => void;
 }) {
+  const provider = providers.find((item) => item.id === selected);
+  const connected = providerUsable(provider);
   return <section className="onboarding">
-    <header><div className="onboarding-mark"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div><div><span>Welcome</span><h1>Your Kimi plan, in a focused desktop workspace.</h1><p>Kimi Code Desktop wraps the official CLI. Your login, quota, files, and sessions stay on this Windows account.</p></div></header>
+    <header><div className="onboarding-mark"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div><div><span>Welcome to Tasty</span><h1>Your coding agents, one focused workspace.</h1><p>Connect an official provider CLI. Tasty keeps credentials with that provider and stores its own thread metadata locally.</p></div></header>
+    <div className="provider-grid" role="radiogroup" aria-label="AI provider">
+      {providers.length ? providers.map((item) => <button className={item.id === selected ? "active" : ""} type="button" role="radio" aria-checked={item.id === selected} key={item.id} onClick={() => onProvider(item.id)}><ProviderMark provider={item.id} /><span><strong>{item.name}</strong><small>{!item.installed ? "Install CLI" : item.authenticated === false ? "Sign in" : item.account ?? "Ready"}</small></span>{item.id === selected && <Check />}</button>) : <ProviderSkeleton />}
+    </div>
     <ol className="setup-steps">
-      <li className={auth.installed ? "complete" : ""}><span>{auth.installed ? <Check /> : "1"}</span><div><strong>Install Kimi Code CLI</strong><p>{auth.installed ? "Found the local Kimi CLI." : "Open Kimi's official instructions. The app does not download or run install scripts."}</p>{!auth.installed && <button className="primary" type="button" onClick={() => void onInstall()}><DownloadSimple />Open install guide</button>}</div></li>
-      <li className={auth.authenticated ? "complete" : ""}><span>{auth.authenticated ? <Check /> : "2"}</span><div><strong>Connect your Kimi account</strong><p>{auth.authenticated ? "Your local Kimi account is connected." : "Kimi opens a device-code flow for your own subscription."}</p>{!auth.authenticated && auth.installed && <div className="auth-actions"><button className="primary" type="button" disabled={auth.loginRunning} onClick={() => void onLogin()}><SignIn />{auth.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button>{auth.loginRunning && <button className="secondary" type="button" onClick={onCancel}>Cancel</button>}</div>}{auth.event?.operation === "login" && auth.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(auth.event!.url!)}>Open Kimi verification</button>}{auth.event?.operation === "login" && auth.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(auth.event?.code ?? "")}><Copy />{auth.event.code}</button>}</div></li>
-      <li className={cwd ? "complete" : ""}><span>{cwd ? <Check /> : "3"}</span><div><strong>Choose a workspace</strong><p>{cwd || "Pick the folder Kimi is allowed to work in."}</p><button className="secondary" type="button" onClick={() => void onChooseWorkspace()}><FolderOpen />{cwd ? "Change folder" : "Choose folder"}</button></div></li>
+      <li className={provider?.installed ? "complete" : ""}><span>{provider?.installed ? <Check /> : "1"}</span><div><strong>Install {provider?.name ?? "a provider"}</strong><p>{provider?.installed ? `Found the ${provider.name} CLI.` : "Open the provider's official installation guide, then return here."}</p>{provider && !provider.installed && <button className="primary" type="button" onClick={() => void onInstall(provider.id)}><DownloadSimple />Open install guide</button>}</div></li>
+      <li className={connected ? "complete" : ""}><span>{connected ? <Check /> : "2"}</span><div><strong>Connect your account</strong><p>{connected ? provider?.account ?? `${provider?.name ?? "Provider"} is ready.` : "Use the provider's official sign-in flow. Tasty never receives your password."}</p>{provider?.installed && !connected && <div className="auth-actions"><button className="primary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin(provider.id)}><SignIn />{provider.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button>{provider.loginRunning && <button className="secondary" type="button" onClick={() => onCancel(provider.id)}>Cancel</button>}</div>}{provider?.event?.operation === "login" && provider.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(provider.event!.url!)}>Open verification</button>}{provider?.event?.operation === "login" && provider.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(provider.event?.code ?? "")}><Copy />{provider.event.code}</button>}</div></li>
+      <li className={cwd ? "complete" : ""}><span>{cwd ? <Check /> : "3"}</span><div><strong>Choose a workspace</strong><p>{cwd || "Pick the folder your agent can work in."}</p><button className="secondary" type="button" onClick={() => void onChooseWorkspace()}><FolderOpen />{cwd ? "Change folder" : "Choose folder"}</button></div></li>
     </ol>
-    <footer><button className="text-button" type="button" onClick={onSkip}>Skip for now</button><button className="primary" type="button" disabled={!auth.installed || !auth.authenticated || !cwd} onClick={onFinish}>Start coding</button></footer>
+    <footer><button className="text-button" type="button" onClick={onSkip}>Skip for now</button><button className="primary" type="button" disabled={!connected || !cwd} onClick={onFinish}>Start coding</button></footer>
   </section>;
 }
 
-function AuthCard({ auth, onInstall, onLogin, onOpenUrl, onCancel }: {
-  auth: AuthState | undefined; onInstall: () => Promise<void>; onLogin: () => Promise<void>; onOpenUrl: (url: string) => Promise<void>; onCancel: () => void;
+function ProviderGate({ provider, onInstall, onLogin, onOpenUrl, onCancel }: {
+  provider: ProviderState | undefined; onInstall: () => Promise<void>; onLogin: () => Promise<void>; onOpenUrl: (url: string) => Promise<void>; onCancel: () => void;
 }) {
-  if (!auth) return <section className="auth-card" aria-live="polite"><ArrowsClockwise size={24} /><div><h1>Starting Kimi Code</h1><p>Checking the local CLI and account…</p></div></section>;
-  return <section className="auth-card"><SignIn size={24} /><div><h1>{auth?.installed ? "Connect Kimi Code" : "Install Kimi Code CLI"}</h1><p>{auth?.installed ? "Sign in with your own Kimi plan. Credentials stay in your local Kimi Code home." : "The desktop app needs Kimi's official CLI. Open the official install guide, then return here when installation is complete."}</p>{auth?.event?.operation === "login" && auth.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(auth.event!.url!)}>Open Kimi verification</button>}{auth?.event?.operation === "login" && auth.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(auth.event?.code ?? "")}><Copy />{auth.event.code}</button>}<div className="auth-actions">{auth?.installed ? <button className="primary" type="button" disabled={auth.loginRunning} onClick={() => void onLogin()}>{auth.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button> : <button className="primary" type="button" onClick={() => void onInstall()}>Open install guide</button>}{auth?.loginRunning && <button className="secondary" type="button" onClick={onCancel}>Cancel</button>}</div></div></section>;
+  if (!provider) return <section className="auth-card" aria-live="polite"><ArrowsClockwise size={24} /><div><h1>Checking providers</h1><p>Reading the locally installed agent CLIs…</p></div></section>;
+  return <section className="auth-card"><ProviderMark provider={provider.id} /><div><h1>{provider.installed ? `Connect ${provider.name}` : `Install ${provider.name}`}</h1><p>{provider.installed ? "Sign in through the provider's official CLI. Credentials remain in its local account store." : "Tasty could not find this provider CLI. Open its official install guide, then return here."}</p>{provider.event?.operation === "login" && provider.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(provider.event!.url!)}>Open verification</button>}{provider.event?.operation === "login" && provider.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(provider.event?.code ?? "")}><Copy />{provider.event.code}</button>}<div className="auth-actions">{provider.installed ? <button className="primary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin()}>{provider.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button> : <button className="primary" type="button" onClick={() => void onInstall()}>Open install guide</button>}{provider.loginRunning && <button className="secondary" type="button" onClick={onCancel}>Cancel</button>}</div></div></section>;
+}
+
+function ProviderMark({ provider }: { provider: ProviderId }) {
+  return <span className={`provider-mark provider-${provider}`} aria-hidden="true">{provider === "kimi" ? "K" : provider === "codex" ? "O" : provider === "claude" ? "A" : "C"}</span>;
+}
+
+function ProviderSkeleton() {
+  return <div className="provider-skeleton" aria-label="Loading providers" aria-busy="true"><span /><span /><span /><span /></div>;
 }
 
 function SidebarSkeleton() {
@@ -2824,6 +2910,7 @@ function loadPreferences(): Preferences {
       hiddenSessions,
       composerConfig,
       yoloAcknowledged: value.yoloAcknowledged === true,
+      provider: normalizeProvider(value.provider),
     };
   } catch {
     return { ...defaultPreferences };
@@ -3610,6 +3697,14 @@ export function filterByTitle<T extends { title?: string }>(items: T[], query: s
 
 function normalizeProvider(value: unknown): ProviderId {
   return value === "codex" || value === "claude" || value === "cursor" ? value : "kimi";
+}
+
+function providerName(provider: ProviderId): string {
+  return provider === "codex" ? "OpenAI Codex" : provider === "claude" ? "Anthropic Claude" : provider === "cursor" ? "Cursor" : "Kimi";
+}
+
+export function providerUsable(provider: ProviderState | undefined): boolean {
+  return Boolean(provider?.installed && provider.authenticated !== false);
 }
 
 export function threadTreeOrder(items: Thread[]): Thread[] {
