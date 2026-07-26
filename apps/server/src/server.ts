@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ContentBlock, SessionConfigOption } from "@agentclientprotocol/sdk";
 import { WebSocketServer, type VerifyClientCallbackSync, type WebSocket } from "ws";
 import { z } from "zod";
-import { AcpClient, isUnknownAcpSessionError, type RuntimeEvent } from "./acp-client.js";
+import { AcpClient, isTransientWindowsSpawnError, isUnknownAcpSessionError, type RuntimeEvent } from "./acp-client.js";
 import type { AgentRuntime } from "./agent-runtime.js";
 import { CodexRuntime } from "./codex-runtime.js";
 import { ClaudeRuntime } from "./claude-runtime.js";
@@ -569,7 +569,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         ? await ensureThreadSession(acp, existing)
         : (request.params.replay
           ? await acp.loadSession(request.params.sessionId, resolve(request.params.cwd))
-          : await acp.resumeSession(request.params.sessionId, resolve(request.params.cwd))).configOptions ?? [];
+          : await resumeRuntimeSession(acp, request.params.sessionId, resolve(request.params.cwd))).configOptions ?? [];
       if (!hasConfiguredModel(configOptions)) throw new Error(`${providerName(provider)} has no configured model. Complete provider sign-in, then retry.`);
       if (provider === "kimi") void rememberLiveConfigOptions(configOptions);
       if (!existing) await engine.append(request.params.threadId, { type: "ThreadCreated", payload: { sessionId: request.params.sessionId, provider, cwd: resolve(request.params.cwd), kind: isStandaloneChatPath(request.params.cwd) ? "chat" : "project", title: "Resumed Tasty session", configOptions } });
@@ -1284,12 +1284,22 @@ async function ensureThreadSession(acp: AgentRuntime, thread: ThreadProjection):
   const pending = sessionResumes.get(thread.sessionId);
   if (pending) return pending;
   const resume = (async () => {
-    const configOptions = (await acp.resumeSession(thread.sessionId, thread.cwd)).configOptions ?? thread.configOptions;
+    const configOptions = (await resumeRuntimeSession(acp, thread.sessionId, thread.cwd)).configOptions ?? thread.configOptions;
     await engine.append(thread.threadId, { type: "ConfigOptionsReplaced", payload: { options: configOptions } });
     return configOptions;
   })().finally(() => sessionResumes.delete(thread.sessionId));
   sessionResumes.set(thread.sessionId, resume);
   return resume;
+}
+
+async function resumeRuntimeSession(acp: AgentRuntime, sessionId: string, cwd: string): ReturnType<AgentRuntime["resumeSession"]> {
+  try {
+    return await acp.resumeSession(sessionId, cwd);
+  } catch (error) {
+    if (!isTransientWindowsSpawnError(error)) throw error;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 350));
+    return acp.resumeSession(sessionId, cwd);
+  }
 }
 
 async function retryUnknownSessionOnce<T>(

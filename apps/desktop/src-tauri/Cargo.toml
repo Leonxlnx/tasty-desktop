@@ -1,6 +1,6 @@
 [package]
 name = "tasty-desktop"
-version = "0.11.0"
+version = "0.11.1"
 description = "A native multi-provider coding agent control panel"
 authors = ["Tasty contributors"]
 edition = "2021"

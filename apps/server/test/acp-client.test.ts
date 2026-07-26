@@ -3,10 +3,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { AcpClient, type RuntimeEvent } from "../src/acp-client.js";
+import { AcpClient, isTransientWindowsSpawnError, type RuntimeEvent } from "../src/acp-client.js";
 import { MAX_BACKGROUND_OUTPUT_BYTES } from "../src/background-tasks.js";
 
 describe("AcpClient", () => {
+  it("recognizes only transient Windows spawn permission errors", () => {
+    expect(isTransientWindowsSpawnError(new Error("spawn EPERM"))).toBe(process.platform === "win32");
+    expect(isTransientWindowsSpawnError({ code: "EPERM", syscall: "spawn C:\\tool.exe", message: "blocked" })).toBe(process.platform === "win32");
+    expect(isTransientWindowsSpawnError({ code: "EPERM", syscall: "open", message: "file denied" })).toBe(false);
+  });
+
   it("streams a full turn with a diff and permission", async () => {
     const events: RuntimeEvent[] = [];
     const fakePath = join(dirname(fileURLToPath(import.meta.url)), "../src/fake-acp.ts");

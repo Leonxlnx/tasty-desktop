@@ -75,7 +75,7 @@ export class CodexRuntime implements AgentRuntime {
     child.once("error", (error) => this.#disconnect(error));
     child.once("exit", (code, signal) => this.#disconnect(new Error(`Codex App Server exited (${signal ?? code ?? "unknown"})`)));
     const initialize = await this.#request("initialize", {
-      clientInfo: { name: "tasty", title: "Tasty", version: "0.11.0" },
+      clientInfo: { name: "tasty", title: "Tasty", version: "0.11.1" },
       capabilities: { experimentalApi: true, requestAttestation: false },
     });
     this.#notify("initialized");

@@ -9,7 +9,7 @@ Tasty is an open-source desktop control panel for local coding agents. It brings
 
 Download the latest signed Windows build from [GitHub Releases](https://github.com/Leonxlnx/tasty-desktop/releases/latest).
 
-Current source version: `0.11.0`
+Current source version: `0.11.1`
 
 Requirements:
 

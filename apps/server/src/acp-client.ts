@@ -31,6 +31,14 @@ export function isUnknownAcpSessionError(error: unknown): boolean {
     && /^Invalid params:\s*Unknown sessionId(?:\s*:|\b)/i.test(error.message);
 }
 
+export function isTransientWindowsSpawnError(error: unknown): boolean {
+  if (process.platform !== "win32") return false;
+  const value = error && typeof error === "object" ? error as { code?: unknown; syscall?: unknown; message?: unknown } : undefined;
+  const message = typeof value?.message === "string" ? value.message : String(error);
+  return (value?.code === "EPERM" && typeof value.syscall === "string" && /^spawn\b/i.test(value.syscall))
+    || /\bspawn\b.*\bEPERM\b/i.test(message);
+}
+
 export class AcpClient {
   readonly #options: AcpClientOptions;
   readonly #sessionRoots = new Map<string, string>();
@@ -100,7 +108,7 @@ export class AcpClient {
         fs: { readTextFile: true, writeTextFile: true },
         terminal: false,
       },
-      clientInfo: { name: "tasty", title: "Tasty", version: "0.11.0" },
+      clientInfo: { name: "tasty", title: "Tasty", version: "0.11.1" },
     }));
   }
 
