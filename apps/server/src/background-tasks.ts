@@ -41,6 +41,13 @@ type KimiTaskRecord = {
 };
 
 export function backgroundTaskCandidates(tools: CandidateTool[], turnId: string): BackgroundTaskCandidate[] {
+  const completedInTurn = new Set<string>();
+  for (const tool of tools) {
+    if (tool.turnId !== turnId || typeof tool.rawOutput !== "string") continue;
+    const taskId = tool.rawOutput.match(/^task_id:\s*((?:bash|agent)-[a-z0-9]+)\s*$/im)?.[1];
+    const status = tool.rawOutput.match(/^status:\s*(completed|failed|killed|lost|timed_out)\s*$/im)?.[1];
+    if (taskId && status) completedInTurn.add(taskId);
+  }
   const found = new Map<string, BackgroundTaskCandidate>();
   for (const tool of tools) {
     if (tool.turnId !== turnId || !isRecord(tool.rawInput) || tool.rawInput.disable_timeout === true) continue;
@@ -48,7 +55,7 @@ export function backgroundTaskCandidates(tools: CandidateTool[], turnId: string)
     if (!/^status:\s*(?:running|completed|failed|killed|lost|timed_out)\s*$/im.test(output)
       || !/^automatic_notification:\s*true\s*$/im.test(output)) continue;
     const taskId = output.match(/^task_id:\s*((?:bash|agent)-[a-z0-9]+)\s*$/im)?.[1];
-    if (!taskId || !TASK_ID.test(taskId)) continue;
+    if (!taskId || !TASK_ID.test(taskId) || completedInTurn.has(taskId)) continue;
     const description = output.match(/^description:\s*(.+?)\s*$/im)?.[1] ?? tool.title ?? "Background task";
     found.set(taskId, { taskId, description: cleanDescription(description) });
   }

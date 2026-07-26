@@ -38,8 +38,22 @@ describe("background task monitoring", () => {
       },
     ], "turn-1")).toEqual([
       { taskId: "bash-build1", description: "Build APK" },
-      { taskId: "bash-done1", description: "Finished quickly" },
     ]);
+  });
+
+  it("does not queue a second report after Kimi already delivered a terminal task result", () => {
+    expect(backgroundTaskCandidates([
+      {
+        turnId: "turn-1",
+        rawInput: { run_in_background: true, timeout: 600 },
+        rawOutput: "task_id: bash-build1\nstatus: running\ndescription: Build APK\nautomatic_notification: true",
+      },
+      {
+        turnId: "turn-1",
+        rawInput: { task_id: "bash-build1", block: true },
+        rawOutput: "task_id: bash-build1\nstatus: completed\nexit_code: 0",
+      },
+    ], "turn-1")).toEqual([]);
   });
 
   it("reads only detached task metadata and output from the same canonical session", async () => {

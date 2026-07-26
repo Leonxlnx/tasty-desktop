@@ -45,6 +45,21 @@ describe("runtime tool input", () => {
 });
 
 describe("runtime streaming", () => {
+  it("lets cancellation continue when a stalled ingestion tail cannot drain immediately", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const engine = {
+      runtimeThreadForSession: () => ({ threadId: "thread-1", activeTurnId: "turn-1" }),
+      append: () => gate,
+    } as unknown as OrchestrationEngine;
+    const ingestion = new RuntimeIngestion(engine);
+    await ingestion.ingest({ type: "session_update", params: { sessionId: "session-1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "pending" } } } });
+
+    await expect(ingestion.flushWithin("session-1", 10)).resolves.toBe(false);
+    release();
+    await expect(ingestion.flushWithin("session-1", 100)).resolves.toBe(true);
+  });
+
   it("coalesces adjacent message chunks before durable publication", async () => {
     const dir = await mkdtemp(join(tmpdir(), "kimi-stream-"));
     const path = join(dir, "events.jsonl");

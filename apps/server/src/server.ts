@@ -874,7 +874,14 @@ async function cancelThreadTurn(acp: AgentRuntime | undefined, thread: ThreadPro
       });
     }
   }
-  await ingestion.flush(thread.sessionId);
+  const drained = await ingestion.flushWithin(thread.sessionId, 250);
+  if (!drained) {
+    pushAll("server.diagnostics", {
+      type: "diagnostic",
+      level: "warning",
+      message: "Stopped locally while the final agent output finishes saving.",
+    });
+  }
   if (engine.thread(thread.threadId)?.activeTurnId !== turnId) return;
   await engine.append(thread.threadId, { type: "TurnCancelled", payload: { turnId } });
   pushAll("receipt", { type: "turn.quiescent", threadId: thread.threadId, turnId });

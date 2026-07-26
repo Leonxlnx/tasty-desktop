@@ -52,6 +52,22 @@ export class RuntimeIngestion {
     });
   }
 
+  async flushWithin(sessionId: string, timeoutMs: number): Promise<boolean> {
+    const flush = this.flush(sessionId);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        flush.then(() => true),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), timeoutMs);
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   async flushAll(): Promise<void> {
     const sessions = new Set([...this.#pending.keys(), ...this.#tails.keys()]);
     await Promise.all([...sessions].map((sessionId) => this.flush(sessionId)));

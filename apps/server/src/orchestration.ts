@@ -448,6 +448,7 @@ export class OrchestrationEngine {
 }
 
 function appendThoughtActivity(thread: ThreadProjection, message: Message, event: StoredEvent): void {
+  const active = thread.activeTurnId === message.turnId;
   const current = thread.activity.at(-1);
   if (current?.kind === "thought" && current.turnId === message.turnId && current.status === "in_progress") {
     current.text = boundedText(current.text + message.text, 4_000);
@@ -460,7 +461,7 @@ function appendThoughtActivity(thread: ThreadProjection, message: Message, event
     id: `thought-${event.seq}`,
     turnId: message.turnId,
     kind: "thought",
-    status: "in_progress",
+    status: active ? "in_progress" : "completed",
     text: boundedText(message.text, 4_000),
     seq: event.seq,
     updatedSeq: event.seq,
@@ -485,7 +486,8 @@ function appendMessage(thread: ThreadProjection, message: Message, event: Stored
 
 function upsertToolActivity(thread: ThreadProjection, tool: ToolCall & { turnId: string }, event: StoredEvent): void {
   const existing = thread.activity.find((entry) => entry.kind === "tool" && entry.turnId === tool.turnId && entry.toolCallId === tool.toolCallId);
-  const status = activityStatus(tool.status);
+  const rawStatus = activityStatus(tool.status);
+  const status = thread.activeTurnId === tool.turnId || rawStatus === "failed" ? rawStatus : "completed";
   if (existing) {
     existing.text = tool.title ?? existing.text;
     existing.status = status;

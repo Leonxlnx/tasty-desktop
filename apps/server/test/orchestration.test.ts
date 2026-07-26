@@ -161,6 +161,26 @@ describe("orchestration engine", () => {
     expect(replayed.thread("ordered")?.turns[0]?.error).toBe("Command exited with code 1");
   });
 
+  it("keeps late buffered activity settled after a local cancellation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "tasty-late-cancel-"));
+    const engine = new OrchestrationEngine(new EventStore(join(dir, "events.jsonl")));
+    await engine.open();
+    await engine.append("cancelled", { type: "ThreadCreated", payload: { sessionId: "s-cancelled", cwd: "C:/work", title: "Cancelled" } });
+    await engine.append("cancelled", { type: "TurnStarted", payload: { turnId: "turn-1", text: "Stop" } });
+    await engine.append("cancelled", { type: "TurnCancelled", payload: { turnId: "turn-1" } });
+    await engine.append("cancelled", { type: "MessageDelta", payload: { turnId: "turn-1", role: "thought", text: "Buffered thought" } });
+    await engine.append("cancelled", { type: "ToolCallCreated", payload: { tool: { toolCallId: "tool-late", turnId: "turn-1", title: "Late tool", status: "in_progress" } } });
+
+    expect(engine.thread("cancelled")).toMatchObject({
+      running: false,
+      activeTurnId: undefined,
+      activity: [
+        expect.objectContaining({ kind: "thought", status: "completed" }),
+        expect.objectContaining({ kind: "tool", status: "completed" }),
+      ],
+    });
+  });
+
   it("persists background task completion and bounds reported history", async () => {
     const dir = await mkdtemp(join(tmpdir(), "kimi-background-events-"));
     const path = join(dir, "events.jsonl");
