@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, latestTimelineItemId, localServerUrl, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, presentDiagnostic, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, reorderPaths, serverWebSocketUrl, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, latestTimelineItemId, localServerUrl, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, presentDiagnostic, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, serverWebSocketUrl, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
 
 describe("agent skill install requests", () => {
   it("opens confirmation only for a source inside the requested workspace", () => {
@@ -126,6 +126,13 @@ describe("turn activity", () => {
       ],
     } as never);
     expect(projectTurns(thread).map((turn) => turn.activity.map((entry) => entry.text))).toEqual([["First"], ["Second"]]);
+  });
+
+  it("renders a bounded recent window while preserving access to older turns", () => {
+    const turns = Array.from({ length: 120 }, (_, index) => `turn-${index + 1}`);
+    expect(recentTurns(turns, 60)).toEqual(turns.slice(60));
+    expect(recentTurns(turns, 180)).toBe(turns);
+    expect(recentTurns(turns, 0)).toEqual([]);
   });
 
   it("keeps progress commentary in work and only promotes trailing text to the final summary", () => {

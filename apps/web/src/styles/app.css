@@ -276,6 +276,9 @@ button:active:not(:disabled) { transform: scale(.975); }
 .jump-to-latest svg { width: 14px; height: 14px; }
 .conversation-stage { width: 100%; animation: conversation-in 180ms var(--ease-out); }
 .conversation-stage > .turn-block { width: 100%; max-width: calc(var(--composer-max-width) - 48px); margin-inline: auto; content-visibility: auto; contain-intrinsic-size: auto 420px; }
+.conversation-history-more { display: flex; min-height: 34px; align-items: center; gap: 7px; margin: 0 auto var(--space-5); border: 0; border-radius: var(--radius-sm); padding: 0 10px; background: transparent; color: var(--color-text-tertiary); font-size: var(--text-xs); cursor: pointer; }
+.conversation-history-more:hover, .conversation-history-more:focus-visible { background: var(--color-surface-1); color: var(--color-text-secondary); }
+.conversation-history-more svg { width: 14px; height: 14px; transform: rotate(180deg); }
 .timeline:has(> .empty-conversation) { width: 100%; padding: 0 var(--space-6); }
 .empty { display: grid; justify-items: center; align-content: center; min-height: 55dvh; text-align: center; }
 .empty-logo { width: 42px; height: 42px; border-radius: var(--radius-md); }

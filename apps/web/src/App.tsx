@@ -110,6 +110,7 @@ const defaultPreferences: Preferences = {
   projectAliases: {}, hiddenProjects: [], hiddenSessions: [], composerConfig: {}, yoloAcknowledged: false, provider: "kimi",
 };
 const collapsedSidebarWidth = 60;
+const initialTurnWindow = 60;
 let terminalEntryId = 0;
 const fallbackCommands: AvailableCommand[] = [
   { name: "goal", description: "Set, replace, or clear the goal for this chat." },
@@ -337,6 +338,7 @@ export function App() {
   const [yoloConfirm, setYoloConfirm] = useState<{ target: ConfigTarget; configId: string; value: string; busy: boolean }>();
   const [draggingProject, setDraggingProject] = useState<string>();
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [visibleTurnLimit, setVisibleTurnLimit] = useState(initialTurnWindow);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
 
@@ -440,6 +442,7 @@ export function App() {
 
   useLayoutEffect(() => {
     timelinePinned.current = true;
+    setVisibleTurnLimit(initialTurnWindow);
     setShowJumpToLatest(false);
     const frame = window.requestAnimationFrame(jumpToLatest);
     return () => window.cancelAnimationFrame(frame);
@@ -1764,6 +1767,8 @@ export function App() {
     .filter((project) => !preferences.hiddenProjects.some((hidden) => samePath(hidden, project.cwd))), [preferences.hiddenProjects, preferences.projectAliases, preferences.projects, projectRuntimeSessions, projectThreads]);
   const visibleProjects = useMemo(() => filterProjects(projects, threadFilter), [projects, threadFilter]);
   const turnViews = useMemo(() => activeThread ? projectTurns(activeThread) : [], [activeThread]);
+  const visibleTurnViews = useMemo(() => recentTurns(turnViews, visibleTurnLimit), [turnViews, visibleTurnLimit]);
+  const hiddenTurnCount = turnViews.length - visibleTurnViews.length;
   const runtimeCommands = activeThread?.commands.length ? activeThread.commands : threads.find((thread) => thread.commands.length)?.commands;
   const commandCatalog = useMemo(() => runtimeCommands?.length ? runtimeCommands : fallbackCommands, [runtimeCommands]);
   const nativeCapabilityCommands = useMemo(() => new Set((runtimeCommands ?? []).map((command) => command.name)), [runtimeCommands]);
@@ -1930,7 +1935,7 @@ export function App() {
           <button className="toolbar-icon" type="button" aria-label="Search projects and chats" title="Search (Ctrl+K)" onClick={() => setSearchOpen(true)}><MagnifyingGlass /></button>
         </div>
 
-        <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title="Skills, MCP, plugins, and subagents" onClick={() => { setRailView(undefined); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Capabilities</strong><small>{capabilities ? `${capabilities.skills.length} skills · ${capabilities.mcpServers.length} MCP` : "Skills, MCP, agents"}</small></span><CaretRight /></button>
+        {providerId === "kimi" && <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title="Kimi skills, MCP, plugins, and agents" onClick={() => { setRailView(undefined); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Kimi capabilities</strong><small>{capabilities ? `${capabilities.skills.length} skills · ${capabilities.mcpServers.length} MCP` : "Skills, MCP, agents"}</small></span><CaretRight /></button>}
 
         <div className="sidebar-body">
           <div className="sidebar-heading"><span>{navView === "projects" ? "Projects" : "Chats"}</span><button type="button" title={navView === "projects" ? "Open folder" : "New chat"} aria-label={navView === "projects" ? "Open folder" : "New chat"} disabled={navView === "chats" && !runtimeReady} onClick={() => navView === "projects" ? void chooseWorkspace() : createStandaloneChat()}>{navView === "projects" ? <FolderOpen /> : <Plus />}</button></div>
@@ -1998,8 +2003,8 @@ export function App() {
             timelinePinned.current = pinned;
             setShowJumpToLatest(!pinned && Boolean(activeThread && turnViews.length));
           }}>
-            {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} canInstallSkill={Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding ? <Onboarding providers={providers} selected={preferences.provider} cwd={cwd} onProvider={selectProvider} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={(provider) => void call("auth.cancel", { provider })} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !runtimeReady && (!activeThread || !turnViews.length) ? <ProviderGate provider={providerState} onInstall={() => installCli(providerId)} onLogin={() => beginLogin(providerId)} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel", { provider: providerId })} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
-            {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{turnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={() => { setRailView("git"); void refreshGit(); }} />)}</div>}
+            {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} canInstallSkill={Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding ? <Onboarding providers={providers} selected={preferences.provider} cwd={cwd} onProvider={selectProvider} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={(provider) => void call("auth.cancel", { provider })} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !runtimeReady && (!activeThread || !turnViews.length) ? <ProviderGate provider={providerState} onInstall={() => installCli(providerId)} onLogin={() => beginLogin(providerId)} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel", { provider: providerId })} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} agentName={providerName(providerId)} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
+            {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{hiddenTurnCount > 0 && <button className="conversation-history-more" type="button" onClick={() => setVisibleTurnLimit((current) => current + initialTurnWindow)}><CaretDown /> Show {Math.min(initialTurnWindow, hiddenTurnCount)} earlier turns</button>}{visibleTurnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={() => { setRailView("git"); void refreshGit(); }} />)}</div>}
           </div>
           {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}><CaretDown /> Jump to latest</button>}
         </div>
@@ -2215,7 +2220,7 @@ function PromptQueue({ queue, steerDisabled = false, onClear, onRemove, onUpdate
   </section>;
 }
 
-function EmptyConversation({ kind, workspace, canPrompt, onPrompt, onOpenFolder }: { kind: "project" | "chat"; workspace: string | undefined; canPrompt: boolean; onPrompt: (text: string) => void; onOpenFolder: () => void }) {
+function EmptyConversation({ kind, workspace, agentName, canPrompt, onPrompt, onOpenFolder }: { kind: "project" | "chat"; workspace: string | undefined; agentName: string; canPrompt: boolean; onPrompt: (text: string) => void; onOpenFolder: () => void }) {
   const projectName = workspace ? workspaceName(workspace) : undefined;
   const starters = kind === "chat" ? [
     { icon: <ChatCircleDots />, label: "Explain a difficult topic", prompt: "Explain a difficult topic in simple terms" },
@@ -2230,8 +2235,8 @@ function EmptyConversation({ kind, workspace, canPrompt, onPrompt, onOpenFolder 
   ];
   return <div className="empty empty-conversation">
     <div className="empty-mark"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div>
-    <h1>{kind === "chat" ? "What would you like to ask Kimi?" : projectName ? <>What should we work on in <span>{projectName}</span>?</> : "Open a folder to start building"}</h1>
-    <p>{kind === "chat" ? "This is a standalone chat, separate from your project workspaces." : projectName ? "Pick a starting point or describe exactly what you want to change." : "Choose any folder on this PC. Kimi opens it here without restarting the app."}</p>
+    <h1>{kind === "chat" ? `What would you like to ask ${agentName}?` : projectName ? <>What should we work on in <span>{projectName}</span>?</> : "Open a folder to start building"}</h1>
+    <p>{kind === "chat" ? "This is a standalone chat, separate from your project workspaces." : projectName ? "Pick a starting point or describe exactly what you want to change." : `Choose any folder on this PC. ${agentName} opens it here without restarting the app.`}</p>
     {kind === "project" && !projectName ? <button className="secondary empty-open-folder" type="button" onClick={onOpenFolder}><FolderOpen /> Open folder</button> : <div className="empty-prompts" aria-label="Suggested prompts">
       {starters.map((starter) => <button type="button" key={starter.label} disabled={!canPrompt} onClick={() => onPrompt(starter.prompt)}><span>{starter.icon}</span><strong>{starter.label}</strong></button>)}
     </div>}
@@ -2376,7 +2381,7 @@ export function ComposerConfig({ options, busyId, disabled = false, onChange }: 
   if (model) {
     const choices = flattenOptions(model);
     controls.push({
-      id: model.id, label: "Model", icon: <Cpu />, tooltip: "Model Kimi uses for this chat",
+      id: model.id, label: "Model", icon: <Cpu />, tooltip: "Model the provider uses for this chat",
       current: currentChoiceName(model), value: String(model.currentValue), disabled: choices.length < 2,
       choices: choices.map((choice) => ({ value: choice.value, name: choice.name, description: modelDescription(choice.name) })),
     });
@@ -2532,7 +2537,7 @@ function modelDescription(name: string): string {
   if (/swarm/i.test(name)) return "Parallel agent orchestration";
   if (/k3/i.test(name)) return "Flagship coding and agent model";
   if (/k2/i.test(name)) return "Fast, efficient coding model";
-  return "Available in your Kimi plan";
+  return "Available from the active provider";
 }
 
 function isModelOption(option: ConfigOption): boolean {
@@ -3004,7 +3009,7 @@ export function normalizeAvailableCommands(value: unknown): AvailableCommand[] {
       : undefined;
     commands.push({
       name,
-      description: typeof raw.description === "string" && raw.description.trim() ? raw.description.trim() : "Kimi Code command.",
+      description: typeof raw.description === "string" && raw.description.trim() ? raw.description.trim() : "Provider command.",
       ...(input ? { input } : {}),
     });
     seen.add(name.toLowerCase());
@@ -3236,26 +3241,43 @@ export function updatePercent(downloaded: number, total?: number): number | unde
 
 type TurnView = { record: TurnRecord; messages: Message[]; activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; checkpoint?: Checkpoint; canRevert: boolean; running: boolean };
 
+export function recentTurns<T>(turns: T[], limit: number): T[] {
+  const count = Math.max(0, Math.floor(limit));
+  if (!count) return [];
+  return turns.length > count ? turns.slice(-count) : turns;
+}
+
 export function projectTurns(thread: Thread): TurnView[] {
-  const ids = [...new Set([
-    ...thread.turns.map((turn) => turn.turnId),
-    ...thread.messages.map((message) => message.turnId),
-    ...thread.activity.map((entry) => entry.turnId),
-    ...thread.tools.flatMap((tool) => tool.turnId ? [tool.turnId] : []),
-  ])];
-  return ids.map((turnId) => {
-    const checkpoint = thread.checkpoints.findLast((item) => item.turnId === turnId && item.phase === "after");
-    return {
-      record: thread.turns.find((turn) => turn.turnId === turnId) ?? { turnId, startedAt: thread.createdAt },
-      messages: thread.messages.filter((message) => message.turnId === turnId),
-      activity: thread.activity.filter((entry) => entry.turnId === turnId).sort((a, b) => a.seq - b.seq),
-      tools: thread.tools.filter((tool) => tool.turnId === turnId),
-      approvals: thread.approvals.filter((approval) => approval.turnId === turnId || (!approval.turnId && thread.activeTurnId === turnId)),
-      ...(checkpoint ? { checkpoint } : {}),
-      canRevert: Boolean(checkpoint && thread.checkpoints.some((item) => item.turnId === turnId && item.phase === "before")),
-      running: thread.activeTurnId === turnId,
-    };
-  });
+  const views = new Map<string, TurnView>();
+  const ensure = (turnId: string) => {
+    let view = views.get(turnId);
+    if (!view) {
+      view = { record: { turnId, startedAt: thread.createdAt }, messages: [], activity: [], tools: [], approvals: [], canRevert: false, running: thread.activeTurnId === turnId };
+      views.set(turnId, view);
+    }
+    return view;
+  };
+  for (const record of thread.turns) ensure(record.turnId).record = record;
+  for (const message of thread.messages) ensure(message.turnId).messages.push(message);
+  for (const entry of thread.activity) ensure(entry.turnId).activity.push(entry);
+  for (const tool of thread.tools) if (tool.turnId) ensure(tool.turnId).tools.push(tool);
+  for (const approval of thread.approvals) {
+    const turnId = approval.turnId ?? thread.activeTurnId;
+    if (turnId) views.get(turnId)?.approvals.push(approval);
+  }
+  const before = new Set<string>();
+  for (const checkpoint of thread.checkpoints) {
+    if (checkpoint.phase === "before") before.add(checkpoint.turnId);
+    if (checkpoint.phase === "after") {
+      const view = views.get(checkpoint.turnId);
+      if (view) view.checkpoint = checkpoint;
+    }
+  }
+  for (const view of views.values()) {
+    view.activity.sort((a, b) => a.seq - b.seq);
+    view.canRevert = Boolean(view.checkpoint && before.has(view.record.turnId));
+  }
+  return [...views.values()];
 }
 
 function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPath, onEdit, onRespond, onRevert, onReview }: {
@@ -3273,7 +3295,7 @@ function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPat
   const { commentary, final } = turnAssistantMessages(turn);
   const report = final?.text ?? "";
   const failure = turn.record.error
-    ?? (turn.record.stopReason === "error" ? "Kimi stopped before finishing this turn. You can edit the prompt and try again." : undefined);
+    ?? (turn.record.stopReason === "error" ? "The agent stopped before finishing this turn. You can edit the prompt and try again." : undefined);
   const previewLink = findLocalPreviewUrl([
     ...turn.messages.map((message) => message.text),
     ...turn.tools.flatMap((tool) => [tool.title ?? "", ...tool.content?.map((item) => item.content?.text ?? "") ?? [], safeStringify(tool.rawOutput)]),
