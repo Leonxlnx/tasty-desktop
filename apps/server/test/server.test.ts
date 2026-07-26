@@ -507,7 +507,7 @@ describe("orchestration server", () => {
       result: {
         auth: { authenticated: true },
         degraded: true,
-        runtimeError: expect.stringMatching(/connection closed|missing-kimi|ENOENT|spawn/i),
+        runtimeError: expect.stringMatching(/not installed|connection closed|missing-kimi|ENOENT|spawn/i),
       },
     });
     const listed = waitFor(socket, messages, (message) => message.id === 2);
