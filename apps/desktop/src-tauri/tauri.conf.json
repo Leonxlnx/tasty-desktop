@@ -45,7 +45,7 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEzRkIwRDA0M0M0MjdDQTgKUldTb2ZFSThCQTM3bysyNy94VWxTSjNjOGt2RDZOZkVmRG9jVk1RT2NGNDgrUEJwcnhiYlhjNDUK",
-      "endpoints": ["https://leonxlnx.github.io/kimi-code-desktop/latest.json"],
+      "endpoints": ["https://leonxlnx.github.io/tasty-desktop/latest.json"],
       "windows": { "installMode": "passive" }
     }
   }

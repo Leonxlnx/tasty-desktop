@@ -11,7 +11,7 @@ Published Windows releases are built by GitHub Actions. Do not upload a locally 
   - `apps/desktop/package.json`
   - `apps/desktop/src-tauri/Cargo.toml`
   - `apps/desktop/src-tauri/tauri.conf.json`
-  - The `kimi-code-desktop` package entry in `apps/desktop/src-tauri/Cargo.lock`
+  - The `tasty-desktop` package entry in `apps/desktop/src-tauri/Cargo.lock`
   - `apps/server/src/preview-mcp.ts`
   - The current-version line in `README.md`
 - GitHub Actions contains `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
@@ -58,7 +58,7 @@ Create and push an annotated tag whose version exactly matches every field in th
 
 ```powershell
 $version = "X.Y.Z"
-git tag -a "v$version" -m "Kimi Code Desktop $version"
+git tag -a "v$version" -m "Tasty $version"
 git push origin "v$version"
 ```
 

@@ -11,7 +11,7 @@ Only the latest published release receives security fixes.
 
 ## Report a vulnerability
 
-Use [GitHub private vulnerability reporting](https://github.com/Leonxlnx/kimi-code-desktop/security/advisories/new).
+Use [GitHub private vulnerability reporting](https://github.com/Leonxlnx/tasty-desktop/security/advisories/new).
 
 Do not open a public issue for:
 
@@ -25,8 +25,8 @@ Include the app version, Windows version, reproduction steps, impact, and whethe
 
 ## Trust boundaries
 
-Kimi Code Desktop delegates authentication, model access, sessions, commands, skills, subagents, and subscription quota to the installed official Kimi Code CLI. The app must never read or copy credential contents.
-If the CLI is missing, onboarding opens Kimi's official installation guide only after a user click; it never downloads or executes a remote installation script.
+Tasty delegates authentication, model access, and sessions to installed official provider CLIs. Kimi also remains authoritative for its commands, skills, subagents, MCP configuration, and subscription quota. Tasty must never read or copy credential contents.
+If a CLI is missing, onboarding opens that provider's official installation guide only after a user click. It never downloads or executes a remote installation script.
 
 The local orchestration service:
 

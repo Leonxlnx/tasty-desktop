@@ -44,7 +44,7 @@ jobs:
           if ($version -ne $configuredVersion) { throw "Tag version $version does not match app version $configuredVersion" }
           $installer = Get-ChildItem 'apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe' | Select-Object -First 1
           $signature = (Get-Content "$($installer.FullName).sig" -Raw).Trim()
-          $fileName = "Kimi-Code-Desktop-$version-x64-setup.exe"
+          $fileName = "Tasty-$version-x64-setup.exe"
           New-Item -ItemType Directory -Path update-site -Force | Out-Null
           Copy-Item $installer.FullName "update-site/$fileName"
           Copy-Item "$($installer.FullName).sig" "update-site/$fileName.sig"
@@ -52,12 +52,12 @@ jobs:
           "$sha256  $fileName" | Set-Content 'update-site/SHA256SUMS.txt' -Encoding ascii
           @{
             version = $version
-            notes = "Kimi Code Desktop $version"
+            notes = "Tasty $version"
             pub_date = [DateTime]::UtcNow.ToString('o')
             platforms = @{
               'windows-x86_64' = @{
                 signature = $signature
-                url = "https://leonxlnx.github.io/kimi-code-desktop/$fileName"
+                url = "https://leonxlnx.github.io/tasty-desktop/$fileName"
               }
             }
           } | ConvertTo-Json -Depth 5 | Set-Content update-site/latest.json -Encoding utf8NoBOM
@@ -89,8 +89,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $assets = @(
-            (Resolve-Path 'update-site/Kimi-Code-Desktop-*-x64-setup.exe').Path
-            (Resolve-Path 'update-site/Kimi-Code-Desktop-*-x64-setup.exe.sig').Path
+            (Resolve-Path 'update-site/Tasty-*-x64-setup.exe').Path
+            (Resolve-Path 'update-site/Tasty-*-x64-setup.exe.sig').Path
             (Resolve-Path 'update-site/latest.json').Path
             (Resolve-Path 'update-site/SHA256SUMS.txt').Path
           )
@@ -110,7 +110,7 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          $deploy = Join-Path $env:RUNNER_TEMP 'kimi-update-feed'
+          $deploy = Join-Path $env:RUNNER_TEMP 'tasty-update-feed'
           git worktree add --detach $deploy
           Push-Location $deploy
           git switch --orphan gh-pages

@@ -1,24 +1,24 @@
 # User Guide
 
-Kimi Code Desktop is a Windows interface for the official Kimi Code CLI. It uses the Kimi account, plan, configuration, sessions, and capabilities available to the current Windows user.
+Tasty is a Windows desktop harness for Kimi Code CLI, OpenAI Codex CLI, Anthropic Claude Code, and Cursor Agent CLI. It uses the accounts, sessions, models, and capabilities available to the current Windows user.
 
 ## Install and sign in
 
-1. Download the newest installer from [GitHub Releases](https://github.com/Leonxlnx/kimi-code-desktop/releases/latest).
-2. Run the installer and open Kimi Code Desktop.
-3. Let onboarding check for Kimi Code CLI. If it is missing, choose **Open guide / check again** and follow Kimi's official instructions. The desktop app does not download or execute remote install scripts. Choose the button again after installation so onboarding can continue.
-4. Select **Begin sign-in**.
-5. Open Kimi's verification page and approve the displayed device code.
+1. Download the newest installer from [GitHub Releases](https://github.com/Leonxlnx/tasty-desktop/releases/latest).
+2. Run the installer and open Tasty.
+3. Choose Kimi, OpenAI Codex, Anthropic Claude, or Cursor during onboarding.
+4. If the provider CLI is missing, open its official guide and install it yourself. Tasty never downloads or executes remote install scripts.
+5. Select **Sign in** and complete the provider CLI flow.
 
-Signing out removes only the local Kimi OAuth credential. Kimi configuration, sessions, and desktop chat history remain on the Windows account.
+Signing out delegates credential removal to the selected provider CLI. Provider configuration, sessions, and Tasty chat history remain on the Windows account.
 
 ## Projects and chats
 
-Use **Projects** when Kimi should work inside a local folder. A project can contain multiple chats, and each chat can use workspace files, Git, terminal, and preview tools.
+Use **Projects** when an agent should work inside a local folder. A project can contain multiple chats, and each chat can use workspace files, Git, terminal, and preview tools.
 
 Use **Chats** for standalone conversations. Standalone chats use an app-owned workspace and do not expose project files, Git state, terminal commands, or previews.
 
-Creating a chat first creates a draft. It becomes a durable Kimi session only after the first prompt is sent. The first prompt is also used to generate the chat name.
+Creating a chat first creates a draft. It becomes a durable provider session only after the first prompt is sent. The first prompt is also used to generate the chat name.
 
 Project menu actions can:
 
@@ -33,18 +33,20 @@ Chat menu actions can rename, stop, open, or delete a chat. Right-clicking a pro
 - Press `Enter` to send.
 - Press `Shift+Enter` for a new line.
 - Use `+` to add files or images.
-- Use `/` to open Kimi commands.
-- Use `$` to search Kimi skills.
+- Use `/` to open provider commands plus Tasty's `/goal` and `/side` commands.
+- Use `$` to search Kimi skills when Kimi is active.
 - Use `#` or `@` to search files in the active project.
-- Use **Set workspace goal** in the `+` menu to start Kimi's `/write-goal` workflow.
+- Use `/goal <objective>` or **Set goal** to persist an objective for the current chat.
+- Use `/goal clear` to remove the objective.
+- Use `/side [title]` to create a nested side chat with the same provider and workspace.
 
 The `/` button is a toggle. Selecting it again closes command suggestions without inserting another character.
 
-Model, reasoning, and permission choices come from the active Kimi ACP session. Kimi Code CLI `0.29.1` is the current verified reference runtime and can offer `Low`, `High`, and `Max` effort. The app shows every value the current session offers, including future values, and does not invent unsupported options. A legacy `Thinking On` value is shown as runtime-managed `Default`, not as `Max`.
+Model, reasoning, and permission choices come from the active provider runtime. Tasty renders each offered value and does not invent unsupported options. The provider can be changed while a chat is still a draft; an existing thread keeps its original provider.
 
 ## Control active work
 
-While Kimi is working, a new prompt can be:
+While an agent is working, a new prompt can be:
 
 - **Queued** to run after the active turn. Queue is the default.
 - **Steered** to cancel the current turn cleanly and prioritize the new direction.
@@ -53,7 +55,7 @@ Queued prompts appear in a compact row above the composer. They can be edited or
 
 Text-only queued prompts survive an app restart. Image payloads remain memory-only so large encoded data is not written into local history.
 
-While work is active, short Kimi progress updates and one-line tool rows appear in chronological order. Tool details stay collapsed unless opened. When the turn finishes, this feed collapses into **Worked for ...**, followed by Kimi's final summary, token usage, a compact file-change report, and detected localhost preview links.
+While work is active, short plain-language progress updates and one-line tool rows appear in chronological order. Tool details stay collapsed unless opened. When the turn finishes, this feed collapses into **Worked for ...**, followed by the final summary, token usage, a compact file-change report, and detected localhost preview links.
 
 Some Kimi shell and agent tools can start a finite background task with automatic notification. The desktop app keeps those real task records in the chat projection, monitors them for up to 24 hours, and queues a follow-up when they finish so Kimi can inspect the output and report the verified result. This follow-up is crash-recoverable and at least once; it is not an exactly-once external delivery guarantee. Long-lived tools that disable their timeout are not monitored this way.
 
@@ -63,7 +65,7 @@ Absolute Windows paths in prompts and summaries can be revealed in Explorer. Too
 
 ## Commands, skills, plugins, and subagents
 
-The capability center combines the live Kimi command catalog with local Kimi configuration:
+The capability center currently combines the live Kimi command catalog with local Kimi configuration. Other providers keep their native models, reasoning, permissions, and tool activity, but do not show a fabricated Kimi-style capability inventory.
 
 - User skills from `%KIMI_CODE_HOME%\skills` (default `%USERPROFILE%\.kimi-code\skills`) and `%USERPROFILE%\.agents\skills`
 - Project skills from `.kimi-code\skills` and `.agents\skills`
@@ -73,7 +75,7 @@ The capability center combines the live Kimi command catalog with local Kimi con
 
 A skill may be a folder containing `SKILL.md` or a flat Markdown file. Project definitions override same-named user definitions. The `$` menu searches this discovered inventory. It uses slash syntax only when the current Kimi command catalog advertises a matching command; otherwise it inserts `$skill-name` for Kimi to resolve.
 
-To install a local skill, open a project, choose a skill file or folder from that active workspace, and confirm the install. Kimi may request the same workspace-local install through the built-in `skill_install_local` tool, but the request never installs anything by itself. Kimi Code Desktop always opens its confirmation dialog, and only your explicit **Install skill** action invokes the installer. The tool accepts no URLs or downloads. The confirmed install revalidates the manifest, name, symlinks, path containment, size, depth, and entry count before staging the copy in the user Kimi skills directory. Existing skills are never overwritten. Start a new chat after installation so Kimi loads the new skill.
+To install a local skill, open a project, choose a skill file or folder from that active workspace, and confirm the install. Kimi may request the same workspace-local install through the built-in `skill_install_local` tool, but the request never installs anything by itself. Tasty always opens its confirmation dialog, and only your explicit **Install skill** action invokes the installer. The tool accepts no URLs or downloads. The confirmed install revalidates the manifest, name, symlinks, path containment, size, depth, and entry count before staging the copy in the user Kimi skills directory. Existing skills are never overwritten. Start a new chat after installation so Kimi loads the new skill.
 
 Use Kimi's own commands, such as `/mcp-config` and `/update-config`, when the current runtime advertises them. Plugin management is shown only when Kimi exposes a matching command; the desktop app does not invent `/plugins`. Only user MCP definitions from `%KIMI_CODE_HOME%\mcp.json` are attached. Repository-controlled MCP files are shown as **Review only** and never execute just because a project was opened. Sensitive MCP headers, environment values, arguments, and credentials stay in the server process and are never sent to the renderer.
 
@@ -103,7 +105,7 @@ Terminal commands run locally with the current Windows user's permissions in the
 
 ### App preview
 
-App preview accepts only local URLs whose hostname is exactly `localhost` or `127.0.0.1`. Kimi can open, resize, reload, and capture the preview through the built-in `kimi-desktop-preview` MCP.
+App preview accepts only local URLs whose hostname is exactly `localhost` or `127.0.0.1`. An agent can open, resize, reload, and capture the preview through Tasty's built-in preview MCP.
 
 Screenshot capture launches an isolated temporary Microsoft Edge profile. It does not reuse personal cookies, extensions, tabs, or logged-in sessions.
 
@@ -129,7 +131,7 @@ Confirm that the signed-in Kimi account has Kimi Code access, then run:
 kimi provider list
 ```
 
-Restart Kimi Code Desktop after `kimi update` so the app reloads the runtime catalog.
+Restart Tasty after `kimi update` so the app reloads the runtime catalog.
 
 ### A session no longer exists
 
@@ -149,4 +151,4 @@ If Kimi started a finite task with automatic notification, keep the chat availab
 
 ### Update installation fails
 
-Download the newest installer directly from [GitHub Releases](https://github.com/Leonxlnx/kimi-code-desktop/releases/latest) and install it over the existing version. User settings and chat history are stored separately from the application binary.
+Download the newest installer directly from [GitHub Releases](https://github.com/Leonxlnx/tasty-desktop/releases/latest) and install it over the existing version. User settings and chat history are stored separately from the application binary.

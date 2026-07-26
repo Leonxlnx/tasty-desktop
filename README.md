@@ -1,54 +1,65 @@
-# Kimi Code Desktop
+# Tasty
 
-An unofficial, open-source Windows desktop client and agent harness for [Kimi Code CLI](https://github.com/MoonshotAI/kimi-cli).
-
-Sign in with your own Kimi account, use your own plan and quota, open local projects, and run Kimi coding sessions through a native desktop interface.
+Tasty is an open-source Windows desktop harness for local coding agents. It gives Kimi, OpenAI Codex, Anthropic Claude, and Cursor one project-aware interface without moving provider credentials into the app.
 
 > [!IMPORTANT]
-> Kimi Code Desktop is a community project. It is not affiliated with, endorsed by, or supported by Moonshot AI.
+> Tasty is a community project. It is not affiliated with or endorsed by Moonshot AI, OpenAI, Anthropic, or Cursor.
 
 ## Download
 
-Download the latest signed updater build from [GitHub Releases](https://github.com/Leonxlnx/kimi-code-desktop/releases/latest).
+Download the latest signed Windows build from [GitHub Releases](https://github.com/Leonxlnx/tasty-desktop/releases/latest).
 
-Current version: `0.9.0`
+Current source version: `0.10.0`
 
 Requirements:
 
 - Windows 10 or Windows 11
 - Microsoft WebView2
-- A Kimi account with access to Kimi Code
+- At least one supported provider CLI and account
 
-The installer includes the local Node.js runtime used by the desktop orchestration service. End users do not need Node.js, pnpm, or Rust.
+The installer includes the local Node.js runtime used by Tasty. End users do not need Node.js, pnpm, or Rust.
+
+## Providers
+
+| Provider | Local runtime | Session transport | Sign-in owner |
+| --- | --- | --- | --- |
+| Kimi | Kimi Code CLI | Agent Client Protocol | Kimi Code CLI |
+| OpenAI Codex | Codex CLI | Codex app server | Codex CLI |
+| Anthropic Claude | Claude Code CLI | Streaming JSON | Claude Code CLI |
+| Cursor | Cursor Agent CLI | Agent Client Protocol | Cursor Agent CLI |
+
+Tasty detects installed CLIs, opens each provider's official installation guide when one is missing, and delegates sign-in and sign-out to that CLI. Passwords, API keys, OAuth tokens, and provider session stores never enter Tasty preferences.
+
+See [Provider runtimes](docs/PROVIDERS.md) for supported behavior and current limitations.
+
+## What it does
+
+- Opens local projects with multiple resumable chats per folder
+- Keeps standalone chats separate from project files and Git state
+- Creates goal-backed work with `/goal <objective>` and clears it with `/goal clear`
+- Creates nested side chats with `/side [title]`
+- Streams Markdown answers and plain-language progress while keeping commands and tool output compact and collapsible
+- Queues prompts with Enter and steers active work with Ctrl+Enter
+- Supports stop, edit and retry, copy, revert, rename, remove, and delete workflows
+- Shows runtime-provided models, reasoning effort, permissions, context, and Kimi quota without inventing unavailable controls
+- Projects subagent activity into an Agents panel and opens supported Codex subagent transcripts
+- Includes Git changes, terminal, file inspection, and an agent-controlled localhost preview panel
+- Discovers Kimi skills, plugins, MCP servers, and agent shortcuts from the local installation
+- Persists a compact local event projection for crash recovery and long sessions
+- Supports configurable theme, typography, density, panel placement, and panel sizing
+- Uses signed in-app updates with an explicit install and restart action
 
 ## Getting started
 
-1. Install and open Kimi Code Desktop.
-2. Complete onboarding. If Kimi Code CLI is missing, the app links to the official installation guide; it never downloads or executes a remote install script.
-3. Select **Begin sign-in** and approve the device code with your own Kimi account.
-4. Open a folder for project work or create a standalone chat.
+1. Install and open Tasty.
+2. Choose a provider during onboarding.
+3. Install its official CLI if Tasty reports that it is missing.
+4. Sign in through the provider CLI flow.
+5. Open a folder for project work or start a standalone chat.
 
-Authentication remains owned by the official Kimi Code CLI. The desktop app does not ship an account, copy OAuth tokens, or create a second credential store.
+Existing Kimi Code Desktop 0.9 installations upgrade in place. Tasty deliberately keeps the legacy Windows application identifier and local preference key so existing settings, chats, and updater trust continue to work.
 
-## Highlights
-
-- Project workspaces with multiple resumable chats per folder
-- Standalone chats that stay separate from project files and Git state
-- A continuous graphite workspace with compact navigation, a bottom-anchored transcript, and an explicit jump-to-latest control
-- Streaming Markdown summaries with chronological, collapsible work and tool activity
-- Prompt queueing, steering, cancellation, edit-and-retry, copy, and turn undo controls
-- Live Kimi model, reasoning, permission, context, and quota surfaces, including every effort value offered by the installed runtime
-- Discovered project and user skills, confirmed workspace-local skill installation, real subagent activity, and redacted MCP configuration
-- Persistent monitoring for finite Kimi background tasks that request automatic notification, followed by a queued verification report
-- Integrated Git changes, diff, stage, unstage, and commit workflows
-- Workspace terminal, file preview, and agent-controlled localhost app preview
-- Clickable local paths, durable failure reasons, and revealable runtime logs
-- Configurable theme, typography, density, layout, shortcuts, and panel sizes
-- Signed in-app updates with explicit install and restart controls
-
-See the [User Guide](docs/USER_GUIDE.md) for the full desktop workflow.
-
-## Keyboard shortcuts
+## Shortcuts
 
 | Action | Shortcut |
 | --- | --- |
@@ -56,42 +67,41 @@ See the [User Guide](docs/USER_GUIDE.md) for the full desktop workflow.
 | Toggle sidebar | `Ctrl+B` |
 | Open terminal | `Ctrl+J` |
 | Open Settings | `Ctrl+,` |
-| Send prompt | `Enter` |
+| Send or queue | `Enter` |
+| Steer active work | `Ctrl+Enter` |
 | Insert line break | `Shift+Enter` |
 
-The send shortcut can be changed in General settings.
+The idle send shortcut can be changed in General settings.
 
 ## Privacy and security
 
-- The local orchestration service binds only to `127.0.0.1`.
-- Packaged connections require a random per-launch token.
-- Kimi credentials remain in the official Kimi CLI home and are never read by the renderer.
-- File resources are workspace-bound, text-only, and size-limited.
-- Local skill installation accepts only validated files or bundles inside the active workspace and never overwrites an installed skill.
+- The orchestration service binds only to `127.0.0.1`.
+- Packaged renderer connections require a random per-launch token.
+- Provider credentials stay in each official CLI's own account store.
+- File access is workspace-bound, text-only, and size-limited.
+- Local skill installation accepts only validated files inside the active workspace and requires confirmation.
 - App preview accepts only `localhost` and `127.0.0.1` URLs.
-- Preview screenshots use an isolated temporary Microsoft Edge profile, never a person's normal browser profile.
-- No application telemetry is implemented.
+- Preview screenshots use an isolated temporary Edge profile, never the user's normal browser profile.
+- Tasty has no application telemetry.
 
 Read [SECURITY.md](SECURITY.md) before reporting a vulnerability.
 
 ## Development
 
-Requirements for contributors:
+Contributor requirements:
 
-- Node.js 22 or newer for development; Windows packaging uses the checksum-pinned Node.js v22.22.2 x64 runtime
+- Node.js 22 or newer
 - pnpm 10
 - Rust and Cargo
-- WebView2
-- Kimi Code CLI 0.29.1, the current verified reference runtime, or a compatible ACP version
-
-Install and start the native development app:
+- Microsoft WebView2
+- One provider CLI, or the deterministic fake ACP runtime
 
 ```powershell
 pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Use the deterministic fake ACP runtime when an account is not available:
+Use the fake runtime without a provider account:
 
 ```powershell
 $env:KIMI_FAKE='1'
@@ -101,43 +111,43 @@ pnpm dev
 Verify a change:
 
 ```powershell
+pnpm check:public
 pnpm typecheck
 pnpm test
 pnpm build:services
 git diff --check
 ```
 
-Create an unsigned local installer for development testing:
+Create an unsigned local installer:
 
 ```powershell
 pnpm bundle:local
 ```
 
-Published installers must be built by the tagged GitHub Actions release workflow. It produces the installer, updater signature, update manifest, and SHA-256 checksums with the repository's protected signing secrets.
+Published installers must be produced by the tagged GitHub Actions workflow. It creates the installer, updater signature, update manifest, and SHA-256 checksums with protected signing secrets.
 
-## Architecture
+## Repository
 
-This pnpm monorepo contains three applications:
+This pnpm monorepo contains:
 
-- `apps/desktop`: Tauri v2 shell and native Windows integration
-- `apps/web`: React projection layer and desktop UI
-- `apps/server`: ACP client, durable event projection, authentication broker, Git, terminal, preview, and update support
+- `apps/desktop`: Tauri v2 shell and Windows integration
+- `apps/web`: React UI and durable event projection
+- `apps/server`: provider runtimes, orchestration, Git, terminal, preview, and updates
 
-Kimi Code CLI remains the source of truth for models, permissions, sessions, commands, skills, subagents, MCP tools, authentication, and subscription usage. Read [Architecture](docs/ARCHITECTURE.md) for trust boundaries and data flow.
+Documentation:
 
-## Documentation
-
-- [User Guide](docs/USER_GUIDE.md)
+- [User guide](docs/USER_GUIDE.md)
+- [Provider runtimes](docs/PROVIDERS.md)
 - [Architecture](docs/ARCHITECTURE.md)
-- [Design System](docs/DESIGN.md)
+- [Design system](docs/DESIGN.md)
+- [T3 Code research notes](docs/T3_CODE_RESEARCH.md)
 - [Contributing](CONTRIBUTING.md)
-- [Security Policy](SECURITY.md)
-- [Release Process](docs/RELEASING.md)
-- [Kimi ACP Runtime Notes](docs/acp-runtime-notes.md)
-- [Third-party Notices](THIRD_PARTY_NOTICES.md)
+- [Security policy](SECURITY.md)
+- [Release process](docs/RELEASING.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## License and trademarks
 
 Source code is licensed under the [MIT License](LICENSE).
 
-Kimi, Moonshot AI, and their names, logos, and marks belong to their respective owners. They are not covered by the MIT license. Forks and redistributed builds must remain clearly unofficial and must not imply endorsement.
+Kimi, Moonshot AI, OpenAI, Codex, Anthropic, Claude, Cursor, and their names, logos, and marks belong to their respective owners. They are not covered by the MIT license. Forks and redistributed builds must remain clearly unofficial.

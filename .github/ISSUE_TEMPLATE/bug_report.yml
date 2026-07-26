@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible problem in Kimi Code Desktop.
+description: Report a reproducible problem in Tasty.
 title: "[Bug]: "
 labels: [bug]
 body:

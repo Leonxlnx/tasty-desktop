@@ -1,6 +1,6 @@
 # Design System
 
-Kimi Code Desktop uses a quiet, Windows-native interface designed for long coding sessions. Its default theme is a neutral graphite system: the application reads as one continuous workspace, not a collection of dark cards.
+Tasty uses a quiet, Windows-native interface designed for long coding sessions. Its default theme is a neutral graphite system: the application reads as one continuous workspace, not a collection of dark cards.
 
 ## Principles
 

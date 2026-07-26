@@ -1,8 +1,8 @@
 # Contributing
 
-Kimi Code Desktop is a Windows-first community client for the official Kimi Code CLI.
+Tasty is a Windows-first community harness for Kimi Code CLI, OpenAI Codex CLI, Anthropic Claude Code, and Cursor Agent CLI.
 
-Contributions should preserve the user's normal Kimi account, home, sessions, and configuration. Never add an app-owned credential store or move Kimi-owned behavior into a competing desktop implementation.
+Contributions must preserve each provider's normal account store, sessions, and configuration. Never add an app-owned credential store or duplicate provider-owned behavior in the desktop layer.
 
 ## Before you start
 

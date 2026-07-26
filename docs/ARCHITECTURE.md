@@ -1,6 +1,6 @@
 # Architecture
 
-Kimi Code Desktop is a local Windows harness around Kimi Code CLI. The desktop app owns presentation, durable local projection, and operating-system integrations. Kimi Code CLI remains authoritative for agent behavior and account-backed capabilities.
+Tasty is a local Windows harness for Kimi Code CLI, OpenAI Codex CLI, Anthropic Claude Code, and Cursor Agent CLI. The desktop app owns presentation, durable local projection, and operating-system integrations. Each installed provider runtime remains authoritative for agent behavior, authentication, models, and account-backed capabilities.
 
 ## Components
 
@@ -12,7 +12,7 @@ Release builds bundle the Node.js runtime and generated server entrypoint. Tauri
 
 ### React projection
 
-`apps/web` renders state received from the orchestration server. It does not read Kimi credentials, execute Git, spawn terminal processes, or call Kimi network APIs.
+`apps/web` renders state received from the orchestration server. It does not read provider credentials, execute Git, spawn terminal processes, or call provider network APIs.
 
 The renderer reconnects and requests a durable projection after a restart. Liveness-critical reads, session reattachment, and configuration calls have bounded waits; a late configuration effect still reconciles from durable events. Other side-effecting requests are not given a client timeout that could falsely report failure. Streaming chunks are presented under the turn that produced them and are compacted after completion.
 
@@ -20,7 +20,8 @@ The renderer reconnects and requests a durable projection after a restart. Liven
 
 `apps/server` owns:
 
-- ACP sessions and runtime configuration
+- ACP, Codex app-server, and Claude stream-json sessions
+- Provider detection, authentication delegation, and runtime configuration
 - Durable events and thread projections
 - Authentication delegation
 - Prompt queueing, steering, and cancellation
@@ -34,7 +35,18 @@ The renderer reconnects and requests a durable projection after a restart. Liven
 
 The server communicates with the renderer over a loopback WebSocket. Development accepts only the configured Vite origin. Packaged builds additionally require the random launch token provided by the Tauri shell.
 
-## Kimi ownership boundary
+## Provider ownership boundary
+
+Tasty normalizes four local transports behind one runtime interface:
+
+- Kimi through Agent Client Protocol
+- OpenAI Codex through the official Codex app server
+- Anthropic Claude through Claude Code streaming JSON
+- Cursor through Agent Client Protocol
+
+Threads persist their provider and cannot switch providers after creation. Authentication commands run through the matching CLI, and credentials remain in that CLI's account store. See [Provider runtimes](PROVIDERS.md) for the exact command and feature matrix.
+
+Kimi Code CLI is additionally the source of truth for its subscription quota, skills, plugins, MCP configuration, and native agent shortcuts.
 
 Kimi Code CLI is the source of truth for:
 
@@ -46,7 +58,7 @@ Kimi Code CLI is the source of truth for:
 - MCP behavior and Kimi configuration
 - Subscription quota
 
-The desktop app projects the runtime catalog returned by ACP. Kimi Code CLI `0.29.1` is the current reference runtime and can expose `Low`, `High`, and `Max` reasoning effort values. The app renders every offered value, accepts future values without a desktop release, and rejects unsupported values instead of simulating controls. A legacy binary value such as `Thinking On` is displayed as runtime-managed `Default`, not relabeled as `Max`.
+The desktop app projects the runtime catalog returned by each adapter. ACP and Codex options remain runtime-driven. The Claude adapter exposes only values accepted by its current CLI command line. Tasty rejects unsupported values instead of simulating controls.
 
 Skills are discovered from Kimi and Agents user directories plus their project-local equivalents. The built-in `coder`, `explore`, and `plan` actions are prompt shortcuts; the running-agent projection itself is built only from real Kimi `Agent` tool and background-task events.
 
@@ -103,9 +115,13 @@ The static update feed is deployed to GitHub Pages. Tauri verifies the updater s
 React UI
   <-> token-protected loopback WebSocket
 Node orchestration server
-  <-> Agent Client Protocol
-Installed Kimi Code CLI
-  <-> Kimi account and runtime services
+  <-> ACP | Codex app-server | Claude stream-json
+Installed provider CLI
+  <-> provider account and runtime services
 ```
 
 Native Git, terminal, files, and preview operations stay on the local Windows machine.
+
+## Upgrade compatibility
+
+Tasty keeps the legacy `com.kimicode.desktop` application identifier, single-instance mutex, and browser preference key during the 0.10 rebrand. These internal anchors preserve existing settings, local threads, updater identity, and mutual exclusion with 0.9. Product names, package scopes, server identity, artifacts, and documentation use Tasty.
