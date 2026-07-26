@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Tasty logo">
+  <rect x="40" y="40" width="944" height="944" rx="230" fill="#111111"/>
+  <path d="M220 285h274l100 145v340H430V430H220Z" fill="#F2F0EA"/>
+  <path d="M548 285h256v145H594l-46-64Z" fill="#F2F0EA"/>
+  <path d="m548 366 46 64h-46Z" fill="#E97962"/>
+</svg>
