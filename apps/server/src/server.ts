@@ -26,6 +26,7 @@ import { installKimiSkill, readKimiCapabilities, readKimiMcpServers } from "./ki
 import { createDesktopPreviewMcpServer, desktopPreviewMcpName, isPreviewBridgeRequest, normalizeDesktopPreviewUrl } from "./desktop-preview.js";
 import { readRecoverableJson, writeRecoverableJson } from "./recoverable-json.js";
 import { providerDescriptors, providerName, requireProviderBinary, resolveProviderBinary } from "./provider-runtime.js";
+import { ProviderAuthService, type ProviderAuthEvent } from "./provider-auth.js";
 import {
   BackgroundTaskMonitor,
   MAX_ACTIVE_BACKGROUND_TASKS,
@@ -43,9 +44,9 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("env.confirmUpdate"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("env.cancelUpdate"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("env.installCli"), params: z.object({}).default({}) }),
-  z.object({ id, method: z.literal("auth.beginLogin"), params: z.object({}).default({}) }),
-  z.object({ id, method: z.literal("auth.cancel"), params: z.object({}).default({}) }),
-  z.object({ id, method: z.literal("auth.logout"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("auth.beginLogin"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi") }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("auth.cancel"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi") }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("auth.logout"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi") }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("providers.list"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("threads.list"), params: z.object({ cwd: z.string().optional(), provider: z.enum(["kimi", "codex", "claude", "cursor"]).optional() }).default({}) }),
   z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi"), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
@@ -163,6 +164,7 @@ let configDefaultsLive = false;
 let updateLease: UpdateLease | undefined;
 let pendingSendAdmissions = 0;
 const auth = new AuthService(runtimeBinaryDescription(), process.env.KIMI_CODE_HOME, (event) => void handleAuthEvent(event));
+const providerAuth = new ProviderAuthService((event) => void handleProviderAuthEvent(event));
 
 await engine.open();
 await loadQueues();
@@ -381,17 +383,18 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "auth.beginLogin") {
-      reply(socket, request.id, auth.beginLogin());
+      reply(socket, request.id, request.params.provider === "kimi" ? auth.beginLogin() : providerAuth.beginLogin(request.params.provider));
       return;
     }
     if (request.method === "auth.cancel") {
-      auth.cancel();
-      reply(socket, request.id, auth.status());
+      if (request.params.provider === "kimi") auth.cancel();
+      else providerAuth.cancel(request.params.provider);
+      reply(socket, request.id, request.params.provider === "kimi" ? auth.status() : await providerAuth.status(request.params.provider));
       return;
     }
     if (request.method === "auth.logout") {
-      await resetRuntime();
-      reply(socket, request.id, auth.logout());
+      await resetRuntime(request.params.provider);
+      reply(socket, request.id, request.params.provider === "kimi" ? auth.logout() : await providerAuth.logout(request.params.provider));
       return;
     }
     if (request.method === "preview.agentCommand") {
@@ -458,10 +461,10 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "providers.list") {
-      reply(socket, request.id, { providers: providerDescriptors().map((provider) => ({
-        ...provider,
-        runtimeReady: Boolean(runtimes.get(provider.id)?.isOpen()),
-      })) });
+      const providers = await Promise.all(providerDescriptors().map(async (provider) => provider.id === "kimi"
+        ? { ...provider, provider: "kimi" as const, ...auth.status(), runtimeReady: Boolean(runtimes.get("kimi")?.isOpen()) }
+        : { ...provider, ...await providerAuth.status(provider.id), runtimeReady: Boolean(runtimes.get(provider.id)?.isOpen()) }));
+      reply(socket, request.id, { providers });
       return;
     }
     if (request.method === "skills.install") {
@@ -1393,6 +1396,7 @@ async function captureCheckpoint(threadId: string, turnId: string, phase: Checkp
 
 async function shutdown(): Promise<void> {
   auth.close();
+  providerAuth.close();
   await terminal.close();
   backgroundTasks.close();
   for (const threadId of backgroundReportRetryTimers.keys()) clearBackgroundReportRetry(threadId);
@@ -1441,6 +1445,11 @@ async function loadQueues(): Promise<void> {
   } catch (error) {
     console.error(`[queue] Pending queue recovery failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+async function handleProviderAuthEvent(event: ProviderAuthEvent): Promise<void> {
+  if (event.type === "complete") await resetRuntime(event.provider);
+  pushAll("provider.authStatus", { ...await providerAuth.status(event.provider), event });
 }
 
 function persistQueues(): Promise<void> {
