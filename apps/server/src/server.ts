@@ -27,6 +27,7 @@ import { createDesktopPreviewMcpServer, desktopPreviewMcpName, isPreviewBridgeRe
 import { readRecoverableJson, writeRecoverableJson } from "./recoverable-json.js";
 import { providerDescriptors, providerName, requireProviderBinary, resolveProviderBinary } from "./provider-runtime.js";
 import { ProviderAuthService, type ProviderAuthEvent } from "./provider-auth.js";
+import { DiagnosticJournal, redactDiagnosticText, type DiagnosticLevel } from "./diagnostics.js";
 import {
   BackgroundTaskMonitor,
   MAX_ACTIVE_BACKGROUND_TASKS,
@@ -98,6 +99,8 @@ const requestSchema = z.discriminatedUnion("method", [
     }),
   ]) }),
   z.object({ id, method: z.literal("usage.quota"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("diagnostics.snapshot"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("diagnostics.export"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("capabilities.list"), params: z.object({ cwd: z.string().min(1).optional() }).default({}) }),
   z.object({ id, method: z.literal("skills.install"), params: z.object({ cwd: z.string().min(1), source: z.string().min(1) }) }),
 ]);
@@ -121,6 +124,7 @@ await mkdir(configuredDataHome, { recursive: true });
 await mkdir(configuredKimiHome, { recursive: true });
 const dataHome = await realpath(configuredDataHome);
 const kimiHome = await realpath(configuredKimiHome);
+const diagnostics = new DiagnosticJournal([homedir(), dataHome, kimiHome]);
 const quotaProbeCwd = join(dataHome, "runtime", "quota-probe");
 const standaloneChatCwd = join(dataHome, "runtime", "chats");
 const configProbeCwd = join(dataHome, "runtime", "config-probe");
@@ -131,7 +135,7 @@ const previewBridgeSockets = new WeakSet<WebSocket>();
 const socketSeq = new WeakMap<WebSocket, number>();
 const engine = new OrchestrationEngine(new EventStore(join(dataHome, "events.jsonl")));
 const ingestion = new RuntimeIngestion(engine, (error) => {
-  pushAll("server.diagnostics", { type: "diagnostic", level: "error", message: error instanceof Error ? error.message : String(error) });
+  emitDiagnostic("error", error, "runtime-ingestion");
 });
 const checkpointReactor = new CheckpointReactor(findGitBinary(), dataHome);
 const configDefaults = new ConfigDefaults(join(dataHome, "runtime-defaults.json"));
@@ -148,7 +152,7 @@ type QueuedTurn = {
   origin: "user" | "background_task";
 };
 const turnQueues = new Map<string, QueuedTurn[]>();
-type QueueAdmission = { queued: QueuedTurn; cancelled: boolean; restartRequested: boolean };
+type QueueAdmission = { queued: QueuedTurn; cancelled: boolean; restartRequested: boolean; turnId?: string };
 const queueAdmissions = new Map<string, QueueAdmission>();
 const backgroundReportRetryTimers = new Map<string, { dueAt: number; timer: ReturnType<typeof setTimeout> }>();
 const backgroundReportRetryBaseMs = Math.max(10, Math.min(30_000, Number(process.env.KIMI_BACKGROUND_REPORT_RETRY_BASE_MS) || 2_000));
@@ -182,7 +186,7 @@ const backgroundTasks = new BackgroundTaskMonitor({
   pending: pendingBackgroundTasks,
   finished: finishBackgroundTask,
   onError: (error) => {
-    pushAll("server.diagnostics", { type: "diagnostic", level: "error", message: `Background task monitor failed: ${error instanceof Error ? error.message : String(error)}` });
+    emitDiagnostic("error", `Background task monitor failed: ${error instanceof Error ? error.message : String(error)}`, "background-tasks");
   },
 });
 await queueFinishedBackgroundTaskReports();
@@ -196,6 +200,10 @@ function sendPush(socket: WebSocket, channel: string, payload: unknown): void {
 
 function pushAll(channel: string, payload: unknown): void {
   for (const socket of sockets) if (socket.readyState === socket.OPEN) sendPush(socket, channel, payload);
+}
+
+function emitDiagnostic(level: DiagnosticLevel, message: unknown, source?: string): void {
+  pushAll("server.diagnostics", { type: "diagnostic", ...diagnostics.record(level, message, source) });
 }
 
 function reply(socket: WebSocket, requestId: string | number, result?: unknown, error?: unknown): void {
@@ -241,7 +249,7 @@ async function startRuntime(provider: ProviderId): Promise<AgentRuntime> {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`[${provider}:event] ${message}`);
-        pushAll("server.diagnostics", { type: "diagnostic", level: "error", message: `Runtime event persistence failed: ${message.slice(0, 2_000)}` });
+        emitDiagnostic("error", `Runtime event persistence failed: ${message}`, `${provider}-runtime`);
         throw error;
       }
     },
@@ -291,7 +299,7 @@ async function startRuntime(provider: ProviderId): Promise<AgentRuntime> {
 async function onRuntimeEvent(provider: ProviderId, event: RuntimeEvent): Promise<void> {
   if (event.type === "diagnostic") {
     (event.level === "error" ? console.error : console.info)(`[${provider}:${event.level}] ${event.message}`);
-    if (event.level === "error") pushAll("server.diagnostics", event);
+    if (event.level === "error") emitDiagnostic("error", event.message, `${provider}-runtime`);
     return;
   }
   await ingestion.ingest(event);
@@ -450,6 +458,24 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       reply(socket, request.id, await quotaRead);
       return;
     }
+    if (request.method === "diagnostics.snapshot") {
+      reply(socket, request.id, { diagnostics: diagnostics.snapshot(), blockers: updateBlockers() });
+      return;
+    }
+    if (request.method === "diagnostics.export") {
+      const threads = engine.threads();
+      const path = await diagnostics.export(dataHome, {
+        platform: process.platform,
+        arch: process.arch,
+        node: process.version,
+        threadCount: threads.length,
+        activeTurns: threads.filter((thread) => thread.running).length,
+        queuedTurns: [...turnQueues.values()].reduce((total, queue) => total + queue.length, 0),
+        runtimeProviders: [...runtimes.entries()].filter(([, runtime]) => runtime.isOpen()).map(([provider]) => provider).join(",") || "none",
+      });
+      reply(socket, request.id, { path });
+      return;
+    }
     if (request.method === "capabilities.list") {
       const capabilities = await readKimiCapabilities(kimiHome, request.params.cwd);
       reply(socket, request.id, { ...capabilities, mcpServers: [{
@@ -529,7 +555,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         try {
           runtimeSessions = (await acp.listSessions(request.params.cwd)).sessions.filter((session) => !isInternalProbeSession(session)).map(classifyRuntimeSession);
         } catch (error) {
-          pushAll("server.diagnostics", { type: "diagnostic", level: "error", message: error instanceof Error ? error.message : String(error) });
+          emitDiagnostic("error", error, "session-list");
         }
       }
       const threads = await Promise.all(engine.threads().map(async (thread) => {
@@ -863,24 +889,17 @@ async function resolveThreadApprovals(threadId: string): Promise<void> {
 async function cancelThreadTurn(acp: AgentRuntime | undefined, thread: ThreadProjection): Promise<void> {
   const turnId = thread.activeTurnId;
   if (!turnId) return;
+  await engine.append(thread.threadId, { type: "TurnPhaseChanged", payload: { phase: "stopping", turnId } });
   if (acp) {
     try {
       await acp.cancel(thread.sessionId);
     } catch (error) {
-      pushAll("server.diagnostics", {
-        type: "diagnostic",
-        level: "error",
-        message: `${providerName(thread.provider)} cancel notification failed; reconciling locally: ${error instanceof Error ? error.message : String(error)}`,
-      });
+      emitDiagnostic("error", `${providerName(thread.provider)} cancel notification failed; reconciling locally: ${error instanceof Error ? error.message : String(error)}`, "turn-cancel");
     }
   }
   const drained = await ingestion.flushWithin(thread.sessionId, 250);
   if (!drained) {
-    pushAll("server.diagnostics", {
-      type: "diagnostic",
-      level: "warning",
-      message: "Stopped locally while the final agent output finishes saving.",
-    });
+    emitDiagnostic("warning", "Stopped locally while the final agent output finishes saving.", "turn-cancel");
   }
   if (engine.thread(thread.threadId)?.activeTurnId !== turnId) return;
   await engine.append(thread.threadId, { type: "TurnCancelled", payload: { turnId } });
@@ -929,7 +948,12 @@ async function runNextQueued(threadId: string): Promise<void> {
   try {
     await startQueuedTurn(threadId, admission);
   } catch (error) {
-    pushAll("server.diagnostics", { type: "diagnostic", level: "error", message: error instanceof Error ? error.message : String(error) });
+    const message = redactDiagnosticText(error instanceof Error ? error.message : String(error), [homedir(), dataHome, kimiHome]);
+    const current = engine.thread(threadId);
+    if (!current?.running && current?.lifecycle.queuedId === admission.queued.queuedId) {
+      await engine.append(threadId, { type: "TurnPhaseChanged", payload: { phase: "blocked", queuedId: admission.queued.queuedId, ...(admission.turnId ? { turnId: admission.turnId } : {}), error: message } });
+    }
+    emitDiagnostic("error", message, "turn-admission");
   } finally {
     if (queueAdmissions.get(threadId) === admission) queueAdmissions.delete(threadId);
     if (admission.restartRequested && !engine.thread(threadId)?.running && (turnQueues.get(threadId)?.length ?? 0) > 0) {
@@ -942,6 +966,9 @@ async function startQueuedTurn(threadId: string, admission: QueueAdmission): Pro
   const { queued } = admission;
   const pendingThread = engine.thread(threadId);
   if (!pendingThread) throw new Error(`Unknown thread ${threadId}`);
+  const turnId = crypto.randomUUID();
+  admission.turnId = turnId;
+  await engine.append(threadId, { type: "TurnPhaseChanged", payload: { phase: "preparing", turnId, queuedId: queued.queuedId } });
   await waitForSessionConfig(pendingThread.sessionId);
   const acp = await ensureRuntime(pendingThread.provider);
   const thread = engine.thread(threadId);
@@ -949,7 +976,6 @@ async function startQueuedTurn(threadId: string, admission: QueueAdmission): Pro
   if (thread.running) throw new Error("A turn is already running");
   const configOptions = await ensureThreadSession(acp, thread);
   if (!hasConfiguredModel(configOptions)) throw new Error(`${providerName(thread.provider)} has no configured model. Complete provider sign-in, then retry.`);
-  const turnId = crypto.randomUUID();
   const prompt: ContentBlock[] = [{ type: "text", text: queued.text }];
   const resourcePaths: string[] = [];
   for (const mention of queued.mentions) {
@@ -959,7 +985,10 @@ async function startQueuedTurn(threadId: string, admission: QueueAdmission): Pro
   }
   for (const image of queued.images) prompt.push({ type: "image", data: image.data, mimeType: image.mimeType });
   const before = await captureCheckpoint(thread.threadId, turnId, "before", thread.cwd);
-  if (!admitQueuedTurn(threadId, admission)) return;
+  if (!admitQueuedTurn(threadId, admission)) {
+    if (engine.thread(threadId)?.lifecycle.turnId === turnId) await engine.append(threadId, { type: "TurnPhaseChanged", payload: { phase: "idle", turnId, queuedId: queued.queuedId } });
+    return;
+  }
   await engine.append(thread.threadId, { type: "TurnStarted", payload: {
     turnId,
     text: queued.text,
@@ -993,6 +1022,7 @@ async function startQueuedTurn(threadId: string, admission: QueueAdmission): Pro
     if (!engine.thread(thread.threadId)) return;
     await ingestion.flush(thread.sessionId);
     await registerBackgroundTasks(thread.threadId, thread.sessionId, turnId);
+    if (engine.thread(thread.threadId)?.activeTurnId === turnId) await engine.append(thread.threadId, { type: "TurnPhaseChanged", payload: { phase: "checkpointing", turnId, queuedId: queued.queuedId } });
     const after = await captureCheckpoint(thread.threadId, turnId, "after", thread.cwd, before);
     const localUsage = result.usage ? undefined : await readLatestKimiUsage(kimiHome, thread.sessionId);
     if (engine.thread(thread.threadId)?.activeTurnId !== turnId) {
@@ -1013,7 +1043,7 @@ async function startQueuedTurn(threadId: string, admission: QueueAdmission): Pro
     pushAll("receipt", { type: "turn.quiescent", threadId: thread.threadId, turnId });
     requestQueueRestart(thread.threadId, admission);
   }).catch(async (error: Error) => {
-    pushAll("server.diagnostics", { type: "diagnostic", level: "error", message: error.message });
+    emitDiagnostic("error", error.message, "turn-runtime");
     await ingestion.flush(thread.sessionId);
     await registerBackgroundTasks(thread.threadId, thread.sessionId, turnId);
     const current = engine.thread(thread.threadId);
@@ -1216,11 +1246,7 @@ async function failBackgroundTaskReport(threadId: string, queuedId: string, erro
   publishQueue(threadId);
   await engine.append(threadId, { type: "BackgroundTaskReportCancelled", payload: { taskId: task.taskId, failure } });
   clearBackgroundReportRetry(threadId);
-  pushAll("server.diagnostics", {
-    type: "diagnostic",
-    level: "error",
-    message: `Background report failed after ${task.reportAttemptCount ?? maxBackgroundReportAttempts} attempts. Its output is preserved; send a new message to retry manually.`,
-  });
+  emitDiagnostic("error", `Background report failed after ${task.reportAttemptCount ?? maxBackgroundReportAttempts} attempts. Its output is preserved; send a new message to retry manually.`, "background-report");
 }
 
 async function requeueBackgroundTaskReport(threadId: string, queuedId: string): Promise<void> {
@@ -1418,7 +1444,7 @@ async function captureCheckpoint(threadId: string, turnId: string, phase: Checkp
     pushAll("receipt", { type: "checkpoint.captured", threadId, turnId, phase });
     return checkpoint;
   } catch (error) {
-    pushAll("server.diagnostics", { type: "diagnostic", level: "error", message: `Checkpoint failed: ${error instanceof Error ? error.message : String(error)}` });
+    emitDiagnostic("error", `Checkpoint failed: ${error instanceof Error ? error.message : String(error)}`, "checkpoint");
     return undefined;
   }
 }

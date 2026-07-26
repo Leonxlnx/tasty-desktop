@@ -15,6 +15,8 @@ export type ThreadGoal = {
   updatedAt: string;
 };
 export type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: Usage };
+export type TurnPhase = "idle" | "preparing" | "running" | "stopping" | "checkpointing" | "blocked" | "failed";
+export type TurnLifecycle = { phase: TurnPhase; updatedAt: string; turnId?: string; queuedId?: string; error?: string };
 export type BackgroundTask = {
   taskId: string;
   queuedId: string;
@@ -60,6 +62,7 @@ export type ThreadProjection = {
   running: boolean;
   activeTurnId: string | undefined;
   stopReason: string | undefined;
+  lifecycle: TurnLifecycle;
   turns: TurnRecord[];
   messages: Message[];
   activity: ActivityEntry[];
@@ -82,6 +85,7 @@ export type DomainEvent =
   | { type: "ThreadGoalSet"; payload: { objective: string; status?: ThreadGoal["status"] } }
   | { type: "ThreadGoalCleared"; payload: Record<string, never> }
   | { type: "ThreadDeleted"; payload: Record<string, never> }
+  | { type: "TurnPhaseChanged"; payload: { phase: TurnPhase; turnId?: string; queuedId?: string; error?: string } }
   | { type: "TurnStarted"; payload: { turnId: string; text: string; origin?: "user" | "background_task"; sourceQueuedId?: string; title?: string; resources?: string[]; images?: Array<{ name: string; mimeType: string }> } }
   | { type: "MessageAppended"; payload: Message }
   | { type: "MessageDelta"; payload: Message }
@@ -122,6 +126,9 @@ export class OrchestrationEngine {
     for (const thread of [...this.#threads.values()].filter((candidate) => candidate.running && candidate.activeTurnId)) {
       for (const approval of thread.approvals) await this.append(thread.threadId, { type: "ApprovalResolved", payload: { requestId: approval.requestId } });
       await this.append(thread.threadId, { type: "TurnCancelled", payload: { turnId: thread.activeTurnId! } });
+    }
+    for (const thread of [...this.#threads.values()].filter((candidate) => !candidate.running && ["preparing", "stopping", "checkpointing", "running"].includes(candidate.lifecycle.phase))) {
+      await this.append(thread.threadId, { type: "TurnPhaseChanged", payload: { phase: "idle", ...(thread.lifecycle.turnId ? { turnId: thread.lifecycle.turnId } : {}), ...(thread.lifecycle.queuedId ? { queuedId: thread.lifecycle.queuedId } : {}) } });
     }
     await this.compact();
   }
@@ -221,6 +228,7 @@ export class OrchestrationEngine {
         running: false,
         activeTurnId: undefined,
         stopReason: undefined,
+        lifecycle: { phase: "idle", updatedAt: event.createdAt },
         turns: [],
         messages: [],
         activity: [],
@@ -269,10 +277,35 @@ export class OrchestrationEngine {
       case "ThreadGoalCleared":
         delete thread.goal;
         break;
-      case "TurnStarted":
+      case "TurnPhaseChanged": {
+        const turnId = typeof payload.turnId === "string" ? payload.turnId : undefined;
+        const queuedId = typeof payload.queuedId === "string" ? payload.queuedId : undefined;
+        const current = thread.lifecycle;
+        const terminal = payload.phase === "idle" || payload.phase === "blocked" || payload.phase === "failed";
+        if (payload.phase !== "preparing" && !terminal && turnId && thread.activeTurnId !== turnId) break;
+        if (terminal && current.turnId && turnId && current.turnId !== turnId) break;
+        thread.lifecycle = {
+          phase: payload.phase as TurnPhase,
+          updatedAt: event.createdAt,
+          ...(turnId ? { turnId } : {}),
+          ...(queuedId ? { queuedId } : {}),
+          ...(typeof payload.error === "string" && payload.error ? { error: boundedText(payload.error, 2_000) } : {}),
+        };
+        break;
+      }
+      case "TurnStarted": {
+        const queuedId = typeof payload.sourceQueuedId === "string"
+          ? payload.sourceQueuedId
+          : thread.lifecycle.turnId === payload.turnId ? thread.lifecycle.queuedId : undefined;
         thread.running = true;
         thread.activeTurnId = String(payload.turnId);
         thread.stopReason = undefined;
+        thread.lifecycle = {
+          phase: "running",
+          updatedAt: event.createdAt,
+          turnId: String(payload.turnId),
+          ...(queuedId ? { queuedId } : {}),
+        };
         if (typeof payload.title === "string" && payload.title) thread.title = payload.title;
         thread.turns.push({ turnId: String(payload.turnId), startedAt: event.createdAt });
         thread.messages.push({
@@ -285,6 +318,7 @@ export class OrchestrationEngine {
         });
         thread.plan = [];
         break;
+      }
       case "MessageAppended":
         if ((payload as Message).role === "thought") appendThoughtActivity(thread, payload as Message, event);
         else appendMessage(thread, payload as Message, event);
@@ -337,9 +371,16 @@ export class OrchestrationEngine {
         thread.approvals = thread.approvals.filter((approval) => approval.requestId !== payload.requestId);
         break;
       case "TurnCompleted":
-        thread.running = false;
-        thread.stopReason = String(payload.stopReason);
-        thread.activeTurnId = undefined;
+        if (thread.activeTurnId === payload.turnId) {
+          thread.running = false;
+          thread.stopReason = String(payload.stopReason);
+          thread.activeTurnId = undefined;
+          thread.lifecycle = {
+            phase: String(payload.stopReason) === "error" ? "failed" : "idle",
+            updatedAt: event.createdAt,
+            ...(String(payload.stopReason) === "error" && typeof payload.error === "string" ? { error: boundedText(payload.error, 2_000) } : {}),
+          };
+        }
         if (payload.usage) thread.usage.tokens = payload.usage as Usage;
         Object.assign(thread.turns.findLast((turn) => turn.turnId === payload.turnId) ?? {}, {
           completedAt: event.createdAt,
@@ -350,9 +391,12 @@ export class OrchestrationEngine {
         finishActivity(thread, String(payload.turnId), event.createdAt, String(payload.stopReason) === "error");
         break;
       case "TurnCancelled":
-        thread.running = false;
-        thread.stopReason = "cancelled";
-        thread.activeTurnId = undefined;
+        if (thread.activeTurnId === payload.turnId) {
+          thread.running = false;
+          thread.stopReason = "cancelled";
+          thread.activeTurnId = undefined;
+          thread.lifecycle = { phase: "idle", updatedAt: event.createdAt };
+        }
         Object.assign(thread.turns.findLast((turn) => turn.turnId === payload.turnId) ?? {}, { completedAt: event.createdAt, stopReason: "cancelled" });
         finishActivity(thread, String(payload.turnId), event.createdAt, true);
         break;
@@ -589,6 +633,11 @@ export function compactToolCall(tool: ToolCall): ToolCall {
 function compactThread(thread: ThreadProjection): ThreadProjection {
   const compacted = cloneThread(thread);
   compacted.provider ??= "kimi";
+  compacted.lifecycle ??= {
+    phase: compacted.running ? "running" : compacted.stopReason === "error" ? "failed" : "idle",
+    updatedAt: compacted.updatedAt,
+    ...(compacted.activeTurnId ? { turnId: compacted.activeTurnId } : {}),
+  };
   compacted.backgroundTasks ??= [];
   compacted.messages = compacted.messages.filter((message) => message.role !== "thought");
   compacted.activity = compacted.activity.map((entry) => ({ ...entry, text: boundedText(entry.text, 4_000) }));

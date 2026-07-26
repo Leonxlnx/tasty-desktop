@@ -79,6 +79,7 @@ describe("update progress", () => {
     const idle = { running: false, queue: [], approvals: [] };
     expect(hasBlockingWork([idle])).toBe(false);
     expect(hasBlockingWork([idle, { ...idle, running: true }])).toBe(true);
+    expect(hasBlockingWork([idle, { ...idle, lifecycle: { phase: "preparing", updatedAt: "2026-07-27T00:00:00.000Z" } } as never])).toBe(true);
     expect(hasBlockingWork([idle, { ...idle, queue: [{ queuedId: "q" }] } as never])).toBe(true);
     expect(hasBlockingWork([idle, { ...idle, approvals: [{ requestId: "approval" }] } as never])).toBe(true);
     expect(hasBlockingWork([idle, { ...idle, backgroundTasks: [{ status: "running" }] } as never])).toBe(true);
@@ -167,6 +168,18 @@ describe("turn activity", () => {
     ];
     const updated = applyEvents([base], events as never)[0]!;
     expect(updated.messages.filter((message) => message.role === "assistant").map((message) => message.text)).toEqual(["Inspecting.", "Applying."]);
+  });
+
+  it("projects lifecycle phases and does not let stale completions stop current work", () => {
+    const base = normalizeThread({ threadId: "thread", sessionId: "session", cwd: "E:/work", title: "Work", createdAt: "2026-07-27T00:00:00.000Z" } as never);
+    const updated = applyEvents([base], [
+      { threadId: "thread", seq: 1, type: "TurnPhaseChanged", payload: { phase: "preparing", turnId: "turn-1", queuedId: "queue-1" }, createdAt: "2026-07-27T00:00:01.000Z" },
+      { threadId: "thread", seq: 2, type: "TurnStarted", payload: { turnId: "turn-1", text: "Go" }, createdAt: "2026-07-27T00:00:02.000Z" },
+      { threadId: "thread", seq: 3, type: "TurnCompleted", payload: { turnId: "stale-turn", stopReason: "end_turn" }, createdAt: "2026-07-27T00:00:03.000Z" },
+      { threadId: "thread", seq: 4, type: "TurnPhaseChanged", payload: { phase: "checkpointing", turnId: "turn-1", queuedId: "queue-1" }, createdAt: "2026-07-27T00:00:04.000Z" },
+    ] as never)[0]!;
+    expect(updated).toMatchObject({ running: true, activeTurnId: "turn-1", lifecycle: { phase: "checkpointing", turnId: "turn-1", queuedId: "queue-1" } });
+    expect(projectTurns(updated)[0]).toMatchObject({ running: true, phase: "checkpointing" });
   });
 });
 

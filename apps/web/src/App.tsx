@@ -40,10 +40,12 @@ type QueuedPrompt = { queuedId: string; text: string; mode: "queue" | "steer"; c
 type DesktopPreviewCommand = { action: "open" | "resize"; url?: string; panelWidth?: number; viewportWidth?: number; viewportHeight?: number };
 type SkillInstallRequest = { cwd: string; source: string; name: string };
 type ProviderId = "kimi" | "codex" | "claude" | "cursor";
+type TurnPhase = "idle" | "preparing" | "running" | "stopping" | "checkpointing" | "blocked" | "failed";
+type TurnLifecycle = { phase: TurnPhase; updatedAt: string; turnId?: string; queuedId?: string; error?: string };
 type ThreadGoal = { objective: string; updatedAt: string };
 type Thread = {
   threadId: string; sessionId: string; provider: ProviderId; parentThreadId?: string; goal?: ThreadGoal; cwd: string; kind: "project" | "chat"; title: string; createdAt: string; updatedAt: string; running: boolean;
-  activeTurnId: string | undefined; stopReason: string | undefined; turns: TurnRecord[]; messages: Message[]; plan: Array<{ content: string; status: string }>;
+  activeTurnId: string | undefined; stopReason: string | undefined; lifecycle: TurnLifecycle; turns: TurnRecord[]; messages: Message[]; plan: Array<{ content: string; status: string }>;
   activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; configOptions: ConfigOption[]; commands: AvailableCommand[]; modeId: string | undefined; checkpoints: Checkpoint[]; backgroundTasks: BackgroundTask[]; usage?: Usage; queue: QueuedPrompt[];
 };
 type StoredEvent = { threadId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string };
@@ -90,7 +92,7 @@ type ConfigUpdate = { targetKey: string; configId: string; requestId: number };
 type UpdateStatus = { phase: "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error"; version?: string; currentVersion?: string; percent?: number; message?: string };
 type RailView = "git" | "terminal" | "preview" | "agents";
 type AppMenu = "file" | "edit" | "view" | "help";
-type SettingsCategory = "general" | "appearance" | "layout" | "account" | "usage" | "updates" | "about";
+type SettingsCategory = "general" | "appearance" | "layout" | "account" | "usage" | "updates" | "diagnostics" | "about";
 type TerminalSessionInfo = { sessionId: string; cwd: string; shell: string };
 type TerminalEvent = { sessionId: string; type: "stdout" | "stderr" | "exit"; text?: string; code?: number | null };
 type TerminalEntry = { id: number; kind: "command" | "stdout" | "stderr" | "system"; text: string };
@@ -177,13 +179,17 @@ export function shouldScheduleRuntimeRecovery(connection: ConnectionState, sched
 }
 
 export function hasBlockingWork(
-  threads: Array<Pick<Thread, "running" | "queue" | "approvals"> & Partial<Pick<Thread, "backgroundTasks">>>,
+  threads: Array<Pick<Thread, "running" | "queue" | "approvals"> & Partial<Pick<Thread, "lifecycle" | "backgroundTasks">>>,
   draftSending = false,
 ): boolean {
-  return draftSending || threads.some((thread) => thread.running
+  return draftSending || threads.some((thread) => isThreadBusy(thread)
     || thread.queue.length > 0
     || thread.approvals.length > 0
     || thread.backgroundTasks?.some((task) => !task.reportDeliveredAt && !task.reportCancelledAt));
+}
+
+export function isThreadBusy(thread: Pick<Thread, "running"> & Partial<Pick<Thread, "lifecycle">>): boolean {
+  return thread.running || ["preparing", "running", "stopping", "checkpointing"].includes(thread.lifecycle?.phase ?? "idle");
 }
 
 export function configTargetKey(
@@ -364,7 +370,8 @@ export function App() {
   const configBusyId = configTarget ? configUpdating[configTarget.key]?.configId : undefined;
   const composerTargetKind = activeThread?.kind ?? draftChat?.kind;
   const composerSubmitReady = runtimeReady && composerCanSubmit(navView, composerTargetKind, configMutationPending);
-  const primaryComposerAction = composerPrimaryAction(Boolean(activeThread?.running), Boolean(prompt.trim()));
+  const activeThreadBusy = activeThread ? isThreadBusy(activeThread) : false;
+  const primaryComposerAction = composerPrimaryAction(activeThreadBusy, Boolean(prompt.trim()));
   const layoutSidebarWidth = preferences.sidebarCollapsed ? collapsedSidebarWidth : preferences.sidebarWidth;
   const renderedRailWidth = effectiveRailWidth(preferences.railWidth, viewportWidth, layoutSidebarWidth);
   const previewPanelMode = renderedRailWidth >= 1_080 ? "Wide" : renderedRailWidth >= 760 ? "Desktop" : "Compact";
@@ -648,6 +655,15 @@ export function App() {
   }, [cwd, navView, runtimeReady]);
 
   const call = useCallback((method: string, params: Record<string, unknown> = {}) => supervisor.current?.request(method, params) ?? Promise.reject(new Error("Server is not connected")), []);
+  const exportDiagnostics = useCallback(async () => {
+    try {
+      const result = await call("diagnostics.export") as { path: string };
+      setDiagnostic("Support bundle exported. It contains redacted runtime diagnostics, not prompts or credentials.");
+      await revealLocalPath(result.path);
+    } catch (error) {
+      setDiagnostic(`Could not export support bundle: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [call, revealLocalPath, setDiagnostic]);
   const refreshProviders = useCallback(async () => {
     const result = await call("providers.list") as { providers: ProviderState[] };
     setProviders(result.providers.map((provider) => ({ ...provider, id: normalizeProvider(provider.id ?? provider.provider), provider: normalizeProvider(provider.provider ?? provider.id) })));
@@ -1106,7 +1122,7 @@ export function App() {
       return;
     }
     const mentions = [...text.matchAll(/@\{([^}]+)\}/g)].map((match) => match[1]!);
-    const mode = activeThread?.running ? requestedMode : "queue";
+    const mode = activeThreadBusy ? requestedMode : "queue";
     timelinePinned.current = true;
     setShowJumpToLatest(false);
     setPrompt("");
@@ -1178,7 +1194,7 @@ export function App() {
   }
 
   async function editTurnPrompt(text: string) {
-    if (activeThread?.running) {
+    if (activeThread && activeThreadBusy) {
       try {
         await call("threads.interruptTurn", { threadId: activeThread.threadId, clearQueue: true });
       } catch (error) {
@@ -1846,7 +1862,7 @@ export function App() {
         return;
       }
     }
-    const mode = promptShortcutMode(event, preferences.sendKey, Boolean(activeThread?.running));
+    const mode = promptShortcutMode(event, preferences.sendKey, activeThreadBusy);
     if (mode) {
       submitMode.current = mode;
       event.preventDefault();
@@ -2009,7 +2025,7 @@ export function App() {
           {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}><CaretDown /> Jump to latest</button>}
         </div>
 
-        {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <form ref={composer} className={`composer ${draftSending ? "sending" : activeThread?.running ? "working" : ""}`} onSubmit={send}>
+        {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <form ref={composer} className={`composer ${draftSending ? "sending" : activeThreadBusy ? "working" : ""}`} onSubmit={send}>
           {activeThread?.queue.length ? <PromptQueue
             queue={activeThread.queue}
             onClear={() => clearQueuedPrompts(activeThread.threadId)}
@@ -2018,7 +2034,7 @@ export function App() {
             steerDisabled={configMutationPending}
             onSteer={(queuedId) => steerQueuedPrompt(activeThread.threadId, queuedId)}
           /> : null}
-          <textarea ref={composerInput} role="combobox" aria-autocomplete="list" aria-controls={suggestionsOpen ? "composer-suggestions" : undefined} aria-expanded={suggestionsOpen} aria-activedescendant={activeSuggestionId} aria-label={activeThread?.running ? "Task prompt. Enter queues. Control Enter steers." : "Task prompt"} title={activeThread?.running ? "Enter to queue · Ctrl+Enter to steer" : undefined} value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={updateMutationsBlocked ? "Updating Tasty…" : !runtimeReady ? `Connect ${providerName(providerId)} to continue…` : activeThread?.running ? "Queue the next instruction (Ctrl+Enter to steer)" : activeThread?.kind === "chat" || draftChat?.kind === "chat" ? `Message ${providerName(providerId)}` : activeThread || draftChat ? `Ask ${providerName(providerId)} to work in this project` : "Start a chat first"} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} />
+          <textarea ref={composerInput} role="combobox" aria-autocomplete="list" aria-controls={suggestionsOpen ? "composer-suggestions" : undefined} aria-expanded={suggestionsOpen} aria-activedescendant={activeSuggestionId} aria-label={activeThreadBusy ? "Task prompt. Enter queues. Control Enter steers." : "Task prompt"} title={activeThreadBusy ? "Enter to queue · Ctrl+Enter to steer" : undefined} value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={updateMutationsBlocked ? "Updating Tasty…" : !runtimeReady ? `Connect ${providerName(providerId)} to continue…` : activeThreadBusy ? "Queue the next instruction (Ctrl+Enter to steer)" : activeThread?.kind === "chat" || draftChat?.kind === "chat" ? `Message ${providerName(providerId)}` : activeThread || draftChat ? `Ask ${providerName(providerId)} to work in this project` : "Start a chat first"} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} />
           {suggestionsOpen && (commandSuggestions.length > 0 || skillSuggestions.length > 0) && <div className="mention-menu command-mention-menu" id="composer-suggestions" role="listbox" aria-label={promptTrigger?.kind === "skill" ? "Installed skills" : "Provider commands"}>
             <small>{promptTrigger?.kind === "skill" ? "Installed skills" : `Commands from ${providerName(providerId)}`}</small>
             {promptTrigger?.kind === "skill"
@@ -2158,6 +2174,7 @@ export function App() {
         onRefreshQuota={refreshQuota}
         onCheckUpdates={checkForUpdates}
         onInstallUpdate={installUpdate}
+        onExportDiagnostics={exportDiagnostics}
         onShowOnboarding={() => { setShowOnboarding(true); setSettingsOpen(false); setSettingsQuery(""); }}
       />}
       {manageDialog && <ManageItemDialog dialog={manageDialog} onCancel={() => setManageDialog(undefined)} onConfirm={confirmManageAction} />}
@@ -2278,8 +2295,9 @@ function ItemActions({ open, label, items, onToggle }: { open: boolean; label: s
 }
 
 function ThreadNavItem({ thread, active, chat = false, side = false, menuOpen, onSelect, onMenu, onStop, onRename, onDelete }: { thread: Thread; active: boolean; chat?: boolean; side?: boolean; menuOpen: boolean; onSelect: () => void; onMenu: (forceOpen?: boolean) => void; onStop: () => void; onRename: () => void; onDelete: () => void }) {
+  const busy = isThreadBusy(thread);
   const items = [
-    ...(thread.running ? [{ label: "Stop task", icon: <Stop weight="fill" />, onSelect: onStop }] : []),
+    ...(busy ? [{ label: "Stop task", icon: <Stop weight="fill" />, onSelect: onStop }] : []),
     { label: "Rename chat", icon: <PencilSimple />, onSelect: onRename },
     { label: "Delete chat", icon: <Trash />, danger: true, onSelect: onDelete },
   ];
@@ -2287,7 +2305,7 @@ function ThreadNavItem({ thread, active, chat = false, side = false, menuOpen, o
     <button className={`thread ${chat ? "chat-thread" : ""} ${active ? "active" : ""}`} type="button" aria-current={active ? "page" : undefined} onClick={onSelect}>
       {side && <GitBranch className="side-thread-icon" />}{chat ? <span className="thread-copy"><strong>{thread.title}</strong></span> : <span>{thread.title}</span>}
     </button>
-    <span className="thread-row-actions">{thread.running && <i className="thread-running" role="status" aria-label="Task running" />}<ItemActions open={menuOpen} label={`Manage ${thread.title}`} items={items} onToggle={onMenu} /></span>
+    <span className="thread-row-actions">{busy && <i className="thread-running" role="status" aria-label={`Task ${thread.lifecycle.phase}`} />}<ItemActions open={menuOpen} label={`Manage ${thread.title}`} items={items} onToggle={onMenu} /></span>
   </div>;
 }
 
@@ -2587,7 +2605,7 @@ export function applyDraftConfig(defaults: ConfigOption[], draft: Record<string,
   return defaults.map((option) => draft[option.id] !== undefined ? { ...option, currentValue: draft[option.id]! } : option);
 }
 
-function SettingsDialog({ category, query, preferences, auth, providers, selectedProvider, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onShowOnboarding }: {
+function SettingsDialog({ category, query, preferences, auth, providers, selectedProvider, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onExportDiagnostics, onShowOnboarding }: {
   category: SettingsCategory;
   query: string;
   preferences: Preferences;
@@ -2611,6 +2629,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, selecte
   onRefreshQuota: () => Promise<void>;
   onCheckUpdates: (manual?: boolean) => Promise<void>;
   onInstallUpdate: () => Promise<void>;
+  onExportDiagnostics: () => Promise<void>;
   onShowOnboarding: () => void;
 }) {
   const categories: Array<{ id: SettingsCategory; label: string; keywords: string; icon: React.ReactNode }> = [
@@ -2620,6 +2639,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, selecte
     { id: "account", label: "Providers", keywords: "profile login logout kimi codex openai claude anthropic cursor cli", icon: <UserCircle /> },
     { id: "usage", label: "Usage & limits", keywords: "quota subscription plan limits", icon: <Gauge /> },
     { id: "updates", label: "Updates", keywords: "version install restart release", icon: <DownloadSimple /> },
+    { id: "diagnostics", label: "Diagnostics", keywords: "support bundle logs errors troubleshooting privacy", icon: <Bug /> },
     { id: "about", label: "About", keywords: "open source github license desktop", icon: <Info /> },
   ];
   const normalizedQuery = query.trim().toLowerCase();
@@ -2663,6 +2683,8 @@ function SettingsDialog({ category, query, preferences, auth, providers, selecte
 
             {category === "updates" && <section className="settings-group update-settings"><h2>App updates</h2><div className={`update-card ${updateStatus.phase}`}><span className="update-state-icon">{updateStatus.phase === "current" ? <Check /> : updateStatus.phase === "error" ? <WarningCircle /> : updateStatus.phase === "available" ? <DownloadSimple /> : <ArrowsClockwise />}</span><div><strong>{updateTitle}</strong><small>{updateMessage}</small></div><div className="update-actions"><button className="secondary" type="button" disabled={updateStatus.phase === "checking" || updateStatus.phase === "downloading" || updateStatus.phase === "installing"} onClick={() => void onCheckUpdates(true)}><ArrowsClockwise /> Check now</button>{updateStatus.phase === "available" && <button className="primary" type="button" title={turnRunning ? "Finish or cancel the active turn first" : "Install update and restart"} disabled={turnRunning} onClick={() => void onInstallUpdate()}><DownloadSimple /> Install & restart</button>}</div></div>{updateStatus.phase === "downloading" && <div className="update-meter"><span style={{ transform: `scaleX(${(updateStatus.percent ?? 0) / 100})` }} /></div>}<p className="settings-note">Signed releases are verified before installation. Check now performs a real update lookup.</p></section>}
 
+            {category === "diagnostics" && <section className="settings-group"><h2>Private support bundle</h2><SettingsRow title="Export diagnostics" description="Save a redacted JSON report with runtime versions, active-work counts, and recent errors. Prompts, credentials, session IDs, and workspace paths are excluded."><button className="secondary" type="button" onClick={() => void onExportDiagnostics()}><Bug /> Export support bundle</button></SettingsRow><p className="settings-note">Review the file before sharing it. Tasty never uploads support bundles automatically.</p></section>}
+
             {category === "about" && <section className="settings-group about-settings"><img src="/tasty-logo.png" alt="" aria-hidden="true" /><h2>Tasty</h2><p>An open-source local control panel for Kimi, OpenAI Codex, Anthropic Claude, and Cursor. Authentication stays with each provider; workspaces and Tasty's event projection remain local.</p><dl><div><dt>Runtimes</dt><dd>ACP, Codex App Server, and stream-json</dd></div><div><dt>Storage</dt><dd>Local compact event log</dd></div><div><dt>Source</dt><dd>github.com/Leonxlnx/tasty-desktop</dd></div></dl></section>}
           </div>
         </main>
@@ -2687,6 +2709,7 @@ function settingsDescription(category: SettingsCategory): string {
     account: "Local provider runtimes, accounts, and defaults.",
     usage: "Kimi subscription quota reported by the local CLI.",
     updates: "Signed releases and update installation.",
+    diagnostics: "Local, redacted troubleshooting information.",
     about: "Runtime architecture and open-source information.",
   }[category];
 }
@@ -3239,7 +3262,7 @@ export function updatePercent(downloaded: number, total?: number): number | unde
   return total ? Math.min(100, Math.round((downloaded / total) * 100)) : undefined;
 }
 
-type TurnView = { record: TurnRecord; messages: Message[]; activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; checkpoint?: Checkpoint; canRevert: boolean; running: boolean };
+type TurnView = { record: TurnRecord; messages: Message[]; activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; checkpoint?: Checkpoint; canRevert: boolean; running: boolean; phase: TurnPhase };
 
 export function recentTurns<T>(turns: T[], limit: number): T[] {
   const count = Math.max(0, Math.floor(limit));
@@ -3252,7 +3275,8 @@ export function projectTurns(thread: Thread): TurnView[] {
   const ensure = (turnId: string) => {
     let view = views.get(turnId);
     if (!view) {
-      view = { record: { turnId, startedAt: thread.createdAt }, messages: [], activity: [], tools: [], approvals: [], canRevert: false, running: thread.activeTurnId === turnId };
+      const running = thread.activeTurnId === turnId;
+      view = { record: { turnId, startedAt: thread.createdAt }, messages: [], activity: [], tools: [], approvals: [], canRevert: false, running, phase: running ? thread.lifecycle.phase : "idle" };
       views.set(turnId, view);
     }
     return view;
@@ -3363,8 +3387,9 @@ export function ActivityTimeline({ turn, commentary = turnAssistantMessages(turn
   const hidden = Math.max(0, timeline.length - 8);
   const entries = showEarlier ? timeline : timeline.slice(-8);
   const currentEntryId = turn.running ? latestTimelineItemId(timeline) : undefined;
+  const statusLabel = turn.running ? turnPhaseLabel(turn.phase) : `Worked for ${duration}`;
   return <details className="turn-activity" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary><span className={`activity-state ${turn.running ? "active" : ""}`}>{turn.running ? <i className="activity-spinner" aria-hidden="true" /> : <Check />}</span><strong>{turn.running ? "Working" : `Worked for ${duration}`}</strong><small>{turn.running ? duration : `${timeline.length} ${timeline.length === 1 ? "step" : "steps"}`}</small><CaretDown /></summary>
+    <summary><span className={`activity-state ${turn.running ? "active" : ""}`}>{turn.running ? <i className="activity-spinner" aria-hidden="true" /> : <Check />}</span><strong>{statusLabel}</strong><small>{turn.running ? duration : `${timeline.length} ${timeline.length === 1 ? "step" : "steps"}`}</small><CaretDown /></summary>
     <div className="activity-content">
       {hidden > 0 && !showEarlier && <button className="activity-earlier" type="button" onClick={() => setShowEarlier(true)}>Show {hidden} earlier {hidden === 1 ? "step" : "steps"}</button>}
       {entries.map((item) => item.kind === "activity"
@@ -3372,6 +3397,13 @@ export function ActivityTimeline({ turn, commentary = turnAssistantMessages(turn
         : <CommentaryStep key={item.id} message={item.message} current={item.id === currentEntryId} onOpenUrl={onOpenUrl} />)}
     </div>
   </details>;
+}
+
+function turnPhaseLabel(phase: TurnPhase): string {
+  if (phase === "stopping") return "Stopping";
+  if (phase === "checkpointing") return "Saving changes";
+  if (phase === "preparing") return "Preparing";
+  return "Working";
 }
 
 function CommentaryStep({ message, current, onOpenUrl }: { message: Message; current: boolean; onOpenUrl: (url: string) => Promise<void> }) {
@@ -3566,7 +3598,7 @@ export function applyEvents(threads: Thread[], events: StoredEvent[]): Thread[] 
   for (const event of events) {
     if (event.type === "ThreadCreated") {
       const payload = event.payload as { sessionId: string; provider?: ProviderId; parentThreadId?: string; cwd: string; kind?: "project" | "chat"; title: string; configOptions: ConfigOption[] };
-      const created: Thread = { threadId: event.threadId, ...payload, provider: normalizeProvider(payload.provider), kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], backgroundTasks: [], usage: {}, queue: [] };
+      const created: Thread = { threadId: event.threadId, ...payload, provider: normalizeProvider(payload.provider), kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, lifecycle: { phase: "idle", updatedAt: event.createdAt }, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], backgroundTasks: [], usage: {}, queue: [] };
       mutable.set(event.threadId, created);
       nextThreads = [created, ...nextThreads.filter((thread) => thread.threadId !== event.threadId)];
       continue;
@@ -3595,8 +3627,24 @@ function mutateThread(next: Thread, event: StoredEvent): void {
   if (event.type === "ThreadRenamed") next.title = String(payload.title);
   else if (event.type === "ThreadGoalSet") next.goal = { objective: String(payload.objective), updatedAt: event.createdAt };
   else if (event.type === "ThreadGoalCleared") delete next.goal;
+  else if (event.type === "TurnPhaseChanged") {
+    const turnId = typeof payload.turnId === "string" ? payload.turnId : undefined;
+    const terminal = payload.phase === "idle" || payload.phase === "blocked" || payload.phase === "failed";
+    const activePhase = payload.phase === "preparing" || terminal || !turnId || next.activeTurnId === turnId;
+    if (activePhase && (!terminal || !next.lifecycle.turnId || !turnId || next.lifecycle.turnId === turnId)) {
+      next.lifecycle = {
+        phase: normalizeTurnPhase(payload.phase),
+        updatedAt: event.createdAt,
+        ...(turnId ? { turnId } : {}),
+        ...(typeof payload.queuedId === "string" ? { queuedId: payload.queuedId } : {}),
+        ...(typeof payload.error === "string" && payload.error ? { error: payload.error } : {}),
+      };
+    }
+  }
   else if (event.type === "TurnStarted") {
+    const queuedId = typeof payload.sourceQueuedId === "string" ? payload.sourceQueuedId : next.lifecycle.turnId === payload.turnId ? next.lifecycle.queuedId : undefined;
     next.running = true; next.activeTurnId = String(payload.turnId); next.stopReason = undefined;
+    next.lifecycle = { phase: "running", updatedAt: event.createdAt, turnId: String(payload.turnId), ...(queuedId ? { queuedId } : {}) };
     if (typeof payload.title === "string" && payload.title) next.title = payload.title;
     next.turns.push({ turnId: String(payload.turnId), startedAt: event.createdAt });
     next.messages.push({
@@ -3664,8 +3712,8 @@ function mutateThread(next: Thread, event: StoredEvent): void {
     const task = next.backgroundTasks.find((candidate) => candidate.taskId === payload.taskId);
     if (task && !task.reportDeliveredAt) { task.reportCancelledAt = event.createdAt; task.updatedAt = event.createdAt; }
   }
-  else if (event.type === "TurnCompleted") { const turn = next.turns.findLast((item) => item.turnId === payload.turnId); if (turn) Object.assign(turn, { completedAt: event.createdAt, stopReason: String(payload.stopReason), ...(typeof payload.error === "string" && payload.error ? { error: payload.error } : {}), ...(payload.usage ? { usage: payload.usage as NonNullable<Usage["tokens"]> } : {}) }); finishRendererActivity(next, String(payload.turnId), event.createdAt, String(payload.stopReason) === "error"); next.running = false; next.stopReason = String(payload.stopReason); next.activeTurnId = undefined; if (payload.usage) next.usage = { ...next.usage, tokens: payload.usage as NonNullable<Usage["tokens"]> }; }
-  else if (event.type === "TurnCancelled") { const turn = next.turns.findLast((item) => item.turnId === payload.turnId); if (turn) Object.assign(turn, { completedAt: event.createdAt, stopReason: "cancelled" }); finishRendererActivity(next, String(payload.turnId), event.createdAt, true); next.running = false; next.stopReason = "cancelled"; next.activeTurnId = undefined; }
+  else if (event.type === "TurnCompleted") { const turn = next.turns.findLast((item) => item.turnId === payload.turnId); if (turn) Object.assign(turn, { completedAt: event.createdAt, stopReason: String(payload.stopReason), ...(typeof payload.error === "string" && payload.error ? { error: payload.error } : {}), ...(payload.usage ? { usage: payload.usage as NonNullable<Usage["tokens"]> } : {}) }); finishRendererActivity(next, String(payload.turnId), event.createdAt, String(payload.stopReason) === "error"); if (next.activeTurnId === payload.turnId) { next.running = false; next.stopReason = String(payload.stopReason); next.activeTurnId = undefined; next.lifecycle = { phase: String(payload.stopReason) === "error" ? "failed" : "idle", updatedAt: event.createdAt, ...(String(payload.stopReason) === "error" && typeof payload.error === "string" ? { error: payload.error } : {}) }; } if (payload.usage) next.usage = { ...next.usage, tokens: payload.usage as NonNullable<Usage["tokens"]> }; }
+  else if (event.type === "TurnCancelled") { const turn = next.turns.findLast((item) => item.turnId === payload.turnId); if (turn) Object.assign(turn, { completedAt: event.createdAt, stopReason: "cancelled" }); finishRendererActivity(next, String(payload.turnId), event.createdAt, true); if (next.activeTurnId === payload.turnId) { next.running = false; next.stopReason = "cancelled"; next.activeTurnId = undefined; next.lifecycle = { phase: "idle", updatedAt: event.createdAt }; } }
   else if (event.type === "CheckpointCaptured") { const checkpoint = { ...(payload.checkpoint as Checkpoint) }; if (typeof payload.diff === "string") checkpoint.diff = payload.diff; next.checkpoints.push(checkpoint); }
   else if (event.type === "CheckpointReverted") next.checkpoints.push(payload.checkpoint as Checkpoint);
 }
@@ -3737,6 +3785,7 @@ function rendererActivityStatus(status?: string): ActivityEntry["status"] {
 export function normalizeThread(value: Thread): Thread {
   const thread = value as Partial<Thread>;
   const createdAt = typeof thread.createdAt === "string" ? thread.createdAt : new Date(0).toISOString();
+  const running = Boolean(thread.running);
   return {
     threadId: String(thread.threadId ?? ""),
     sessionId: String(thread.sessionId ?? ""),
@@ -3751,9 +3800,16 @@ export function normalizeThread(value: Thread): Thread {
     title: typeof thread.title === "string" && thread.title ? thread.title : "Agent session",
     createdAt,
     updatedAt: typeof thread.updatedAt === "string" ? thread.updatedAt : createdAt,
-    running: Boolean(thread.running),
+    running,
     activeTurnId: typeof thread.activeTurnId === "string" ? thread.activeTurnId : undefined,
     stopReason: typeof thread.stopReason === "string" ? thread.stopReason : undefined,
+    lifecycle: thread.lifecycle && typeof thread.lifecycle === "object" ? {
+      phase: normalizeTurnPhase(thread.lifecycle.phase),
+      updatedAt: typeof thread.lifecycle.updatedAt === "string" ? thread.lifecycle.updatedAt : createdAt,
+      ...(typeof thread.lifecycle.turnId === "string" ? { turnId: thread.lifecycle.turnId } : {}),
+      ...(typeof thread.lifecycle.queuedId === "string" ? { queuedId: thread.lifecycle.queuedId } : {}),
+      ...(typeof thread.lifecycle.error === "string" ? { error: thread.lifecycle.error } : {}),
+    } : { phase: running ? "running" : thread.stopReason === "error" ? "failed" : "idle", updatedAt: createdAt, ...(typeof thread.activeTurnId === "string" ? { turnId: thread.activeTurnId } : {}) },
     turns: Array.isArray(thread.turns) ? thread.turns : [],
     messages: Array.isArray(thread.messages) ? thread.messages : [],
     activity: Array.isArray(thread.activity) ? thread.activity : [],
@@ -3768,6 +3824,10 @@ export function normalizeThread(value: Thread): Thread {
     usage: thread.usage && typeof thread.usage === "object" ? thread.usage : {},
     queue: visibleQueuedPrompts(Array.isArray(thread.queue) ? thread.queue : []),
   };
+}
+
+function normalizeTurnPhase(value: unknown): TurnPhase {
+  return value === "preparing" || value === "running" || value === "stopping" || value === "checkpointing" || value === "blocked" || value === "failed" ? value : "idle";
 }
 
 export function visibleQueuedPrompts(queue: QueuedPrompt[]): QueuedPrompt[] {

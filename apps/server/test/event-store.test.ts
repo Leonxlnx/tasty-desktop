@@ -56,7 +56,24 @@ describe("event log replay", () => {
 
     const restarted = new OrchestrationEngine(new EventStore(path));
     await restarted.open();
-    expect(restarted.thread("thread-1")).toMatchObject({ running: false, activeTurnId: undefined, stopReason: "cancelled", approvals: [] });
+    expect(restarted.thread("thread-1")).toMatchObject({ running: false, activeTurnId: undefined, stopReason: "cancelled", lifecycle: { phase: "idle" }, approvals: [] });
+  });
+
+  it("recovers interrupted preparation and ignores a stale terminal event", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "tasty-event-phase-"));
+    const path = join(dir, "events.jsonl");
+    const first = new OrchestrationEngine(new EventStore(path));
+    await first.open();
+    await first.append("thread-1", { type: "ThreadCreated", payload: { sessionId: "session-1", cwd: dir, title: "Lifecycle" } });
+    await first.append("thread-1", { type: "TurnPhaseChanged", payload: { phase: "preparing", turnId: "turn-prep", queuedId: "queued-1" } });
+    await first.drain();
+
+    const restarted = new OrchestrationEngine(new EventStore(path));
+    await restarted.open();
+    expect(restarted.thread("thread-1")?.lifecycle.phase).toBe("idle");
+    await restarted.append("thread-1", { type: "TurnStarted", payload: { turnId: "turn-current", text: "Current" } });
+    await restarted.append("thread-1", { type: "TurnCompleted", payload: { turnId: "turn-stale", stopReason: "end_turn" } });
+    expect(restarted.thread("thread-1")).toMatchObject({ running: true, activeTurnId: "turn-current", lifecycle: { phase: "running", turnId: "turn-current" } });
   });
 
   it("compacts completed history into one bounded snapshot per live thread", async () => {
