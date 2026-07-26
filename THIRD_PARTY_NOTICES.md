@@ -27,7 +27,7 @@ Kimi Code CLI is not bundled. Optional onboarding downloads its installer from K
 
 ## Kimi names and marks
 
-The repository contains Kimi names and logo assets only to identify interoperability with Kimi Code CLI and the application the project connects to.
+The repository uses Kimi names only to identify interoperability with Kimi Code CLI. Tasty has its own product name and artwork; it does not redistribute Kimi branding as its identity.
 
 Kimi, Moonshot AI, and their names, logos, and marks belong to their respective owners. They are not included in this repository's MIT License. Their presence does not grant trademark rights or imply affiliation, endorsement, or support.
 

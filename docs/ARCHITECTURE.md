@@ -1,6 +1,6 @@
 # Architecture
 
-Tasty is a local Windows harness for Kimi Code CLI, OpenAI Codex CLI, Anthropic Claude Code, and Cursor Agent CLI. The desktop app owns presentation, durable local projection, and operating-system integrations. Each installed provider runtime remains authoritative for agent behavior, authentication, models, and account-backed capabilities.
+Tasty is a local Windows control panel for Kimi Code CLI, OpenAI Codex CLI, Anthropic Claude Code, and Cursor Agent CLI. The desktop app owns presentation, durable local projection, and operating-system integrations. Each installed provider runtime remains authoritative for agent behavior, authentication, models, and account-backed capabilities.
 
 ## Components
 

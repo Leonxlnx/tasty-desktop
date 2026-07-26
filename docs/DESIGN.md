@@ -23,6 +23,16 @@ All interface colors come from `apps/web/src/styles/tokens.css`.
 
 The interface does not use decorative gradients, neon glows, or permanent backdrop blur in scrolling surfaces.
 
+## Product identity
+
+The Tasty mark is a geometric `T` formed by two converging surfaces: multiple agent runtimes meeting in one workspace. The source of truth is `apps/desktop/app-icon.svg`; native and web assets are generated from it with the existing Tauri icon command.
+
+- Tile: `#111111`
+- Letterform: `#F2F0EA`
+- Join: `#E97962`
+
+The coral join belongs to the mark, not the interface palette. Provider marks identify compatible runtimes only and never replace the Tasty product mark.
+
 ## Typography
 
 The default stack uses Segoe UI Variable and Aptos with system fallbacks. Monospace type is limited to paths, commands, methods, diffs, and terminal output.

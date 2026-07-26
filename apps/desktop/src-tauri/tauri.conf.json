@@ -30,7 +30,7 @@
     "targets": ["nsis"],
     "createUpdaterArtifacts": true,
     "publisher": "Tasty contributors",
-    "shortDescription": "An open-source multi-provider coding agent harness",
+    "shortDescription": "An open-source multi-provider coding agent control panel",
     "longDescription": "Use Kimi, OpenAI Codex, Anthropic Claude, or Cursor through their official local runtimes in one native coding workspace.",
     "windows": {
       "nsis": {
