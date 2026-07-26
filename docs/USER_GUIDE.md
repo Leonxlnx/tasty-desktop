@@ -1,6 +1,6 @@
 # User Guide
 
-Tasty is a Windows desktop harness for Kimi Code CLI, OpenAI Codex CLI, Anthropic Claude Code, and Cursor Agent CLI. It uses the accounts, sessions, models, and capabilities available to the current Windows user.
+Tasty is a Windows desktop control panel for Kimi Code CLI, OpenAI Codex CLI, Anthropic Claude Code, and Cursor Agent CLI. It uses the accounts, sessions, models, and capabilities available to the current Windows user.
 
 ## Install and sign in
 

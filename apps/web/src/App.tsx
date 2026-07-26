@@ -1867,7 +1867,7 @@ export function App() {
   return (
     <main style={shellStyle} className={`shell ${railView ? "rail-open" : ""} ${preferences.sidebarCollapsed ? "sidebar-collapsed" : ""} ${sidebarIconOnly ? "sidebar-icon-only" : ""} sidebar-${preferences.sidebarSide} rail-${preferences.railSide} density-${preferences.density}`}>
       <header className="app-titlebar">
-        <div className="titlebar-logo" title="Tasty"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div>
+        <div className="titlebar-logo" title="Tasty"><img src="/tasty-logo.png" alt="" aria-hidden="true" /></div>
         <nav ref={menuBar} className="menu-bar" aria-label="Application menu">
           <div className={`app-menu ${openMenu === "file" ? "open" : ""}`} onPointerEnter={() => { if (openMenu) setOpenMenu("file"); }}>
             <button ref={(element) => { menuTriggers.current.file = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "file"} onClick={() => setOpenMenu((current) => current === "file" ? undefined : "file")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("file", event)}>File</button>
@@ -2036,7 +2036,7 @@ export function App() {
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void attachWorkspaceFiles()}><Paperclip /><span><strong>Add files…</strong><small>{composerProjectCwd ? "Attach files from this project" : "Available inside a project"}</small></span></button>
                 <button type="button" role="menuitem" onClick={() => { setComposerMenuOpen(false); fileInput.current?.click(); }}><ImageSquare /><span><strong>Add images…</strong><small>Attach up to five images</small></span></button>
                 <span className="composer-menu-separator" role="separator" />
-                <button type="button" role="menuitem" onClick={() => startComposerTrigger("/")}><TerminalWindow /><span><strong>Commands</strong><small>Type / to use harness and provider commands</small></span><kbd>/</kbd></button>
+                <button type="button" role="menuitem" onClick={() => startComposerTrigger("/")}><TerminalWindow /><span><strong>Commands</strong><small>Type / to use Tasty and provider commands</small></span><kbd>/</kbd></button>
                 <button type="button" role="menuitem" onClick={() => startComposerTrigger("$")}><SlidersHorizontal /><span><strong>Skills</strong><small>Type $ to invoke a Kimi skill</small></span><kbd>$</kbd></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("folder")}><DownloadSimple /><span><strong>Install skill folder…</strong><small>{composerProjectCwd ? "Copy a skill bundle from this project" : "Available inside a project"}</small></span></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("file")}><FileText /><span><strong>Install skill file…</strong><small>{composerProjectCwd ? "Copy a flat Markdown skill from this project" : "Available inside a project"}</small></span></button>
@@ -2234,7 +2234,7 @@ function EmptyConversation({ kind, workspace, agentName, canPrompt, onPrompt, on
     { icon: <WarningCircle />, label: "Find and fix an issue", prompt: "Find and fix an issue in this project: " },
   ];
   return <div className="empty empty-conversation">
-    <div className="empty-mark"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div>
+    <div className="empty-mark"><img src="/tasty-logo.png" alt="" aria-hidden="true" /></div>
     <h1>{kind === "chat" ? `What would you like to ask ${agentName}?` : projectName ? <>What should we work on in <span>{projectName}</span>?</> : "Open a folder to start building"}</h1>
     <p>{kind === "chat" ? "This is a standalone chat, separate from your project workspaces." : projectName ? "Pick a starting point or describe exactly what you want to change." : `Choose any folder on this PC. ${agentName} opens it here without restarting the app.`}</p>
     {kind === "project" && !projectName ? <button className="secondary empty-open-folder" type="button" onClick={onOpenFolder}><FolderOpen /> Open folder</button> : <div className="empty-prompts" aria-label="Suggested prompts">
@@ -2322,7 +2322,7 @@ function ManageItemDialog({ dialog, onCancel, onConfirm }: { dialog: ManageDialo
           ? { title: `Delete chats in ${dialog.name}?`, description: `This removes ${dialog.threadIds.length} local chat${dialog.threadIds.length === 1 ? "" : "s"}. Project files are never deleted.`, action: "Delete chats" }
         : dialog.kind === "install-skill"
           ? { title: `Install “${dialog.name}”?`, description: "Tasty will copy this project-local skill into your user Kimi Code skills folder. Existing skills are never overwritten.", action: "Install skill" }
-          : { title: `Delete “${dialog.name}”?`, description: "This removes the local chat history from the desktop harness. Project files stay untouched.", action: "Delete chat" };
+          : { title: `Delete “${dialog.name}”?`, description: "This removes the local chat history from Tasty. Project files stay untouched.", action: "Delete chat" };
   useEffect(() => {
     const close = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !busy) onCancel();
@@ -2663,7 +2663,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, selecte
 
             {category === "updates" && <section className="settings-group update-settings"><h2>App updates</h2><div className={`update-card ${updateStatus.phase}`}><span className="update-state-icon">{updateStatus.phase === "current" ? <Check /> : updateStatus.phase === "error" ? <WarningCircle /> : updateStatus.phase === "available" ? <DownloadSimple /> : <ArrowsClockwise />}</span><div><strong>{updateTitle}</strong><small>{updateMessage}</small></div><div className="update-actions"><button className="secondary" type="button" disabled={updateStatus.phase === "checking" || updateStatus.phase === "downloading" || updateStatus.phase === "installing"} onClick={() => void onCheckUpdates(true)}><ArrowsClockwise /> Check now</button>{updateStatus.phase === "available" && <button className="primary" type="button" title={turnRunning ? "Finish or cancel the active turn first" : "Install update and restart"} disabled={turnRunning} onClick={() => void onInstallUpdate()}><DownloadSimple /> Install & restart</button>}</div></div>{updateStatus.phase === "downloading" && <div className="update-meter"><span style={{ transform: `scaleX(${(updateStatus.percent ?? 0) / 100})` }} /></div>}<p className="settings-note">Signed releases are verified before installation. Check now performs a real update lookup.</p></section>}
 
-            {category === "about" && <section className="settings-group about-settings"><img src="/kimi-logo.png" alt="" aria-hidden="true" /><h2>Tasty</h2><p>An open-source desktop harness for Kimi, OpenAI Codex, Anthropic Claude, and Cursor. Authentication stays with each provider; workspaces and Tasty's event projection remain local.</p><dl><div><dt>Runtimes</dt><dd>ACP, Codex App Server, and stream-json</dd></div><div><dt>Storage</dt><dd>Local compact event log</dd></div><div><dt>Source</dt><dd>github.com/Leonxlnx/tasty-desktop</dd></div></dl></section>}
+            {category === "about" && <section className="settings-group about-settings"><img src="/tasty-logo.png" alt="" aria-hidden="true" /><h2>Tasty</h2><p>An open-source local control panel for Kimi, OpenAI Codex, Anthropic Claude, and Cursor. Authentication stays with each provider; workspaces and Tasty's event projection remain local.</p><dl><div><dt>Runtimes</dt><dd>ACP, Codex App Server, and stream-json</dd></div><div><dt>Storage</dt><dd>Local compact event log</dd></div><div><dt>Source</dt><dd>github.com/Leonxlnx/tasty-desktop</dd></div></dl></section>}
           </div>
         </main>
       </div>
@@ -2804,7 +2804,7 @@ function Onboarding({ providers, selected, cwd, onProvider, onInstall, onLogin, 
   const provider = providers.find((item) => item.id === selected);
   const connected = providerUsable(provider);
   return <section className="onboarding">
-    <header><div className="onboarding-mark"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div><div><span>Welcome to Tasty</span><h1>Your coding agents, one focused workspace.</h1><p>Connect an official provider CLI. Tasty keeps credentials with that provider and stores its own thread metadata locally.</p></div></header>
+    <header><div className="onboarding-mark"><img src="/tasty-logo.png" alt="" aria-hidden="true" /></div><div><span>Welcome to Tasty</span><h1>Every coding agent. One calm control panel.</h1><p>Connect an official provider CLI. Tasty keeps credentials with that provider and stores its own thread metadata locally.</p></div></header>
     <div className="provider-grid" role="radiogroup" aria-label="AI provider">
       {providers.length ? providers.map((item) => <button className={item.id === selected ? "active" : ""} type="button" role="radio" aria-checked={item.id === selected} key={item.id} onClick={() => onProvider(item.id)}><ProviderMark provider={item.id} /><span><strong>{item.name}</strong><small>{!item.installed ? "Install CLI" : item.authenticated === false ? "Sign in" : item.account ?? "Ready"}</small></span>{item.id === selected && <Check />}</button>) : <ProviderSkeleton />}
     </div>
@@ -2838,7 +2838,7 @@ function SidebarSkeleton() {
 
 function StartupScreen({ delayed, error, onRetry }: { delayed: boolean; error?: string; onRetry: () => void }) {
   const needsAttention = delayed || Boolean(error);
-  return <div className="startup-screen" aria-label="Starting Tasty" aria-busy={!needsAttention}><div className="startup-intro"><img src="/kimi-logo.png" alt="" aria-hidden="true" /><span>Tasty</span><strong>{needsAttention ? "The local runtime needs attention" : "Opening your workspace"}</strong><small>{error ?? (delayed ? "The local service did not become ready in time. Restart it safely without closing the app." : "Connecting to your local agent runtimes and restoring sessions")}</small>{needsAttention ? <button type="button" onClick={onRetry}><ArrowsClockwise /> Restart local runtime</button> : <div className="startup-progress" aria-hidden="true"><i /></div>}</div></div>;
+  return <div className="startup-screen" aria-label="Starting Tasty" aria-busy={!needsAttention}><div className="startup-intro"><img src="/tasty-logo.png" alt="" aria-hidden="true" /><span>Tasty</span><strong>{needsAttention ? "The local runtime needs attention" : "Opening your workspace"}</strong><small>{error ?? (delayed ? "The local service did not become ready in time. Restart it safely without closing the app." : "Connecting to your local agent runtimes and restoring sessions")}</small>{needsAttention ? <button type="button" onClick={onRetry}><ArrowsClockwise /> Restart local runtime</button> : <div className="startup-progress" aria-hidden="true"><i /></div>}</div></div>;
 }
 
 export function serverWebSocketUrl(connection: unknown): string {
