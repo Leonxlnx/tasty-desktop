@@ -95,7 +95,7 @@ async function handleLine(line: string, state: { url?: string; panelWidth: numbe
       write({ jsonrpc: "2.0", id: request.id, result: {
         protocolVersion: typeof requested === "string" ? requested : "2025-03-26",
         capabilities: { tools: {} },
-        serverInfo: { name: "Tasty Preview", version: "0.10.0" },
+        serverInfo: { name: "Tasty Preview", version: "0.11.0" },
       } });
       return;
     }

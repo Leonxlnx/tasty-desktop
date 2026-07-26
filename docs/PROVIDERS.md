@@ -61,6 +61,6 @@ Tasty rejects a configured path that does not exist. Provider child processes in
 
 ## Compatibility storage
 
-Packaged Tasty 0.10 keeps the legacy `com.kimicode.desktop` application identifier and `kimi-code-desktop.preferences.v1` browser key. These are internal compatibility anchors, not product branding. Changing either without migration would strand installed chat history, settings, and updater identity.
+Packaged Tasty keeps the legacy `com.kimicode.desktop` application identifier and `kimi-code-desktop.preferences.v1` browser key. These are internal compatibility anchors, not product branding. Changing either without migration would strand installed chat history, settings, and updater identity.
 
 The bundled server accepts `TASTY_HOME`. `KIMI_DESKTOP_HOME` remains as a temporary compatibility alias for older development scripts.

@@ -124,4 +124,4 @@ Native Git, terminal, files, and preview operations stay on the local Windows ma
 
 ## Upgrade compatibility
 
-Tasty keeps the legacy `com.kimicode.desktop` application identifier, single-instance mutex, and browser preference key during the 0.10 rebrand. These internal anchors preserve existing settings, local threads, updater identity, and mutual exclusion with 0.9. Product names, package scopes, server identity, artifacts, and documentation use Tasty.
+Tasty keeps the legacy `com.kimicode.desktop` application identifier, single-instance mutex, and browser preference key as internal compatibility anchors. They preserve existing settings, local threads, updater identity, and mutual exclusion with pre-rebrand releases. Product names, package scopes, server identity, artifacts, and documentation use Tasty.
