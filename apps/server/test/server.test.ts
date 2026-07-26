@@ -60,6 +60,9 @@ describe("orchestration server", () => {
       parentThreadId: threadId,
       cwd: process.cwd(),
     });
+    const inspectReply = waitFor(socket, messages, (message) => message.id === 94);
+    socket.send(JSON.stringify({ id: 94, method: "subagents.inspect", params: { threadId, agentThreadId: "unlinked-agent" } }));
+    expect(((await inspectReply).error as { message?: string } | undefined)?.message).toMatch(/not linked/i);
     const duplicateResumeReply = waitFor(socket, messages, (message) => message.id === 91);
     socket.send(JSON.stringify({
       id: 91,

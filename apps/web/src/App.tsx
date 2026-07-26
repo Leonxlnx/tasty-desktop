@@ -24,7 +24,8 @@ type KimiSkill = { name: string; description: string; scope: "user" | "project";
 type KimiAgent = { name: "coder" | "explore" | "plan"; description: string; access: string; supportsBackground: boolean };
 type KimiCapabilities = { plugins: KimiPlugin[]; mcpServers: KimiMcpServer[]; skills: KimiSkill[]; agents: KimiAgent[]; roots: { plugins: string; mcp: string; skills: string }; warnings: string[]; updatedAt: string };
 type CapabilityTab = "skills" | "plugins" | "mcp" | "agents";
-type SubagentRun = { id: string; type: string; description: string; status: "running" | "completed" | "failed"; background: boolean; agentId?: string; detail?: string };
+type SubagentRun = { id: string; type: string; description: string; status: "running" | "completed" | "failed"; background: boolean; agentId?: string; detail?: string; threadIds?: string[]; output?: string };
+type SubagentInspection = { threadId: string; title: string; role?: string; status: string; turns: Array<{ turnId: string; status: string; durationMs?: number; items: Array<{ id: string; kind: "message" | "reasoning" | "action"; title: string; text?: string; status?: string }> }> };
 type BackgroundTask = {
   taskId: string; queuedId: string; turnId: string; description: string;
   status: "running" | "completed" | "failed" | "killed" | "lost" | "expired" | "timed_out";
@@ -2107,7 +2108,12 @@ export function App() {
             </div>
           </>}
 
-          {railView === "agents" && <SubagentsRail runs={agentRuns} onUseAgent={(agent) => useCapabilityPrompt(`Use the ${agent} subagent for this task: `)} onOpenCenter={() => { setCapabilityTab("agents"); setCapabilityCenterOpen(true); setRailView(undefined); }} />}
+          {railView === "agents" && <SubagentsRail provider={activeThread?.provider ?? providerId} runs={agentRuns} onInspect={async (run) => {
+            const agentThreadId = run.threadIds?.[0];
+            if (!activeThread || !agentThreadId) return undefined;
+            const result = await call("subagents.inspect", { threadId: activeThread.threadId, agentThreadId }) as { inspection: SubagentInspection };
+            return result.inspection;
+          }} onUseAgent={(agent) => useCapabilityPrompt(`Use the ${agent} subagent for this task: `)} onOpenCenter={() => { setCapabilityTab("agents"); setCapabilityCenterOpen(true); setRailView(undefined); }} />}
         </div>
       </aside>}
 
@@ -2732,11 +2738,41 @@ function CapabilityEmpty({ icon, title, text, action, onAction }: { icon: React.
   return <div className="capability-empty"><span>{icon}</span><strong>{title}</strong><p>{text}</p>{action && onAction && <button type="button" onClick={() => void onAction()}>{action}</button>}</div>;
 }
 
-function SubagentsRail({ runs, onUseAgent, onOpenCenter }: { runs: SubagentRun[]; onUseAgent: (agent: string) => void; onOpenCenter: () => void }) {
+function SubagentsRail({ provider, runs, onInspect, onUseAgent, onOpenCenter }: { provider: ProviderId; runs: SubagentRun[]; onInspect: (run: SubagentRun) => Promise<SubagentInspection | undefined>; onUseAgent: (agent: string) => void; onOpenCenter: () => void }) {
   const active = runs.filter((run) => run.status === "running").length;
+  const [selectedId, setSelectedId] = useState<string>();
+  const [inspection, setInspection] = useState<SubagentInspection>();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>();
+  const selected = runs.find((run) => run.id === selectedId);
+  useEffect(() => {
+    if (selectedId && !runs.some((run) => run.id === selectedId)) { setSelectedId(undefined); setInspection(undefined); }
+  }, [runs, selectedId]);
+
+  async function inspect(run: SubagentRun) {
+    setSelectedId(run.id);
+    setInspection(undefined);
+    setError(undefined);
+    if (!run.threadIds?.length) return;
+    setLoading(true);
+    try { setInspection(await onInspect(run)); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    finally { setLoading(false); }
+  }
+
+  if (selected) return <section className="agents-rail-content agent-inspection">
+    <header><button className="agent-back" type="button" onClick={() => { setSelectedId(undefined); setInspection(undefined); setError(undefined); }}><CaretRight /> All agents</button><span className={`agent-status ${selected.status}`}>{selected.status}</span></header>
+    <div className="agent-inspection-body">
+      <div className="agent-inspection-title"><ProviderMark provider={provider} /><div><small>{selected.type}{selected.background ? " · background" : ""}</small><h2>{inspection?.title ?? selected.description}</h2><p>{selected.agentId ?? inspection?.role ?? selected.detail}</p></div></div>
+      {loading && <div className="agent-inspection-loading"><i /><span>Loading subagent transcript…</span></div>}
+      {error && <div className="agent-inspection-error"><WarningCircle /><span>{error}</span></div>}
+      {inspection?.turns.flatMap((turn) => turn.items.map((item) => <article className={`agent-inspection-item ${item.kind}`} key={`${turn.turnId}-${item.id}`}><header><strong>{item.title}</strong><span>{item.status ?? turn.status}</span></header>{item.text && <pre>{compactToolPreview(item.text, item.kind === "message" ? 8 : 4, 1_200)}</pre>}</article>))}
+      {!loading && !error && !inspection && <div className="agent-local-detail"><p>{selected.description}</p>{selected.output && <pre>{compactToolPreview(selected.output, 8, 1_200)}</pre>}<small>{selected.threadIds?.length ? "Transcript is available when this provider runtime is connected." : "This provider reported status only for this agent run."}</small></div>}
+    </div>
+  </section>;
   return <section className="agents-rail-content">
-    <header><div><span>{active ? `${active} active` : "Kimi subagents"}</span><strong>Focused work, separate context.</strong></div><button type="button" onClick={onOpenCenter}>Browse agents</button></header>
-    {runs.length ? <div className="agent-run-list">{runs.map((run) => <article className={`agent-run ${run.status}`} key={run.id}><span className="agent-run-state">{run.status === "running" ? <i /> : run.status === "completed" ? <Check /> : <WarningCircle />}</span><div><strong>{run.description}</strong><small><b>{run.type}</b>{run.background ? " · background" : " · foreground"}{run.agentId ? ` · ${run.agentId}` : ""}</small></div><span>{run.detail ?? run.status}</span></article>)}</div> : <div className="agents-empty"><Robot /><strong>No subagents in this chat</strong><p>Ask Kimi to delegate exploration, planning, or implementation without filling the main context.</p><div><button type="button" onClick={() => onUseAgent("explore")}>Explore</button><button type="button" onClick={() => onUseAgent("plan")}>Plan</button><button type="button" onClick={() => onUseAgent("coder")}>Code</button></div></div>}
+    <header><div><span>{active ? `${active} active` : "Subagents"}</span><strong>Focused work, separate context.</strong></div><button type="button" onClick={onOpenCenter}>Browse agents</button></header>
+    {runs.length ? <div className="agent-run-list">{runs.map((run) => <button className={`agent-run ${run.status}`} type="button" key={run.id} onClick={() => void inspect(run)}><span className="agent-run-state">{run.status === "running" ? <i /> : run.status === "completed" ? <Check /> : <WarningCircle />}</span><span className="agent-run-copy"><strong>{run.description}</strong><small><b>{run.type}</b>{run.background ? " · background" : " · foreground"}{run.agentId ? ` · ${run.agentId}` : ""}</small></span><span>{run.detail ?? run.status}</span><CaretRight /></button>)}</div> : <div className="agents-empty"><Robot /><strong>No subagents in this chat</strong><p>Ask the active provider to delegate exploration, planning, or implementation without filling the main context.</p><div><button type="button" onClick={() => onUseAgent("explore")}>Explore</button><button type="button" onClick={() => onUseAgent("plan")}>Plan</button><button type="button" onClick={() => onUseAgent("coder")}>Code</button></div></div>}
   </section>;
 }
 
@@ -3099,6 +3135,9 @@ export function subagentRuns(thread: Pick<Thread, "tools"> & Partial<Pick<Thread
   const runs = thread.tools.filter(isSubagentTool).map<SubagentRun>((tool) => {
     const input = isRecordValue(tool.rawInput) ? tool.rawInput : {};
     const output = `${safeStringify(tool.rawOutput)} ${tool.content?.map((item) => safeStringify(item)).join(" ") ?? ""}`;
+    const threadIds = Array.isArray(input.receiverThreadIds) ? input.receiverThreadIds.filter((value): value is string => typeof value === "string" && Boolean(value)) : [];
+    const visibleOutput = agentVisibleOutput(tool.content?.flatMap((item) => item.type === "content" && item.content?.type === "text" && item.content.text ? [item.content.text] : []).join("\n")
+      || (typeof tool.rawOutput === "string" ? tool.rawOutput : undefined));
     const agentId = /\bagent_id:\s*([\w-]+)/i.exec(output)?.[1];
     const taskId = /\btask_id:\s*((?:agent|bash)-[a-z0-9]+)\b/i.exec(output)?.[1];
     const task = taskId ? backgroundTasks.find((candidate) => candidate.taskId === taskId) : undefined;
@@ -3121,6 +3160,8 @@ export function subagentRuns(thread: Pick<Thread, "tools"> & Partial<Pick<Thread
       background,
       ...(agentId ? { agentId } : {}),
       ...(task ? { detail: backgroundTaskDetail(task) } : {}),
+      ...(threadIds.length ? { threadIds } : {}),
+      ...(visibleOutput ? { output: visibleOutput } : {}),
     };
   });
   for (const task of backgroundTasks) {
@@ -3140,6 +3181,11 @@ export function subagentRuns(thread: Pick<Thread, "tools"> & Partial<Pick<Thread
 
 function backgroundTaskRunStatus(status: BackgroundTask["status"]): SubagentRun["status"] {
   return status === "running" ? "running" : status === "completed" ? "completed" : "failed";
+}
+
+function agentVisibleOutput(value: string | undefined): string | undefined {
+  const text = value?.split(/\r?\n/).filter((line) => !/^\s*(?:agent_id|task_id|status|automatic_notification|actual_subagent_type)\s*:/i.test(line)).join("\n").trim();
+  return text || undefined;
 }
 
 function backgroundTaskDetail(task: BackgroundTask): string {

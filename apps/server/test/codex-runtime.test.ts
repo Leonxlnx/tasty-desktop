@@ -31,6 +31,11 @@ describe("Codex App Server runtime", () => {
     expect(events.some((event) => event.type === "session_update" && event.params.update.sessionUpdate === "agent_thought_chunk")).toBe(true);
     expect(events.some((event) => event.type === "session_update" && event.params.update.sessionUpdate === "tool_call")).toBe(true);
     expect(events.some((event) => event.type === "permission_request")).toBe(true);
+    await expect(runtime.inspectSubagent("child-thread")).resolves.toMatchObject({
+      threadId: "child-thread",
+      role: "explore",
+      turns: [{ items: [{ kind: "reasoning" }, { title: "pnpm test", text: "57 tests passed" }, { kind: "message", text: "The tests are green." }] }],
+    });
     await runtime.close();
   });
 });

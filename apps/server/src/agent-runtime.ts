@@ -2,6 +2,10 @@ import type { ContentBlock, SessionConfigOption, Usage } from "@agentclientproto
 
 export type RuntimeSession = { sessionId: string; cwd?: string | null; title?: string | null; configOptions?: SessionConfigOption[] | null };
 export type RuntimePromptResult = { stopReason: string; usage?: Usage | null };
+export type SubagentInspection = {
+  threadId: string; title: string; role?: string; status: string;
+  turns: Array<{ turnId: string; status: string; durationMs?: number; items: Array<{ id: string; kind: "message" | "reasoning" | "action"; title: string; text?: string; status?: string }> }>;
+};
 
 export interface AgentRuntime {
   start(): Promise<unknown>;
@@ -15,5 +19,6 @@ export interface AgentRuntime {
   isOpen(): boolean;
   respondToPermission(requestId: string, optionId?: string): void;
   cancel(sessionId: string): Promise<void>;
+  inspectSubagent?(threadId: string): Promise<SubagentInspection>;
   close(): Promise<void>;
 }

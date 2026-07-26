@@ -55,6 +55,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("threads.rename"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120) }) }),
   z.object({ id, method: z.literal("threads.setGoal"), params: z.object({ threadId: z.string().min(1), objective: z.string().trim().min(1).max(20_000) }) }),
   z.object({ id, method: z.literal("threads.clearGoal"), params: z.object({ threadId: z.string().min(1) }) }),
+  z.object({ id, method: z.literal("subagents.inspect"), params: z.object({ threadId: z.string().min(1), agentThreadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("threads.delete"), params: z.object({ threadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("threads.sendTurn"), params: z.object({
     threadId: z.string().min(1), text: z.string().min(1), mentions: z.array(z.string()).max(20).default([]),
@@ -727,6 +728,17 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     if (request.method === "threads.clearGoal") {
       await engine.append(thread.threadId, { type: "ThreadGoalCleared", payload: {} });
       reply(socket, request.id, { thread: engine.thread(thread.threadId) });
+      return;
+    }
+    if (request.method === "subagents.inspect") {
+      const linked = thread.tools.some((tool) => {
+        const input = tool.rawInput && typeof tool.rawInput === "object" && !Array.isArray(tool.rawInput) ? tool.rawInput as Record<string, unknown> : {};
+        return Array.isArray(input.receiverThreadIds) && input.receiverThreadIds.includes(request.params.agentThreadId);
+      });
+      if (!linked) throw new Error("Subagent thread is not linked to this Tasty chat");
+      const runtime = await ensureRuntime(thread.provider);
+      if (!runtime.inspectSubagent) throw new Error(`${providerName(thread.provider)} does not expose inspectable subagent transcripts`);
+      reply(socket, request.id, { inspection: await runtime.inspectSubagent(request.params.agentThreadId) });
       return;
     }
     if (request.method === "threads.clearQueue") {

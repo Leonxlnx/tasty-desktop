@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { ContentBlock, SessionConfigOption, Usage } from "@agentclientprotocol/sdk";
-import type { AgentRuntime, RuntimePromptResult, RuntimeSession } from "./agent-runtime.js";
+import type { AgentRuntime, RuntimePromptResult, RuntimeSession, SubagentInspection } from "./agent-runtime.js";
 import type { RuntimeEvent } from "./acp-client.js";
 
 type JsonObject = Record<string, unknown>;
@@ -118,6 +118,23 @@ export class CodexRuntime implements AgentRuntime {
       title: stringOr(thread.name, stringOr(thread.preview, "Codex session")),
     }));
     return { sessions };
+  }
+
+  async inspectSubagent(threadId: string): Promise<SubagentInspection> {
+    const response = asObject(await this.#request("thread/read", { threadId, includeTurns: true }));
+    const thread = asObject(response.thread);
+    return {
+      threadId: asString(thread.id, "Codex subagent thread id"),
+      title: stringOr(thread.name, stringOr(thread.agentNickname, stringOr(thread.preview, "Codex subagent"))),
+      ...(typeof thread.agentRole === "string" && thread.agentRole ? { role: thread.agentRole } : {}),
+      status: typeof thread.status === "string" ? thread.status : safeText(thread.status, "unknown"),
+      turns: arrayOfObjects(thread.turns).map((turn) => ({
+        turnId: stringOr(turn.id, "turn"),
+        status: typeof turn.status === "string" ? turn.status : safeText(turn.status, "unknown"),
+        ...(typeof turn.durationMs === "number" ? { durationMs: turn.durationMs } : {}),
+        items: arrayOfObjects(turn.items).map(inspectCodexItem),
+      })),
+    };
   }
 
   async resumeSession(sessionId: string, cwd: string): Promise<RuntimeSession> {
@@ -462,6 +479,17 @@ function codexTool(item: JsonObject, completed: boolean): JsonObject | undefined
   return undefined;
 }
 
+function inspectCodexItem(item: JsonObject): SubagentInspection["turns"][number]["items"][number] {
+  const id = stringOr(item.id, crypto.randomUUID());
+  const type = stringOr(item.type, "activity");
+  if (type === "agentMessage") return { id, kind: "message", title: "Agent", text: bounded(stringOr(item.text, "")) };
+  if (type === "reasoning") return { id, kind: "reasoning", title: "Reasoning", text: bounded([...stringArray(item.summary), ...stringArray(item.content)].join("\n")) };
+  if (type === "commandExecution") return { id, kind: "action", title: stringOr(item.command, "Run command"), ...(item.aggregatedOutput ? { text: bounded(String(item.aggregatedOutput)) } : {}), status: stringOr(item.status, "unknown") };
+  if (type === "fileChange") return { id, kind: "action", title: `${Array.isArray(item.changes) ? item.changes.length : 0} file changes`, status: stringOr(item.status, "unknown") };
+  if (type === "collabAgentToolCall") return { id, kind: "action", title: `Agent · ${stringOr(item.tool, "delegate")}`, ...(item.prompt ? { text: bounded(String(item.prompt)) } : {}), status: stringOr(item.status, "unknown") };
+  return { id, kind: "action", title: type.replace(/([a-z])([A-Z])/g, "$1 $2"), status: stringOr(item.status, "completed") };
+}
+
 function parseModel(value: JsonObject): CodexModel {
   const model = asString(value.model, "Codex model");
   return {
@@ -503,6 +531,14 @@ function asString(value: unknown, label: string): string {
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === "string" && value ? value : fallback;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function safeText(value: unknown, fallback: string): string {
+  try { return value === undefined ? fallback : bounded(JSON.stringify(value)); } catch { return fallback; }
 }
 
 function numberOr(value: unknown, fallback: number): number {

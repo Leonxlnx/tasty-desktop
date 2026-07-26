@@ -416,6 +416,15 @@ describe("subagent projection", () => {
       detail: "running",
     }]);
   });
+
+  it("keeps Codex receiver threads inspectable", () => {
+    expect(subagentRuns({ tools: [{
+      toolCallId: "collab-1",
+      title: "Agent: spawnAgent",
+      status: "completed",
+      rawInput: { subagent_type: "spawnAgent", description: "Inspect tests", receiverThreadIds: ["child-thread"] },
+    }] })).toMatchObject([{ id: "collab-1", threadIds: ["child-thread"], description: "Inspect tests" }]);
+  });
 });
 
 describe("runtime thinking effort", () => {
