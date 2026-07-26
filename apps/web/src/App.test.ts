@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, latestTimelineItemId, localServerUrl, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, presentDiagnostic, projectTurns, promptShortcutMode, railForStandaloneChat, reorderPaths, serverWebSocketUrl, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, latestTimelineItemId, localServerUrl, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, presentDiagnostic, projectTurns, promptShortcutMode, railForStandaloneChat, reorderPaths, serverWebSocketUrl, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
 
 describe("agent skill install requests", () => {
   it("opens confirmation only for a source inside the requested workspace", () => {
@@ -163,6 +163,15 @@ describe("turn activity", () => {
   });
 });
 
+describe("harness commands", () => {
+  it("parses persistent goals and side chats without forwarding them to a provider", () => {
+    expect(parseHarnessCommand("/goal Ship a safe release")).toEqual({ name: "goal", objective: "Ship a safe release", clear: false });
+    expect(parseHarnessCommand("/goal clear")).toEqual({ name: "goal", clear: true });
+    expect(parseHarnessCommand("/side Explore auth")).toEqual({ name: "side", title: "Explore auth" });
+    expect(parseHarnessCommand("explain /goal syntax")).toBeUndefined();
+  });
+});
+
 describe("native server lookup", () => {
   it("uses the native dynamic port and safely encodes its token", () => {
     expect(serverWebSocketUrl({ port: 61_429, token: "a+b /?" })).toBe("ws://127.0.0.1:61429?token=a%2Bb%20%2F%3F");
@@ -207,6 +216,13 @@ describe("local path links", () => {
 });
 
 describe("project navigation", () => {
+  it("places side chats directly after their parent", () => {
+    const parent = { threadId: "parent", title: "Main" };
+    const unrelated = { threadId: "other", title: "Other" };
+    const side = { threadId: "side", parentThreadId: "parent", title: "Explore" };
+    expect(threadTreeOrder([parent, unrelated, side] as never).map((thread) => thread.threadId)).toEqual(["parent", "side", "other"]);
+  });
+
   it("never exposes a project workspace while the standalone chat view is active", () => {
     expect(workspaceForView("chats", { kind: "chat", cwd: "C:/runtime/chats" } as never, undefined, "E:/project")).toBeUndefined();
     expect(workspaceForView("chats", undefined, { kind: "chat" }, "E:/project")).toBeUndefined();

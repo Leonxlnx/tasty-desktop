@@ -38,8 +38,10 @@ type ActivityEntry = { id: string; turnId: string; kind: "thought" | "tool"; sta
 type QueuedPrompt = { queuedId: string; text: string; mode: "queue" | "steer"; createdAt: string; images: Array<{ name: string; mimeType: string }> };
 type DesktopPreviewCommand = { action: "open" | "resize"; url?: string; panelWidth?: number; viewportWidth?: number; viewportHeight?: number };
 type SkillInstallRequest = { cwd: string; source: string; name: string };
+type ProviderId = "kimi" | "codex" | "claude" | "cursor";
+type ThreadGoal = { objective: string; updatedAt: string };
 type Thread = {
-  threadId: string; sessionId: string; cwd: string; kind: "project" | "chat"; title: string; createdAt: string; updatedAt: string; running: boolean;
+  threadId: string; sessionId: string; provider: ProviderId; parentThreadId?: string; goal?: ThreadGoal; cwd: string; kind: "project" | "chat"; title: string; createdAt: string; updatedAt: string; running: boolean;
   activeTurnId: string | undefined; stopReason: string | undefined; turns: TurnRecord[]; messages: Message[]; plan: Array<{ content: string; status: string }>;
   activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; configOptions: ConfigOption[]; commands: AvailableCommand[]; modeId: string | undefined; checkpoints: Checkpoint[]; backgroundTasks: BackgroundTask[]; usage?: Usage; queue: QueuedPrompt[];
 };
@@ -103,6 +105,8 @@ const defaultPreferences: Preferences = {
 const collapsedSidebarWidth = 60;
 let terminalEntryId = 0;
 const fallbackCommands: AvailableCommand[] = [
+  { name: "goal", description: "Set, replace, or clear the goal for this chat." },
+  { name: "side", description: "Create a side chat with the same provider and workspace." },
   { name: "compact", description: "Compact the current Kimi session context." },
   { name: "status", description: "Show the current session and runtime status." },
   { name: "usage", description: "Show subscription usage reported by Kimi." },
@@ -117,7 +121,6 @@ const fallbackCommands: AvailableCommand[] = [
   { name: "sub-skill", description: "Create or work with a reusable Kimi skill." },
   { name: "sub-skill.review", description: "Review a Kimi skill." },
   { name: "sub-skill.consolidate", description: "Consolidate related Kimi skills." },
-  { name: "write-goal", description: "Write a persistent goal for the current workspace." },
 ];
 
 function terminalEntry(kind: TerminalEntry["kind"], text: string): TerminalEntry {
@@ -1054,6 +1057,16 @@ export function App() {
     submitMode.current = "queue";
     const text = prompt.trim();
     if (!runtimeReady || !text || !composerCanSubmit(navView, activeThread?.kind ?? draftChat?.kind, configUpdatesInFlight.current > 0) || draftSending || updateMutationsBlocked) return;
+    const harness = parseHarnessCommand(text);
+    if (harness?.name === "goal" && !harness.objective) {
+      setPrompt("/goal ");
+      setDiagnostic("Add the objective after /goal, or use /goal clear.");
+      return;
+    }
+    if (harness?.name === "side" && !activeThread) {
+      setDiagnostic("Open a chat before creating a side chat.");
+      return;
+    }
     const mentions = [...text.matchAll(/@\{([^}]+)\}/g)].map((match) => match[1]!);
     const mode = activeThread?.running ? requestedMode : "queue";
     timelinePinned.current = true;
@@ -1074,6 +1087,21 @@ export function App() {
         setDraftChat(undefined);
         setActiveThreadId(thread.threadId);
       }
+      if (harness?.name === "goal") {
+        const result = await call(harness.clear ? "threads.clearGoal" : "threads.setGoal", harness.clear
+          ? { threadId: thread.threadId }
+          : { threadId: thread.threadId, objective: harness.objective }) as { thread: Thread };
+        const updated = normalizeThread(result.thread);
+        setThreads((current) => [updated, ...current.filter((item) => item.threadId !== updated.threadId)]);
+        return;
+      }
+      if (harness?.name === "side") {
+        const result = await call("threads.createSide", { threadId: thread.threadId, ...(harness.title ? { title: harness.title } : {}) }) as { thread: Thread };
+        const side = normalizeThread(result.thread);
+        setThreads((current) => [side, ...current.filter((item) => item.threadId !== side.threadId)]);
+        selectThread(side);
+        return;
+      }
       await call("threads.sendTurn", { threadId: thread.threadId, text, mentions, images: attachedImages, mode });
     } catch (error) {
       setPrompt((current) => current || text);
@@ -1086,6 +1114,28 @@ export function App() {
 
   function stopThread(threadId: string) {
     void call("threads.interruptTurn", { threadId, clearQueue: true }).catch((error: Error) => setDiagnostic(error.message));
+  }
+
+  async function createSideThread(title?: string) {
+    if (!activeThread) return;
+    try {
+      const result = await call("threads.createSide", { threadId: activeThread.threadId, ...(title?.trim() ? { title: title.trim() } : {}) }) as { thread: Thread };
+      const side = normalizeThread(result.thread);
+      setThreads((current) => [side, ...current.filter((item) => item.threadId !== side.threadId)]);
+      selectThread(side);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function clearGoal(threadId: string) {
+    try {
+      const result = await call("threads.clearGoal", { threadId }) as { thread: Thread };
+      const updated = normalizeThread(result.thread);
+      setThreads((current) => current.map((item) => item.threadId === threadId ? updated : item));
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function editTurnPrompt(text: string) {
@@ -1846,11 +1896,11 @@ export function App() {
                 </span>
               </summary>
               <div className="project-threads">
-                {project.threads.map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
+                {threadTreeOrder(project.threads).map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} side={Boolean(thread.parentThreadId)} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
                 {project.runtimeSessions.map((session) => <RuntimeSessionNavItem session={session} key={session.sessionId} menuOpen={itemMenu?.kind === "session" && itemMenu.id === session.sessionId} onSelect={() => void resumeSession(session)} onMenu={(forceOpen) => changeRuntimeSessionMenu(session.sessionId, forceOpen)} onRename={() => void renameRuntimeSession(session)} onRemove={() => setManageDialog({ kind: "remove-runtime-session", sessionId: session.sessionId, name: session.title ?? "Kimi session" })} />)}
               </div>
             </details>) : <>
-              {visibleThreads.map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} chat key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
+              {threadTreeOrder(visibleThreads).map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} chat side={Boolean(thread.parentThreadId)} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
               {visibleRuntimeSessions.map((session) => <RuntimeSessionNavItem session={session} chat key={session.sessionId} menuOpen={itemMenu?.kind === "session" && itemMenu.id === session.sessionId} onSelect={() => void resumeSession(session)} onMenu={(forceOpen) => changeRuntimeSessionMenu(session.sessionId, forceOpen)} onRename={() => void renameRuntimeSession(session)} onRemove={() => setManageDialog({ kind: "remove-runtime-session", sessionId: session.sessionId, name: session.title ?? "Kimi chat" })} />)}
             </>}
             {!bootstrapping && threadFilter && (navView === "projects" ? !visibleProjects.length : !visibleThreads.length && !visibleRuntimeSessions.length) && <p className="thread-empty">No matches</p>}
@@ -1879,6 +1929,16 @@ export function App() {
             {railAvailable && !capabilityCenterOpen && <button className={`panel-toggle rail-master-toggle ${railView ? "active" : ""}`} type="button" title={railView ? "Close work panel" : "Open work panel"} aria-label={railView ? "Close work panel" : "Open work panel"} aria-expanded={Boolean(railView)} onClick={() => setRailView((current) => current ? undefined : activeThread?.kind === "chat" ? "agents" : agentRuns.some((run) => run.status === "running") ? "agents" : "git")}><SidebarSimple /></button>}
           </div>
         </header>
+
+        {activeThread && !capabilityCenterOpen && <div className={`thread-contextbar ${activeThread.goal ? "has-goal" : ""}`}>
+          <button className="thread-goal" type="button" title={activeThread.goal ? "Edit this goal" : "Define a goal for this chat"} onClick={() => { setPrompt(activeThread.goal ? `/goal ${activeThread.goal.objective}` : "/goal "); window.setTimeout(() => composerInput.current?.focus(), 0); }}>
+            <Hammer /><span><small>Goal</small><strong>{activeThread.goal?.objective ?? "Define what done means"}</strong></span>
+          </button>
+          <div className="thread-context-actions">
+            {activeThread.goal && <button type="button" title="Clear goal" aria-label="Clear goal" onClick={() => void clearGoal(activeThread.threadId)}><X /></button>}
+            <button type="button" title="Create a side chat" onClick={() => void createSideThread()}><GitBranch /><span>Side chat</span></button>
+          </div>
+        </div>}
 
         <div className="timeline-shell">
           <div ref={timeline} className={`timeline ${capabilityCenterOpen ? "capability-timeline" : ""}`} onScroll={(event) => {
@@ -1924,7 +1984,8 @@ export function App() {
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("folder")}><DownloadSimple /><span><strong>Install skill folder…</strong><small>{composerProjectCwd ? "Copy a skill bundle from this project" : "Available inside a project"}</small></span></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("file")}><FileText /><span><strong>Install skill file…</strong><small>{composerProjectCwd ? "Copy a flat Markdown skill from this project" : "Available inside a project"}</small></span></button>
                 {nativeCapabilityCommands.has("plugins") && <button type="button" role="menuitem" onClick={() => startComposerCommand("plugins")}><PlugsConnected /><span><strong>Plugin manager…</strong><small>Open the manager exposed by this Kimi runtime</small></span><kbd>/plugins</kbd></button>}
-                <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => startComposerCommand("write-goal")}><Hammer /><span><strong>Set workspace goal…</strong><small>Write a persistent goal for this project</small></span><kbd>/write-goal</kbd></button>
+                <button type="button" role="menuitem" onClick={() => startComposerCommand("goal")}><Hammer /><span><strong>Set chat goal…</strong><small>Keep the objective attached to this chat</small></span><kbd>/goal</kbd></button>
+                <button type="button" role="menuitem" disabled={!activeThread} onClick={() => startComposerCommand("side")}><GitBranch /><span><strong>Create side chat…</strong><small>Branch without losing this chat</small></span><kbd>/side</kbd></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => startComposerTrigger("#")}><FileText /><span><strong>Project files</strong><small>Type # to mention workspace context</small></span><kbd>#</kbd></button>
               </div>}
               <div className="composer-context-wrap">
@@ -2151,15 +2212,15 @@ function ItemActions({ open, label, items, onToggle }: { open: boolean; label: s
   </span>;
 }
 
-function ThreadNavItem({ thread, active, chat = false, menuOpen, onSelect, onMenu, onStop, onRename, onDelete }: { thread: Thread; active: boolean; chat?: boolean; menuOpen: boolean; onSelect: () => void; onMenu: (forceOpen?: boolean) => void; onStop: () => void; onRename: () => void; onDelete: () => void }) {
+function ThreadNavItem({ thread, active, chat = false, side = false, menuOpen, onSelect, onMenu, onStop, onRename, onDelete }: { thread: Thread; active: boolean; chat?: boolean; side?: boolean; menuOpen: boolean; onSelect: () => void; onMenu: (forceOpen?: boolean) => void; onStop: () => void; onRename: () => void; onDelete: () => void }) {
   const items = [
     ...(thread.running ? [{ label: "Stop task", icon: <Stop weight="fill" />, onSelect: onStop }] : []),
     { label: "Rename chat", icon: <PencilSimple />, onSelect: onRename },
     { label: "Delete chat", icon: <Trash />, danger: true, onSelect: onDelete },
   ];
-  return <div className={`thread-row-wrap ${active ? "active" : ""}`} onContextMenu={(event) => { event.preventDefault(); onMenu(true); }}>
+  return <div className={`thread-row-wrap ${side ? "side-thread-row" : ""} ${active ? "active" : ""}`} onContextMenu={(event) => { event.preventDefault(); onMenu(true); }}>
     <button className={`thread ${chat ? "chat-thread" : ""} ${active ? "active" : ""}`} type="button" aria-current={active ? "page" : undefined} onClick={onSelect}>
-      {chat ? <span className="thread-copy"><strong>{thread.title}</strong></span> : <span>{thread.title}</span>}
+      {side && <GitBranch className="side-thread-icon" />}{chat ? <span className="thread-copy"><strong>{thread.title}</strong></span> : <span>{thread.title}</span>}
     </button>
     <span className="thread-row-actions">{thread.running && <i className="thread-running" role="status" aria-label="Task running" />}<ItemActions open={menuOpen} label={`Manage ${thread.title}`} items={items} onToggle={onMenu} /></span>
   </div>;
@@ -2839,6 +2900,18 @@ export function composerTrigger(value: string): { kind: "command" | "skill" | "f
   };
 }
 
+export function parseHarnessCommand(value: string):
+  | { name: "goal"; objective?: string; clear: boolean }
+  | { name: "side"; title?: string }
+  | undefined {
+  const match = /^\/(goal|side)(?:\s+([\s\S]*))?$/i.exec(value.trim());
+  if (!match) return undefined;
+  const argument = match[2]?.trim();
+  if (match[1]?.toLowerCase() === "side") return { name: "side", ...(argument ? { title: argument } : {}) };
+  const clear = /^(?:clear|remove|off)$/i.test(argument ?? "");
+  return { name: "goal", clear, ...(!clear && argument ? { objective: argument } : {}) };
+}
+
 export function toggleComposerTrigger(value: string, prefix: "/" | "$" | "#"): string {
   const active = composerTrigger(value);
   if (active?.prefix === prefix) return value.slice(0, active.start).replace(/\s+$/, "");
@@ -3321,8 +3394,8 @@ export function applyEvents(threads: Thread[], events: StoredEvent[]): Thread[] 
   const mutable = new Map<string, Thread>();
   for (const event of events) {
     if (event.type === "ThreadCreated") {
-      const payload = event.payload as { sessionId: string; cwd: string; kind?: "project" | "chat"; title: string; configOptions: ConfigOption[] };
-      const created: Thread = { threadId: event.threadId, ...payload, kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], backgroundTasks: [], usage: {}, queue: [] };
+      const payload = event.payload as { sessionId: string; provider?: ProviderId; parentThreadId?: string; cwd: string; kind?: "project" | "chat"; title: string; configOptions: ConfigOption[] };
+      const created: Thread = { threadId: event.threadId, ...payload, provider: normalizeProvider(payload.provider), kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], backgroundTasks: [], usage: {}, queue: [] };
       mutable.set(event.threadId, created);
       nextThreads = [created, ...nextThreads.filter((thread) => thread.threadId !== event.threadId)];
       continue;
@@ -3349,6 +3422,8 @@ function mutateThread(next: Thread, event: StoredEvent): void {
   next.updatedAt = event.createdAt;
   const payload = event.payload;
   if (event.type === "ThreadRenamed") next.title = String(payload.title);
+  else if (event.type === "ThreadGoalSet") next.goal = { objective: String(payload.objective), updatedAt: event.createdAt };
+  else if (event.type === "ThreadGoalCleared") delete next.goal;
   else if (event.type === "TurnStarted") {
     next.running = true; next.activeTurnId = String(payload.turnId); next.stopReason = undefined;
     if (typeof payload.title === "string" && payload.title) next.title = payload.title;
@@ -3494,6 +3569,12 @@ export function normalizeThread(value: Thread): Thread {
   return {
     threadId: String(thread.threadId ?? ""),
     sessionId: String(thread.sessionId ?? ""),
+    provider: normalizeProvider(thread.provider),
+    ...(typeof thread.parentThreadId === "string" && thread.parentThreadId ? { parentThreadId: thread.parentThreadId } : {}),
+    ...(thread.goal && typeof thread.goal.objective === "string" && thread.goal.objective ? { goal: {
+      objective: thread.goal.objective,
+      updatedAt: typeof thread.goal.updatedAt === "string" ? thread.goal.updatedAt : createdAt,
+    } } : {}),
     cwd: String(thread.cwd ?? ""),
     kind: thread.kind === "chat" ? "chat" : "project",
     title: typeof thread.title === "string" && thread.title ? thread.title : "Kimi session",
@@ -3525,6 +3606,26 @@ function flattenOptions(option: ConfigOption): Array<{ value: string; name: stri
 export function filterByTitle<T extends { title?: string }>(items: T[], query: string): T[] {
   const normalized = query.trim().toLowerCase();
   return normalized ? items.filter((item) => (item.title ?? "Kimi session").toLowerCase().includes(normalized)) : items;
+}
+
+function normalizeProvider(value: unknown): ProviderId {
+  return value === "codex" || value === "claude" || value === "cursor" ? value : "kimi";
+}
+
+export function threadTreeOrder(items: Thread[]): Thread[] {
+  const ids = new Set(items.map((thread) => thread.threadId));
+  const children = new Map<string, Thread[]>();
+  for (const thread of items) {
+    if (!thread.parentThreadId || !ids.has(thread.parentThreadId)) continue;
+    children.set(thread.parentThreadId, [...(children.get(thread.parentThreadId) ?? []), thread]);
+  }
+  const ordered: Thread[] = [];
+  const visit = (thread: Thread) => {
+    ordered.push(thread);
+    for (const child of children.get(thread.threadId) ?? []) visit(child);
+  };
+  for (const thread of items) if (!thread.parentThreadId || !ids.has(thread.parentThreadId)) visit(thread);
+  return ordered;
 }
 
 function permissionClass(kind: string): string {
