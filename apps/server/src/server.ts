@@ -10,6 +10,7 @@ import { z } from "zod";
 import { AcpClient, isUnknownAcpSessionError, type RuntimeEvent } from "./acp-client.js";
 import type { AgentRuntime } from "./agent-runtime.js";
 import { CodexRuntime } from "./codex-runtime.js";
+import { ClaudeRuntime } from "./claude-runtime.js";
 import { ConfigDefaults, sanitizeSessionConfig } from "./config-defaults.js";
 import { EventStore } from "./event-store.js";
 import { OrchestrationEngine, titleFromPrompt, type ProviderId, type ThreadProjection } from "./orchestration.js";
@@ -229,7 +230,7 @@ async function startRuntime(provider: ProviderId): Promise<AgentRuntime> {
   const currentFile = fileURLToPath(import.meta.url);
   const useFake = provider === "kimi" && process.env.KIMI_FAKE === "1";
   const fakePath = join(dirname(currentFile), currentFile.endsWith(".ts") ? "fake-acp.ts" : "fake-acp.js");
-  let client: AgentRuntime;
+  let client: AgentRuntime | undefined;
   const runtimeEvents = {
     onEvent: async (event: RuntimeEvent) => {
       try {
@@ -251,6 +252,8 @@ async function startRuntime(provider: ProviderId): Promise<AgentRuntime> {
   };
   if (provider === "codex") {
     client = new CodexRuntime({ binary: requireProviderBinary("codex"), ...runtimeEvents });
+  } else if (provider === "claude") {
+    client = new ClaudeRuntime({ binary: requireProviderBinary("claude"), ...runtimeEvents });
   } else if (provider === "kimi" || provider === "cursor") {
     client = new AcpClient({
       binary: useFake ? process.execPath : requireProviderBinary(provider),
@@ -270,9 +273,8 @@ async function startRuntime(provider: ProviderId): Promise<AgentRuntime> {
       } } : {}),
       ...runtimeEvents,
     });
-  } else {
-    throw new Error("Anthropic Claude runtime is not ready in this build");
   }
+  if (!client) throw new Error(`Unsupported provider ${provider}`);
   try {
     initializeResults.set(provider, await client.start());
     runtimes.set(provider, client);
