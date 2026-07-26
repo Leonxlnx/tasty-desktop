@@ -114,12 +114,12 @@ let terminalEntryId = 0;
 const fallbackCommands: AvailableCommand[] = [
   { name: "goal", description: "Set, replace, or clear the goal for this chat." },
   { name: "side", description: "Create a side chat with the same provider and workspace." },
-  { name: "compact", description: "Compact the current Kimi session context." },
+  { name: "compact", description: "Compact the current agent session context." },
   { name: "status", description: "Show the current session and runtime status." },
   { name: "usage", description: "Show subscription usage reported by Kimi." },
   { name: "mcp", description: "Show MCP servers and tools available to Kimi." },
   { name: "tasks", description: "Show tasks managed by the current session." },
-  { name: "help", description: "Show Kimi Code commands and input help." },
+  { name: "help", description: "Show provider commands and input help." },
   { name: "mcp-config", description: "Configure MCP servers for Kimi Code." },
   { name: "update-config", description: "Review or update Kimi Code configuration." },
   { name: "check-kimi-code-docs", description: "Check the official Kimi Code documentation." },
@@ -167,7 +167,7 @@ function composerPrimaryLabel(action: ComposerPrimaryAction): string {
 
 export function presentDiagnostic(message: string): string {
   return /ACP connection closed|Server disconnected|Server is not connected/i.test(message)
-    ? "Kimi runtime disconnected. Reconnecting without stopping active work."
+    ? "Agent runtime disconnected. Reconnecting without stopping active work."
     : message;
 }
 
@@ -866,7 +866,7 @@ export function App() {
           void call("env.bootstrap").then((result) => {
             const environment = result as { initialize?: unknown; runtimeError?: string };
             setKimiRuntimeReady(Boolean(environment.initialize));
-            if (environment.runtimeError) setDiagnostic(`Kimi runtime unavailable: ${environment.runtimeError}`);
+            if (environment.runtimeError) setDiagnostic(`Agent runtime unavailable: ${environment.runtimeError}`);
           }).catch((error: Error) => setDiagnostic(error.message));
         }
         void refreshProviders().catch(() => undefined);
@@ -914,7 +914,7 @@ export function App() {
       const environment = result as { initialize?: unknown; auth: AuthState; runtimeError?: string };
       setAuth(environment.auth);
       setKimiRuntimeReady(Boolean(environment.initialize));
-      if (environment.runtimeError) setDiagnostic(`Kimi runtime unavailable: ${environment.runtimeError}`);
+      if (environment.runtimeError) setDiagnostic(`Agent runtime unavailable: ${environment.runtimeError}`);
       if (environment.auth.authenticated) void refreshQuota();
       return call("threads.list", { provider: preferences.provider });
     }).then((result) => {
@@ -1539,7 +1539,7 @@ export function App() {
     try {
       if (!isTauri()) throw new Error("The native folder picker is available in the desktop app");
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({ directory: true, multiple: false, title: "Choose a Kimi Code workspace" });
+      const selected = await open({ directory: true, multiple: false, title: "Choose a Tasty workspace" });
       if (typeof selected === "string") {
         setCwd(selected);
         rememberWorkspace(selected);
@@ -1674,7 +1674,7 @@ export function App() {
     try {
       if (!isTauri()) throw new Error("New windows are available in the desktop app");
       const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-      const window = new WebviewWindow(`kimi-${Date.now()}`, { url: "/", title: "Kimi Code", width: 1280, height: 800, minWidth: 900, minHeight: 620, decorations: false });
+      const window = new WebviewWindow(`tasty-${Date.now()}`, { url: "/", title: "Tasty", width: 1280, height: 800, minWidth: 900, minHeight: 620, decorations: false });
       await window.once("tauri://error", (event) => setDiagnostic(String(event.payload)));
     } catch (error) {
       setDiagnostic(error instanceof Error ? error.message : String(error));
@@ -1862,7 +1862,7 @@ export function App() {
   return (
     <main style={shellStyle} className={`shell ${railView ? "rail-open" : ""} ${preferences.sidebarCollapsed ? "sidebar-collapsed" : ""} ${sidebarIconOnly ? "sidebar-icon-only" : ""} sidebar-${preferences.sidebarSide} rail-${preferences.railSide} density-${preferences.density}`}>
       <header className="app-titlebar">
-        <div className="titlebar-logo" title="Kimi Code"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div>
+        <div className="titlebar-logo" title="Tasty"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div>
         <nav ref={menuBar} className="menu-bar" aria-label="Application menu">
           <div className={`app-menu ${openMenu === "file" ? "open" : ""}`} onPointerEnter={() => { if (openMenu) setOpenMenu("file"); }}>
             <button ref={(element) => { menuTriggers.current.file = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "file"} onClick={() => setOpenMenu((current) => current === "file" ? undefined : "file")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("file", event)}>File</button>
@@ -1904,9 +1904,9 @@ export function App() {
             <button ref={(element) => { menuTriggers.current.help = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "help"} onClick={() => setOpenMenu((current) => current === "help" ? undefined : "help")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("help", event)}>Help</button>
             {openMenu === "help" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus}>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void openExternalLink("https://www.kimi.com/code/docs/en/"); }}>Kimi Code Documentation</button>
-              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void openExternalLink("https://github.com/Leonxlnx/kimi-code-desktop#readme"); }}>Kimi Code Desktop Documentation</button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void openExternalLink("https://github.com/Leonxlnx/kimi-code-desktop#readme"); }}>Tasty Documentation</button>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void openExternalLink("https://github.com/MoonshotAI/kimi-cli"); }}>Kimi Code CLI on GitHub</button>
-              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setSettingsCategory("about"); setSettingsOpen(true); }}>About Kimi Code Desktop</button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setSettingsCategory("about"); setSettingsOpen(true); }}>About Tasty</button>
             </div>}
           </div>
           <button className="menu-settings" type="button" onClick={() => { setOpenMenu(undefined); setSettingsCategory("general"); setSettingsOpen(true); }}>Settings</button>
@@ -1919,7 +1919,7 @@ export function App() {
         </div>
       </header>
 
-      <aside className="sidebar" aria-label="Kimi Code navigation">
+      <aside className="sidebar" aria-label="Tasty navigation">
         {!preferences.sidebarCollapsed && <div className="panel-resizer sidebar-resizer" role="separator" aria-label="Resize sidebar" aria-orientation="vertical" aria-valuemin={84} aria-valuemax={420} aria-valuenow={preferences.sidebarWidth} tabIndex={0} onPointerDown={(event) => beginPanelResize("sidebar", event)} onKeyDown={(event) => resizePanelWithKeyboard("sidebar", event)} />}
         <div className="sidebar-toolbar">
           <button className="toolbar-icon" type="button" aria-label={preferences.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} title={preferences.sidebarCollapsed ? "Expand sidebar (Ctrl+B)" : "Collapse sidebar (Ctrl+B)"} onClick={() => setPreferences((current) => ({ ...current, sidebarCollapsed: !current.sidebarCollapsed }))}><SidebarSimple /></button>
@@ -1949,11 +1949,11 @@ export function App() {
               </summary>
               <div className="project-threads">
                 {threadTreeOrder(project.threads).map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} side={Boolean(thread.parentThreadId)} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
-                {project.runtimeSessions.map((session) => <RuntimeSessionNavItem session={session} key={session.sessionId} menuOpen={itemMenu?.kind === "session" && itemMenu.id === session.sessionId} onSelect={() => void resumeSession(session)} onMenu={(forceOpen) => changeRuntimeSessionMenu(session.sessionId, forceOpen)} onRename={() => void renameRuntimeSession(session)} onRemove={() => setManageDialog({ kind: "remove-runtime-session", sessionId: session.sessionId, name: session.title ?? "Kimi session" })} />)}
+                {project.runtimeSessions.map((session) => <RuntimeSessionNavItem session={session} key={session.sessionId} menuOpen={itemMenu?.kind === "session" && itemMenu.id === session.sessionId} onSelect={() => void resumeSession(session)} onMenu={(forceOpen) => changeRuntimeSessionMenu(session.sessionId, forceOpen)} onRename={() => void renameRuntimeSession(session)} onRemove={() => setManageDialog({ kind: "remove-runtime-session", sessionId: session.sessionId, name: session.title ?? "Agent session" })} />)}
               </div>
             </details>) : <>
               {threadTreeOrder(visibleThreads).map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} chat side={Boolean(thread.parentThreadId)} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
-              {visibleRuntimeSessions.map((session) => <RuntimeSessionNavItem session={session} chat key={session.sessionId} menuOpen={itemMenu?.kind === "session" && itemMenu.id === session.sessionId} onSelect={() => void resumeSession(session)} onMenu={(forceOpen) => changeRuntimeSessionMenu(session.sessionId, forceOpen)} onRename={() => void renameRuntimeSession(session)} onRemove={() => setManageDialog({ kind: "remove-runtime-session", sessionId: session.sessionId, name: session.title ?? "Kimi chat" })} />)}
+              {visibleRuntimeSessions.map((session) => <RuntimeSessionNavItem session={session} chat key={session.sessionId} menuOpen={itemMenu?.kind === "session" && itemMenu.id === session.sessionId} onSelect={() => void resumeSession(session)} onMenu={(forceOpen) => changeRuntimeSessionMenu(session.sessionId, forceOpen)} onRename={() => void renameRuntimeSession(session)} onRemove={() => setManageDialog({ kind: "remove-runtime-session", sessionId: session.sessionId, name: session.title ?? "Agent chat" })} />)}
             </>}
             {!bootstrapping && threadFilter && (navView === "projects" ? !visibleProjects.length : !visibleThreads.length && !visibleRuntimeSessions.length) && <p className="thread-empty">No matches</p>}
             {!bootstrapping && !threadFilter && navView === "projects" && !visibleProjects.length && <button className="sidebar-empty" type="button" onClick={() => void chooseWorkspace()}><FolderOpen /> Open your first folder</button>}
@@ -1962,21 +1962,21 @@ export function App() {
         </div>
 
         <footer className="sidebar-footer">
-          <button className="sidebar-quota" type="button" title={quotaLeft === undefined ? "Subscription usage unavailable" : `${quotaLeft}% of current Kimi quota left`} onClick={() => { setSettingsCategory("usage"); setSettingsOpen(true); }}>
+          {providerId === "kimi" && <button className="sidebar-quota" type="button" title={quotaLeft === undefined ? "Subscription usage unavailable" : `${quotaLeft}% of current Kimi quota left`} onClick={() => { setSettingsCategory("usage"); setSettingsOpen(true); }}>
             <Gauge />
-            <span><small>Usage limits</small><strong>{quotaLeft === undefined ? (quotaLoading ? "Updating…" : "View usage") : `${quotaLeft}% left`}</strong>{quotaLeft !== undefined && <i><b style={{ transform: `scaleX(${quotaLeft / 100})` }} /></i>}</span>
-          </button>
+            <span><span className="quota-label"><small>Kimi usage</small><strong>{quotaLeft === undefined ? (quotaLoading ? "Updating…" : "View") : `${quotaLeft}% left`}</strong></span>{quotaLeft !== undefined && <i><b style={{ transform: `scaleX(${quotaLeft / 100})` }} /></i>}</span>
+          </button>}
           {updateNotice && <div className="sidebar-update-note" role="status">{updateNotice}</div>}
           <div className="sidebar-footer-actions">
             <button className={`nav-item settings-link ${settingsOpen ? "active" : ""}`} type="button" title="Settings" onClick={() => { setSettingsCategory("general"); setSettingsOpen(true); }}><GearSix size={17} /><span>Settings</span></button>
-            {showSidebarUpdate(updateStatus.phase) && <button className={`sidebar-update ${updateStatus.phase}`} type="button" aria-label={updateStatus.phase === "available" ? `Install Kimi Code Desktop ${updateStatus.version ?? "update"} and restart` : `${updateStatus.phase === "downloading" ? "Downloading" : "Installing"} Kimi Code Desktop update`} title={updateStatus.phase === "available" ? "Install update & restart" : `${updateStatus.phase === "downloading" ? "Downloading" : "Installing"} update`} disabled={updatePreparing || updateStatus.phase !== "available"} onClick={() => void installUpdate()}>{updateStatus.phase === "available" ? <DownloadSimple /> : <ArrowsClockwise />}<span>{updatePreparing ? "Preparing" : updateStatus.phase === "available" ? "Update" : updateStatus.phase === "downloading" && updateStatus.percent !== undefined ? `${updateStatus.percent}%` : "Updating"}</span></button>}
+            {showSidebarUpdate(updateStatus.phase) && <button className={`sidebar-update ${updateStatus.phase}`} type="button" aria-label={updateStatus.phase === "available" ? `Install Tasty ${updateStatus.version ?? "update"} and restart` : `${updateStatus.phase === "downloading" ? "Downloading" : "Installing"} Tasty update`} title={updateStatus.phase === "available" ? "Install update & restart" : `${updateStatus.phase === "downloading" ? "Downloading" : "Installing"} update`} disabled={updatePreparing || updateStatus.phase !== "available"} onClick={() => void installUpdate()}>{updateStatus.phase === "available" ? <DownloadSimple /> : <ArrowsClockwise />}<span>{updatePreparing ? "Preparing" : updateStatus.phase === "available" ? "Update" : updateStatus.phase === "downloading" && updateStatus.percent !== undefined ? `${updateStatus.percent}%` : "Updating"}</span></button>}
           </div>
         </footer>
       </aside>
 
       <section className="conversation">
         <header className="topbar">
-          <div className="topbar-title"><strong>{capabilityCenterOpen ? "Kimi capabilities" : activeThread?.title ?? (draftChat ? "New chat" : navView === "chats" ? "Chats" : cwd ? workspaceName(cwd) : "Kimi")}</strong></div>
+          <div className="topbar-title"><strong>{capabilityCenterOpen ? "Capabilities" : activeThread?.title ?? (draftChat ? "New chat" : navView === "chats" ? "Chats" : cwd ? workspaceName(cwd) : "Tasty")}</strong>{!capabilityCenterOpen && <span className="topbar-provider"><ProviderMark provider={providerId} />{providerName(providerId)}</span>}</div>
           <div className="topbar-actions">
             {railAvailable && !capabilityCenterOpen && <button className={`panel-toggle rail-master-toggle ${railView ? "active" : ""}`} type="button" title={railView ? "Close work panel" : "Open work panel"} aria-label={railView ? "Close work panel" : "Open work panel"} aria-expanded={Boolean(railView)} onClick={() => setRailView((current) => current ? undefined : activeThread?.kind === "chat" ? "agents" : agentRuns.some((run) => run.status === "running") ? "agents" : "git")}><SidebarSimple /></button>}
           </div>
@@ -2014,8 +2014,8 @@ export function App() {
             onSteer={(queuedId) => steerQueuedPrompt(activeThread.threadId, queuedId)}
           /> : null}
           <textarea ref={composerInput} role="combobox" aria-autocomplete="list" aria-controls={suggestionsOpen ? "composer-suggestions" : undefined} aria-expanded={suggestionsOpen} aria-activedescendant={activeSuggestionId} aria-label={activeThread?.running ? "Task prompt. Enter queues. Control Enter steers." : "Task prompt"} title={activeThread?.running ? "Enter to queue · Ctrl+Enter to steer" : undefined} value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={updateMutationsBlocked ? "Updating Tasty…" : !runtimeReady ? `Connect ${providerName(providerId)} to continue…` : activeThread?.running ? "Queue the next instruction (Ctrl+Enter to steer)" : activeThread?.kind === "chat" || draftChat?.kind === "chat" ? `Message ${providerName(providerId)}` : activeThread || draftChat ? `Ask ${providerName(providerId)} to work in this project` : "Start a chat first"} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} />
-          {suggestionsOpen && (commandSuggestions.length > 0 || skillSuggestions.length > 0) && <div className="mention-menu command-mention-menu" id="composer-suggestions" role="listbox" aria-label={promptTrigger?.kind === "skill" ? "Installed Kimi skills" : "Kimi commands"}>
-            <small>{promptTrigger?.kind === "skill" ? "Installed skills" : "Commands from Kimi Code"}</small>
+          {suggestionsOpen && (commandSuggestions.length > 0 || skillSuggestions.length > 0) && <div className="mention-menu command-mention-menu" id="composer-suggestions" role="listbox" aria-label={promptTrigger?.kind === "skill" ? "Installed skills" : "Provider commands"}>
+            <small>{promptTrigger?.kind === "skill" ? "Installed skills" : `Commands from ${providerName(providerId)}`}</small>
             {promptTrigger?.kind === "skill"
               ? skillSuggestions.map((skill, index) => <button id={`composer-suggestion-${index}`} type="button" role="option" tabIndex={-1} aria-selected={activeSuggestionIndex === index} key={`${skill.scope}-${skill.source}-${skill.name}`} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSuggestionIndex(index)} onClick={() => insertSkill(skill)}><SlidersHorizontal /><span><strong>${skill.name}</strong><small>{skill.description || `${skill.scope} skill`}</small></span><em>{skill.scope}</em></button>)
               : commandSuggestions.map((command, index) => <button id={`composer-suggestion-${index}`} type="button" role="option" tabIndex={-1} aria-selected={activeSuggestionIndex === index} key={command.name} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSuggestionIndex(index)} onClick={() => insertCommand(command)}><TerminalWindow /><span><strong>/{command.name}</strong><small>{command.description}</small></span></button>)}
@@ -2031,11 +2031,11 @@ export function App() {
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void attachWorkspaceFiles()}><Paperclip /><span><strong>Add files…</strong><small>{composerProjectCwd ? "Attach files from this project" : "Available inside a project"}</small></span></button>
                 <button type="button" role="menuitem" onClick={() => { setComposerMenuOpen(false); fileInput.current?.click(); }}><ImageSquare /><span><strong>Add images…</strong><small>Attach up to five images</small></span></button>
                 <span className="composer-menu-separator" role="separator" />
-                <button type="button" role="menuitem" onClick={() => startComposerTrigger("/")}><TerminalWindow /><span><strong>Commands</strong><small>Type / to use Kimi commands</small></span><kbd>/</kbd></button>
+                <button type="button" role="menuitem" onClick={() => startComposerTrigger("/")}><TerminalWindow /><span><strong>Commands</strong><small>Type / to use harness and provider commands</small></span><kbd>/</kbd></button>
                 <button type="button" role="menuitem" onClick={() => startComposerTrigger("$")}><SlidersHorizontal /><span><strong>Skills</strong><small>Type $ to invoke a Kimi skill</small></span><kbd>$</kbd></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("folder")}><DownloadSimple /><span><strong>Install skill folder…</strong><small>{composerProjectCwd ? "Copy a skill bundle from this project" : "Available inside a project"}</small></span></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("file")}><FileText /><span><strong>Install skill file…</strong><small>{composerProjectCwd ? "Copy a flat Markdown skill from this project" : "Available inside a project"}</small></span></button>
-                {nativeCapabilityCommands.has("plugins") && <button type="button" role="menuitem" onClick={() => startComposerCommand("plugins")}><PlugsConnected /><span><strong>Plugin manager…</strong><small>Open the manager exposed by this Kimi runtime</small></span><kbd>/plugins</kbd></button>}
+                {nativeCapabilityCommands.has("plugins") && <button type="button" role="menuitem" onClick={() => startComposerCommand("plugins")}><PlugsConnected /><span><strong>Plugin manager…</strong><small>Open the manager exposed by this provider</small></span><kbd>/plugins</kbd></button>}
                 <button type="button" role="menuitem" onClick={() => startComposerCommand("goal")}><Hammer /><span><strong>Set chat goal…</strong><small>Keep the objective attached to this chat</small></span><kbd>/goal</kbd></button>
                 <button type="button" role="menuitem" disabled={!activeThread} onClick={() => startComposerCommand("side")}><GitBranch /><span><strong>Create side chat…</strong><small>Branch without losing this chat</small></span><kbd>/side</kbd></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => startComposerTrigger("#")}><FileText /><span><strong>Project files</strong><small>Type # to mention workspace context</small></span><kbd>#</kbd></button>
@@ -2122,7 +2122,7 @@ export function App() {
           <label className="command-input"><MagnifyingGlass /><input autoFocus value={threadFilter} onChange={(event) => setThreadFilter(event.target.value)} placeholder="Search projects and chats…" /><kbd>Esc</kbd></label>
           <div className="command-results">
             {visibleProjects.length > 0 && <section><h2>Projects</h2>{visibleProjects.slice(0, 6).map((project) => <button type="button" key={project.cwd} onClick={() => { setCapabilityCenterOpen(false); setCwd(project.cwd); rememberWorkspace(project.cwd); setNavView("projects"); setDraftChat(undefined); const first = project.threads[0]; if (first) selectThread(first); else setActiveThreadId(undefined); setSearchOpen(false); setThreadFilter(""); }}><FolderSimple /><span><strong>{project.name}</strong><small>{project.cwd}</small></span></button>)}</section>}
-            {(visibleThreads.length > 0 || visibleRuntimeSessions.length > 0) && <section><h2>Chats</h2>{visibleThreads.slice(0, 8).map((thread) => <button type="button" key={thread.threadId} onClick={() => { selectThread(thread); setSearchOpen(false); setThreadFilter(""); }}><ChatCircleDots /><span><strong>{thread.title}</strong><small>Personal chat</small></span></button>)}{visibleRuntimeSessions.slice(0, Math.max(0, 8 - visibleThreads.length)).map((session) => <button type="button" key={session.sessionId} onClick={() => { setSearchOpen(false); setThreadFilter(""); void resumeSession(session); }}><ChatCircleDots /><span><strong>{session.title ?? "Kimi chat"}</strong><small>Personal chat</small></span></button>)}</section>}
+            {(visibleThreads.length > 0 || visibleRuntimeSessions.length > 0) && <section><h2>Chats</h2>{visibleThreads.slice(0, 8).map((thread) => <button type="button" key={thread.threadId} onClick={() => { selectThread(thread); setSearchOpen(false); setThreadFilter(""); }}><ChatCircleDots /><span><strong>{thread.title}</strong><small>{providerName(thread.provider)}</small></span></button>)}{visibleRuntimeSessions.slice(0, Math.max(0, 8 - visibleThreads.length)).map((session) => <button type="button" key={session.sessionId} onClick={() => { setSearchOpen(false); setThreadFilter(""); void resumeSession(session); }}><ChatCircleDots /><span><strong>{session.title ?? "Agent chat"}</strong><small>{providerName(preferences.provider)}</small></span></button>)}</section>}
             {!visibleProjects.length && !visibleThreads.length && !visibleRuntimeSessions.length && <div className="command-empty"><MagnifyingGlass /><strong>No matches</strong><span>Try a project, folder, or chat title.</span></div>}
           </div>
           <footer><span>Search all local projects and chats</span><span><kbd>Ctrl K</kbd></span></footer>
@@ -2134,6 +2134,8 @@ export function App() {
         query={settingsQuery}
         preferences={preferences}
         auth={auth}
+        providers={providers}
+        selectedProvider={preferences.provider}
         cwd={cwd}
         quota={quota}
         quotaError={quotaError}
@@ -2222,9 +2224,9 @@ function EmptyConversation({ kind, workspace, canPrompt, onPrompt, onOpenFolder 
     { icon: <MagnifyingGlass />, label: "Research a question", prompt: "Research this question and give me a concise, well-sourced answer: " },
   ] : [
     { icon: <MagnifyingGlass />, label: "Explore and understand the code", prompt: "Explore this project and explain how it works" },
-    { icon: <Hammer />, label: "Build a new feature", prompt: "Build a new feature in this project: " },
+    { icon: <Plus />, label: "Build a new feature", prompt: "Build a new feature in this project: " },
     { icon: <GitBranch />, label: "Review code and suggest changes", prompt: "Review this project and suggest the highest-impact code improvements" },
-    { icon: <Bug />, label: "Find and fix an issue", prompt: "Find and fix an issue in this project: " },
+    { icon: <WarningCircle />, label: "Find and fix an issue", prompt: "Find and fix an issue in this project: " },
   ];
   return <div className="empty empty-conversation">
     <div className="empty-mark"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div>
@@ -2285,7 +2287,7 @@ function ThreadNavItem({ thread, active, chat = false, side = false, menuOpen, o
 }
 
 function RuntimeSessionNavItem({ session, chat = false, menuOpen, onSelect, onMenu, onRename, onRemove }: { session: RuntimeSession; chat?: boolean; menuOpen: boolean; onSelect: () => void; onMenu: (forceOpen?: boolean) => void; onRename: () => void; onRemove: () => void }) {
-  const title = session.title ?? (chat ? "Kimi chat" : "Kimi session");
+  const title = session.title ?? (chat ? "Agent chat" : "Agent session");
   const items = [
     { label: "Open chat", icon: <ChatCircleDots />, onSelect },
     { label: "Rename chat", icon: <PencilSimple />, onSelect: onRename },
@@ -2304,17 +2306,17 @@ function ManageItemDialog({ dialog, onCancel, onConfirm }: { dialog: ManageDialo
   const [value, setValue] = useState(dialog.name);
   const [busy, setBusy] = useState(false);
   const copy = dialog.kind === "rename-project"
-    ? { title: "Rename project", description: "This changes only the display name in Kimi Code Desktop.", action: "Rename" }
+    ? { title: "Rename project", description: "This changes only the display name in Tasty.", action: "Rename" }
     : dialog.kind === "rename-thread"
       ? { title: "Rename chat", description: "Give this chat a clear name. Its history stays intact.", action: "Rename" }
       : dialog.kind === "remove-project"
         ? { title: "Remove project?", description: "The folder and its files stay on your computer. You can open it again anytime.", action: "Remove" }
         : dialog.kind === "remove-runtime-session"
-          ? { title: `Remove “${dialog.name}”?`, description: "This hides the resumable session in Kimi Code Desktop. Its official Kimi history stays untouched.", action: "Remove" }
+          ? { title: `Remove “${dialog.name}”?`, description: "This hides the resumable session in Tasty. Its provider history stays untouched.", action: "Remove" }
         : dialog.kind === "delete-project-chats"
           ? { title: `Delete chats in ${dialog.name}?`, description: `This removes ${dialog.threadIds.length} local chat${dialog.threadIds.length === 1 ? "" : "s"}. Project files are never deleted.`, action: "Delete chats" }
         : dialog.kind === "install-skill"
-          ? { title: `Install “${dialog.name}”?`, description: "Kimi Code Desktop will copy this project-local skill into your user Kimi skills folder. Existing skills are never overwritten.", action: "Install skill" }
+          ? { title: `Install “${dialog.name}”?`, description: "Tasty will copy this project-local skill into your user Kimi Code skills folder. Existing skills are never overwritten.", action: "Install skill" }
           : { title: `Delete “${dialog.name}”?`, description: "This removes the local chat history from the desktop harness. Project files stay untouched.", action: "Delete chat" };
   useEffect(() => {
     const close = (event: KeyboardEvent) => {
@@ -2384,9 +2386,9 @@ export function ComposerConfig({ options, busyId, disabled = false, onChange }: 
     const offersExplicitEfforts = choices.some((choice) => !/^(?:on|off|enabled|disabled|true|false|1|0)$/i.test(choice.value)
       && !/^(?:thinking[ -]?)?(?:on|off|enabled|disabled)$/i.test(choice.name));
     controls.push({
-      id: thinking.id, label: "Reasoning", icon: <Brain />, tooltip: "Thinking effort Kimi applies for the selected model",
+      id: thinking.id, label: "Reasoning", icon: <Brain />, tooltip: "Reasoning effort for the selected model",
       current: thinkingEffortLabel(model, thinking), value: String(thinking.currentValue), disabled: choices.length < 2,
-      ...(offersExplicitEfforts ? {} : { note: "Kimi Code CLI maps thinking to this model's supported effort. Other levels are not offered and are never simulated." }),
+      ...(offersExplicitEfforts ? {} : { note: "The active provider maps thinking to its supported effort. Tasty never simulates unavailable levels." }),
       choices: choices.map((choice) => {
         const label = thinkingEffortLabel(model, { ...thinking, currentValue: choice.value });
         return { value: choice.value, name: label, ...(choice.name.toLowerCase() === label.toLowerCase() ? {} : { description: `Runtime option: ${choice.name}` }) };
@@ -2478,14 +2480,26 @@ function ConfigControl({ control, open, onToggle, onClose, onPick }: { control: 
             const active = choice.value === control.value;
             return <button className={active ? "active" : ""} type="button" role="menuitemradio" aria-checked={active} key={choice.value} onClick={() => onPick(choice.value)}>
               <span><strong>{choice.name}</strong>{choice.description && <small>{choice.description}</small>}</span>
-              {choice.danger && <WarningCircle className="config-danger" />}
-              {active && <Check weight="bold" />}
+              <span className="config-choice-meta">{control.label === "Reasoning" && <EffortMeter value={choice.value} label={choice.name} />}{choice.danger && <WarningCircle className="config-danger" />}{active && <Check weight="bold" />}</span>
             </button>;
           })}
         </div>
         {control.note && <footer className="config-note">{control.note}</footer>}
       </div>, document.body)}
   </>;
+}
+
+function EffortMeter({ value, label }: { value: string; label: string }) {
+  const level = reasoningStrength(`${value} ${label}`);
+  return <span className="effort-meter" aria-hidden="true">{[1, 2, 3, 4].map((step) => <i className={step <= level ? "active" : ""} key={step} />)}</span>;
+}
+
+export function reasoningStrength(value: string): number {
+  if (/\b(?:off|none|disabled)\b/i.test(value)) return 0;
+  if (/\b(?:minimal|low)\b/i.test(value)) return 1;
+  if (/\b(?:high)\b/i.test(value) && !/\b(?:xhigh|max|ultra)\b/i.test(value)) return 3;
+  if (/\b(?:xhigh|max|ultra)\b/i.test(value)) return 4;
+  return 2;
 }
 
 function YoloConfirmDialog({ busy, onConfirm, onCancel }: { busy: boolean; onConfirm: () => void; onCancel: () => void }) {
@@ -2498,7 +2512,7 @@ function YoloConfirmDialog({ busy, onConfirm, onCancel }: { busy: boolean; onCon
   }, [onCancel]);
   return <div className="manage-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
     <div className="manage-dialog" role="alertdialog" aria-modal="true" aria-labelledby="yolo-title" aria-describedby="yolo-description" onKeyDown={trapDialogFocus}>
-      <header><span><strong id="yolo-title">Enable YOLO mode?</strong><small id="yolo-description">Kimi will run every tool and command without asking first. Enable this only for workspaces you fully trust. You will not be asked again.</small></span><button type="button" aria-label="Close" disabled={busy} onClick={onCancel}><X /></button></header>
+      <header><span><strong id="yolo-title">Enable YOLO mode?</strong><small id="yolo-description">The active agent will run every tool and command without asking first. Enable this only for workspaces you fully trust. You will not be asked again.</small></span><button type="button" aria-label="Close" disabled={busy} onClick={onCancel}><X /></button></header>
       <footer><button className="secondary" type="button" disabled={busy} onClick={onCancel}>Cancel</button><button className="danger" type="button" autoFocus disabled={busy} onClick={onConfirm}>{busy ? "Enabling…" : "Enable YOLO"}</button></footer>
     </div>
   </div>;
@@ -2542,7 +2556,7 @@ export function isYoloChoice(option: ConfigOption | undefined, value: string): b
 export function modeDescription(value: string, name: string): string {
   const key = `${value} ${name}`.toLowerCase();
   if (/yolo|full[ -]?access|bypass/.test(key)) return "Full access: runs everything without asking";
-  if (/plan/.test(key)) return "Kimi plans first and asks before acting";
+  if (/plan/.test(key)) return "Plans first and asks before acting";
   if (/auto|accept|agent/.test(key)) return "Runs actions without asking each time";
   if (/default|ask/.test(key)) return "Asks before sensitive actions";
   return "Runtime permission mode";
@@ -2568,11 +2582,13 @@ export function applyDraftConfig(defaults: ConfigOption[], draft: Record<string,
   return defaults.map((option) => draft[option.id] !== undefined ? { ...option, currentValue: draft[option.id]! } : option);
 }
 
-function SettingsDialog({ category, query, preferences, auth, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onShowOnboarding }: {
+function SettingsDialog({ category, query, preferences, auth, providers, selectedProvider, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onShowOnboarding }: {
   category: SettingsCategory;
   query: string;
   preferences: Preferences;
   auth: AuthState | undefined;
+  providers: ProviderState[];
+  selectedProvider: ProviderId;
   cwd: string;
   quota: KimiQuota | undefined;
   quotaError: string | undefined;
@@ -2584,9 +2600,9 @@ function SettingsDialog({ category, query, preferences, auth, cwd, quota, quotaE
   onPreferences: (patch: Partial<Preferences>) => void;
   onClose: () => void;
   onChooseWorkspace: () => Promise<void>;
-  onInstallCli: () => Promise<void>;
-  onLogin: () => Promise<void>;
-  onLogout: () => Promise<void>;
+  onInstallCli: (provider?: ProviderId) => Promise<void>;
+  onLogin: (provider?: ProviderId) => Promise<void>;
+  onLogout: (provider?: ProviderId) => Promise<void>;
   onRefreshQuota: () => Promise<void>;
   onCheckUpdates: (manual?: boolean) => Promise<void>;
   onInstallUpdate: () => Promise<void>;
@@ -2596,7 +2612,7 @@ function SettingsDialog({ category, query, preferences, auth, cwd, quota, quotaE
     { id: "general", label: "General", keywords: "workspace folder startup onboarding density send enter shift keyboard", icon: <SlidersHorizontal /> },
     { id: "appearance", label: "Appearance", keywords: "theme light dark colors accent font text zoom", icon: <Palette /> },
     { id: "layout", label: "Layout", keywords: "sidebar side panel rail resize left right", icon: <SidebarSimple /> },
-    { id: "account", label: "Account", keywords: "profile login logout kimi plan cli", icon: <UserCircle /> },
+    { id: "account", label: "Providers", keywords: "profile login logout kimi codex openai claude anthropic cursor cli", icon: <UserCircle /> },
     { id: "usage", label: "Usage & limits", keywords: "quota subscription plan limits", icon: <Gauge /> },
     { id: "updates", label: "Updates", keywords: "version install restart release", icon: <DownloadSimple /> },
     { id: "about", label: "About", keywords: "open source github license desktop", icon: <Info /> },
@@ -2604,12 +2620,12 @@ function SettingsDialog({ category, query, preferences, auth, cwd, quota, quotaE
   const normalizedQuery = query.trim().toLowerCase();
   const visibleCategories = categories.filter((item) => !normalizedQuery || `${item.label} ${item.keywords}`.toLowerCase().includes(normalizedQuery));
   const current = categories.find((item) => item.id === category) ?? categories[0]!;
-  const updateTitle = updateStatus.phase === "available" ? `Version ${updateStatus.version} is available` : updateStatus.phase === "downloading" ? `Downloading ${updateStatus.version}` : updateStatus.phase === "installing" ? `Installing ${updateStatus.version}` : updateStatus.phase === "checking" ? "Checking for updates" : updateStatus.phase === "current" ? "Kimi Code Desktop is up to date" : updateStatus.phase === "error" ? "Update check failed" : "Automatic updates";
+  const updateTitle = updateStatus.phase === "available" ? `Version ${updateStatus.version} is available` : updateStatus.phase === "downloading" ? `Downloading ${updateStatus.version}` : updateStatus.phase === "installing" ? `Installing ${updateStatus.version}` : updateStatus.phase === "checking" ? "Checking for updates" : updateStatus.phase === "current" ? "Tasty is up to date" : updateStatus.phase === "error" ? "Update check failed" : "Automatic updates";
   const updateMessage = updateStatus.phase === "downloading" ? `${updateStatus.percent ?? 0}% complete` : updateStatus.phase === "installing" ? "The app will restart when installation finishes." : updateStatus.phase === "error" ? updateStatus.message : updateStatus.currentVersion ? `Installed version ${updateStatus.currentVersion}` : updateStatus.version ? `Installed version ${updateStatus.version}` : "Updates are checked automatically when the app starts.";
 
   return <div className="settings-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onKeyDown={trapDialogFocus}>
-      <header className="settings-titlebar"><div><GearSix /><span><strong id="settings-title">Settings</strong><small>Customize Kimi Code Desktop</small></span></div><button className="rail-icon" type="button" aria-label="Close settings" onClick={onClose}><X /></button></header>
+      <header className="settings-titlebar"><div><GearSix /><span><strong id="settings-title">Settings</strong><small>Customize Tasty</small></span></div><button className="rail-icon" type="button" aria-label="Close settings" onClick={onClose}><X /></button></header>
       <div className="settings-shell">
         <aside className="settings-nav">
           <label className="settings-search"><MagnifyingGlass /><input autoFocus value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search settings…" aria-label="Search settings" />{query && <button type="button" aria-label="Clear settings search" onClick={() => onQuery("")}><X /></button>}</label>
@@ -2636,13 +2652,13 @@ function SettingsDialog({ category, query, preferences, auth, cwd, quota, quotaE
               <section className="settings-group"><h2>Sizing</h2><SettingsRow title="Sidebar width" description="Drag the divider in the workspace or adjust it here."><label className="settings-range"><input type="range" min="84" max="420" step="4" value={preferences.sidebarWidth} onChange={(event) => onPreferences({ sidebarCollapsed: false, sidebarWidth: clampPanelWidth("sidebar", Number(event.target.value)) })} /><output>{preferences.sidebarWidth}px</output></label></SettingsRow><SettingsRow title="Work panel width" description="Applies to every work-panel tab, including desktop preview."><label className="settings-range"><input type="range" min="260" max="1200" step="4" value={preferences.railWidth} onChange={(event) => onPreferences({ railWidth: clampPanelWidth("rail", Number(event.target.value)) })} /><output>{preferences.railWidth}px</output></label></SettingsRow><SettingsRow title="Restore layout" description="Return panels to their balanced default positions and sizes."><button className="secondary" type="button" onClick={() => onPreferences({ sidebarCollapsed: false, sidebarSide: "left", railSide: "right", sidebarWidth: defaultPreferences.sidebarWidth, railWidth: defaultPreferences.railWidth })}><ArrowsClockwise /> Reset panels</button></SettingsRow></section>
             </>}
 
-            {category === "account" && <section className="settings-group"><h2>Kimi account</h2><div className="account-card"><UserCircle /><div><strong>{auth?.authenticated ? "Kimi account connected" : "Not signed in"}</strong><small>{auth?.installed ? "Official Kimi Code CLI detected" : "Kimi Code CLI is not installed"}</small></div></div><code className="account-home">{auth?.home ?? "Loading local Kimi home…"}</code><p className="settings-note">The app uses each person's own local Kimi login and subscription. Credentials never enter this repository.</p>{auth?.authenticated ? <button className="secondary danger-text" type="button" disabled={auth.loginRunning || auth.installRunning} onClick={() => void onLogout()}><SignOut /> Log out</button> : auth?.installed ? <button className="primary" type="button" disabled={auth.loginRunning} onClick={() => void onLogin()}><SignIn /> Sign in</button> : <button className="primary" type="button" onClick={() => void onInstallCli()}><DownloadSimple /> Open guide / check again</button>}</section>}
+            {category === "account" && <section className="settings-group"><h2>Agent providers</h2><div className="settings-provider-list">{providers.map((provider) => <article className={provider.id === selectedProvider ? "active" : ""} key={provider.id}><ProviderMark provider={provider.id} /><div><strong>{provider.name}</strong><small>{!provider.installed ? "CLI not installed" : provider.authenticated === true ? provider.account ?? "Account connected" : provider.authenticated === false ? "Sign in required" : provider.account ?? "CLI ready"}</small></div><button className="provider-default" type="button" disabled={provider.id === selectedProvider} onClick={() => onPreferences({ provider: provider.id })}>{provider.id === selectedProvider ? "Default" : "Use"}</button>{!provider.installed ? <button className="secondary" type="button" onClick={() => void onInstallCli(provider.id)}><DownloadSimple /> Guide</button> : provider.authenticated === true ? <button className="secondary danger-text" type="button" disabled={provider.loginRunning} onClick={() => void onLogout(provider.id)}><SignOut /> Log out</button> : <button className="secondary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin(provider.id)}><SignIn />{provider.loginRunning ? "Waiting…" : "Sign in"}</button>}</article>)}</div>{selectedProvider === "kimi" && auth?.home && <code className="account-home">{auth.home}</code>}<p className="settings-note">Tasty starts official local provider runtimes. Passwords and API credentials stay in each provider's own account store and never enter this repository.</p></section>}
 
             {category === "usage" && <div className="settings-usage"><UsagePanel quota={quota} error={quotaError} loading={quotaLoading} onRefresh={onRefreshQuota} /><p className="settings-note">Subscription limits come from the official local Kimi CLI <code>/usage</code> panel and refresh on focus and every minute. New official limit windows appear automatically.</p></div>}
 
             {category === "updates" && <section className="settings-group update-settings"><h2>App updates</h2><div className={`update-card ${updateStatus.phase}`}><span className="update-state-icon">{updateStatus.phase === "current" ? <Check /> : updateStatus.phase === "error" ? <WarningCircle /> : updateStatus.phase === "available" ? <DownloadSimple /> : <ArrowsClockwise />}</span><div><strong>{updateTitle}</strong><small>{updateMessage}</small></div><div className="update-actions"><button className="secondary" type="button" disabled={updateStatus.phase === "checking" || updateStatus.phase === "downloading" || updateStatus.phase === "installing"} onClick={() => void onCheckUpdates(true)}><ArrowsClockwise /> Check now</button>{updateStatus.phase === "available" && <button className="primary" type="button" title={turnRunning ? "Finish or cancel the active turn first" : "Install update and restart"} disabled={turnRunning} onClick={() => void onInstallUpdate()}><DownloadSimple /> Install & restart</button>}</div></div>{updateStatus.phase === "downloading" && <div className="update-meter"><span style={{ transform: `scaleX(${(updateStatus.percent ?? 0) / 100})` }} /></div>}<p className="settings-note">Signed releases are verified before installation. Check now performs a real update lookup.</p></section>}
 
-            {category === "about" && <section className="settings-group about-settings"><img src="/kimi-logo.png" alt="" aria-hidden="true" /><h2>Kimi Code Desktop</h2><p>A polished open-source desktop harness for the official Kimi Code CLI. It keeps authentication, workspaces, event history, Git checkpoints, terminal sessions, and previews on your computer.</p><dl><div><dt>Runtime</dt><dd>Official Kimi Code CLI via ACP</dd></div><div><dt>Storage</dt><dd>Local compact event log</dd></div><div><dt>Source</dt><dd>github.com/Leonxlnx/kimi-code-desktop</dd></div></dl></section>}
+            {category === "about" && <section className="settings-group about-settings"><img src="/kimi-logo.png" alt="" aria-hidden="true" /><h2>Tasty</h2><p>An open-source desktop harness for Kimi, OpenAI Codex, Anthropic Claude, and Cursor. Authentication stays with each provider; workspaces and Tasty's event projection remain local.</p><dl><div><dt>Runtimes</dt><dd>ACP, Codex App Server, and stream-json</dd></div><div><dt>Storage</dt><dd>Local compact event log</dd></div><div><dt>Source</dt><dd>github.com/Leonxlnx/kimi-code-desktop</dd></div></dl></section>}
           </div>
         </main>
       </div>
@@ -2663,8 +2679,8 @@ function settingsDescription(category: SettingsCategory): string {
     general: "Workspace defaults and everyday behavior.",
     appearance: "Theme, typography, color, and interface scale.",
     layout: "Place and resize every part of the workspace.",
-    account: "Your local Kimi CLI and subscription identity.",
-    usage: "Live Kimi subscription quota.",
+    account: "Local provider runtimes, accounts, and defaults.",
+    usage: "Kimi subscription quota reported by the local CLI.",
     updates: "Signed releases and update installation.",
     about: "Runtime architecture and open-source information.",
   }[category];
@@ -2817,7 +2833,7 @@ function SidebarSkeleton() {
 
 function StartupScreen({ delayed, error, onRetry }: { delayed: boolean; error?: string; onRetry: () => void }) {
   const needsAttention = delayed || Boolean(error);
-  return <div className="startup-screen" aria-label="Starting Kimi Code" aria-busy={!needsAttention}><div className="startup-intro"><img src="/kimi-logo.png" alt="" aria-hidden="true" /><span>Kimi Code Desktop</span><strong>{needsAttention ? "The local runtime needs attention" : "Opening your workspace"}</strong><small>{error ?? (delayed ? "Kimi Code did not become ready in time. Restart it safely without closing the app." : "Connecting to your local Kimi runtime and restoring sessions")}</small>{needsAttention ? <button type="button" onClick={onRetry}><ArrowsClockwise /> Restart local runtime</button> : <div className="startup-progress" aria-hidden="true"><i /></div>}</div></div>;
+  return <div className="startup-screen" aria-label="Starting Tasty" aria-busy={!needsAttention}><div className="startup-intro"><img src="/kimi-logo.png" alt="" aria-hidden="true" /><span>Tasty</span><strong>{needsAttention ? "The local runtime needs attention" : "Opening your workspace"}</strong><small>{error ?? (delayed ? "The local service did not become ready in time. Restart it safely without closing the app." : "Connecting to your local agent runtimes and restoring sessions")}</small>{needsAttention ? <button type="button" onClick={onRetry}><ArrowsClockwise /> Restart local runtime</button> : <div className="startup-progress" aria-hidden="true"><i /></div>}</div></div>;
 }
 
 export function serverWebSocketUrl(connection: unknown): string {
@@ -2845,7 +2861,7 @@ export async function localServerUrl(
       if (attempt + 1 < attempts && retryDelayMs > 0) await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
     }
   }
-  throw new Error(`Could not locate the local Kimi runtime: ${failure instanceof Error ? failure.message : String(failure)}`);
+  throw new Error(`Could not locate the local Tasty runtime: ${failure instanceof Error ? failure.message : String(failure)}`);
 }
 
 export function workspaceName(cwd: string): string {
@@ -3710,7 +3726,7 @@ export function normalizeThread(value: Thread): Thread {
     } } : {}),
     cwd: String(thread.cwd ?? ""),
     kind: thread.kind === "chat" ? "chat" : "project",
-    title: typeof thread.title === "string" && thread.title ? thread.title : "Kimi session",
+    title: typeof thread.title === "string" && thread.title ? thread.title : "Agent session",
     createdAt,
     updatedAt: typeof thread.updatedAt === "string" ? thread.updatedAt : createdAt,
     running: Boolean(thread.running),
@@ -3738,7 +3754,7 @@ function flattenOptions(option: ConfigOption): Array<{ value: string; name: stri
 
 export function filterByTitle<T extends { title?: string }>(items: T[], query: string): T[] {
   const normalized = query.trim().toLowerCase();
-  return normalized ? items.filter((item) => (item.title ?? "Kimi session").toLowerCase().includes(normalized)) : items;
+  return normalized ? items.filter((item) => (item.title ?? "Agent session").toLowerCase().includes(normalized)) : items;
 }
 
 function normalizeProvider(value: unknown): ProviderId {

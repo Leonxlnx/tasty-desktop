@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, latestTimelineItemId, localServerUrl, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, presentDiagnostic, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reorderPaths, serverWebSocketUrl, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, latestTimelineItemId, localServerUrl, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, presentDiagnostic, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, reorderPaths, serverWebSocketUrl, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
 
 describe("agent skill install requests", () => {
   it("opens confirmation only for a source inside the requested workspace", () => {
@@ -49,7 +49,7 @@ describe("composer send key", () => {
   });
 
   it("turns raw connection errors into a recoverable message", () => {
-    expect(presentDiagnostic("ACP connection closed")).toBe("Kimi runtime disconnected. Reconnecting without stopping active work.");
+    expect(presentDiagnostic("ACP connection closed")).toBe("Agent runtime disconnected. Reconnecting without stopping active work.");
     expect(presentDiagnostic("Workspace path is required")).toBe("Workspace path is required");
   });
 
@@ -160,6 +160,18 @@ describe("turn activity", () => {
     ];
     const updated = applyEvents([base], events as never)[0]!;
     expect(updated.messages.filter((message) => message.role === "assistant").map((message) => message.text)).toEqual(["Inspecting.", "Applying."]);
+  });
+});
+
+describe("reasoning effort presentation", () => {
+  it("maps provider-specific labels to a stable four-step meter", () => {
+    expect(reasoningStrength("off")).toBe(0);
+    expect(reasoningStrength("low")).toBe(1);
+    expect(reasoningStrength("medium")).toBe(2);
+    expect(reasoningStrength("high")).toBe(3);
+    expect(reasoningStrength("xhigh")).toBe(4);
+    expect(reasoningStrength("max")).toBe(4);
+    expect(reasoningStrength("ultra")).toBe(4);
   });
 });
 
