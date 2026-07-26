@@ -1,6 +1,6 @@
 # Tasty
 
-Tasty is an open-source Windows desktop harness for local coding agents. It gives Kimi, OpenAI Codex, Anthropic Claude, and Cursor one project-aware interface without moving provider credentials into the app.
+Tasty is an open-source desktop control panel for local coding agents. It brings Kimi, OpenAI Codex, Anthropic Claude, and Cursor into one project-aware workspace without moving provider credentials into the app.
 
 > [!IMPORTANT]
 > Tasty is a community project. It is not affiliated with or endorsed by Moonshot AI, OpenAI, Anthropic, or Cursor.
@@ -57,7 +57,7 @@ See [Provider runtimes](docs/PROVIDERS.md) for supported behavior and current li
 4. Sign in through the provider CLI flow.
 5. Open a folder for project work or start a standalone chat.
 
-Existing Kimi Code Desktop 0.9 installations upgrade in place. Tasty deliberately keeps the legacy Windows application identifier and local preference key so existing settings, chats, and updater trust continue to work.
+Existing pre-rebrand 0.9 installations upgrade in place. Tasty keeps the required internal compatibility keys so existing settings, chats, and updater trust continue to work.
 
 ## Shortcuts
 
