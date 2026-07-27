@@ -373,7 +373,10 @@ async function startRuntime(provider: ProviderId, instanceId?: string): Promise<
 async function onRuntimeEvent(provider: ProviderId, event: RuntimeEvent): Promise<void> {
   if (event.type === "diagnostic") {
     (event.level === "error" ? console.error : console.info)(`[${provider}:${event.level}] ${event.message}`);
-    if (event.level === "error") emitDiagnostic("error", event.message, `${provider}-runtime`);
+    if (event.level === "error") {
+      const diagnostic = diagnostics.record("error", event.message, `${provider}-runtime`);
+      if (!isTransientWindowsSpawnError(event.message)) pushAll("server.diagnostics", { type: "diagnostic", ...diagnostic });
+    }
     return;
   }
   await ingestion.ingest(event);

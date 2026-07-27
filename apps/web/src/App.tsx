@@ -219,10 +219,14 @@ function composerPrimaryLabel(action: ComposerPrimaryAction): string {
   return "Send task";
 }
 
-export function presentDiagnostic(message: string): string {
-  return /ACP connection closed|Server disconnected|Server is not connected/i.test(message)
+export function presentDiagnostic(message: string): string | undefined {
+  const normalized = message.trim();
+  if (!normalized || /\bspawn\b.*\bEPERM\b/i.test(normalized)) return undefined;
+  if (/\bspawn\b.*\bENOENT\b/i.test(normalized)) return "A required local tool was not found. Check the selected provider in Settings.";
+  if (/\bspawn\b.*\bEACCES\b/i.test(normalized)) return "Windows denied access to a required local tool. Check its permissions, then try again.";
+  return /ACP connection closed|Server disconnected|Server is not connected/i.test(normalized)
     ? "Agent runtime disconnected. Reconnecting without stopping active work."
-    : message;
+    : normalized.replace(/^Error:\s*/i, "");
 }
 
 export function shortcutFromEvent(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }): string | undefined {
@@ -489,7 +493,10 @@ export function App() {
   const layoutSidebarWidth = preferences.sidebarCollapsed ? collapsedSidebarWidth : preferences.sidebarWidth;
   const renderedRailWidth = effectiveRailWidth(preferences.railWidth, viewportWidth, layoutSidebarWidth);
   const previewPanelMode = renderedRailWidth >= 1_080 ? "Wide" : renderedRailWidth >= 760 ? "Desktop" : "Compact";
-  const setDiagnostic = useCallback((message: string) => setDiagnostics((current) => [...current, presentDiagnostic(message)].slice(-50)), []);
+  const setDiagnostic = useCallback((message: string) => {
+    const presented = presentDiagnostic(message);
+    if (presented) setDiagnostics((current) => [...current, presented].slice(-50));
+  }, []);
   const initializeProjectDetails = useCallback((element: HTMLDetailsElement | null) => {
     if (!element || initializedProjectDetails.current.has(element)) return;
     initializedProjectDetails.current.add(element);

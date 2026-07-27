@@ -95,6 +95,8 @@ describe("composer send key", () => {
   it("turns raw connection errors into a recoverable message", () => {
     expect(presentDiagnostic("ACP connection closed")).toBe("Agent runtime disconnected. Reconnecting without stopping active work.");
     expect(presentDiagnostic("Workspace path is required")).toBe("Workspace path is required");
+    expect(presentDiagnostic("spawn EPERM")).toBeUndefined();
+    expect(presentDiagnostic("spawn ENOENT")).toBe("A required local tool was not found. Check the selected provider in Settings.");
   });
 
   it("recovers only after a reconnect remains unresolved", () => {
