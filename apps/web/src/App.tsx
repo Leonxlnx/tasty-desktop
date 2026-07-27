@@ -34,6 +34,7 @@ type BackgroundTask = {
 };
 type GitFile = { path: string; originalPath?: string; staged: boolean; unstaged: boolean; untracked: boolean; indexStatus: string; worktreeStatus: string };
 type GitStatus = { root: string; branch: string; upstream?: string; ahead: number; behind: number; files: GitFile[] };
+type GitRepository = { current: string; branches: string[]; remotes: Array<{ name: string; url: string }> };
 type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: NonNullable<Usage["tokens"]> };
 type ActivityEntry = { id: string; turnId: string; kind: "thought" | "tool"; status: "pending" | "in_progress" | "completed" | "failed"; text: string; toolCallId?: string; seq: number; updatedSeq?: number; createdAt: string; updatedAt: string };
 type QueuedPrompt = { queuedId: string; text: string; mode: "queue" | "steer"; createdAt: string; images: Array<{ name: string; mimeType: string }>; origin?: "user" | "background_task" };
@@ -239,6 +240,16 @@ export function editorUrl(editor: "vscode" | "cursor", path: string): string {
   return `${editor}://file/${encodeURI(path.replaceAll("\\", "/"))}`;
 }
 
+export function repositoryNameFromUrl(url: string): string | undefined {
+  if (!/^(?:https:\/\/\S+|ssh:\/\/\S+|git@[\w.-]+:\S+)$/.test(url.trim())) return undefined;
+  const name = url.trim().replace(/[\\/]+$/, "").split(/[\\/:]/).at(-1)?.replace(/\.git$/i, "");
+  return name && /^[a-zA-Z0-9_.-]+$/.test(name) ? name : undefined;
+}
+
+export function joinLocalPath(parent: string, child: string): string {
+  return `${parent.replace(/[\\/]+$/, "")}${parent.includes("\\") ? "\\" : "/"}${child}`;
+}
+
 export function shouldScheduleRuntimeRecovery(connection: ConnectionState, scheduled: boolean): boolean {
   return connection === "reconnecting" && !scheduled;
 }
@@ -383,6 +394,12 @@ export function App() {
   const [gitDiff, setGitDiff] = useState<{ path: string; diff: string }>();
   const [commitMessage, setCommitMessage] = useState("");
   const [gitBusy, setGitBusy] = useState(false);
+  const [gitRepository, setGitRepository] = useState<GitRepository>();
+  const [branchDraft, setBranchDraft] = useState("");
+  const [publishName, setPublishName] = useState("");
+  const [publishVisibility, setPublishVisibility] = useState<"private" | "public">("private");
+  const [pullRequest, setPullRequest] = useState({ title: "", body: "", draft: true });
+  const [cloneUrl, setCloneUrl] = useState("");
   const [quota, setQuota] = useState<KimiQuota>();
   const [quotaError, setQuotaError] = useState<string>();
   const [quotaLoading, setQuotaLoading] = useState(false);
@@ -775,6 +792,7 @@ export function App() {
 
   useEffect(() => {
     setGitStatus(undefined);
+    setGitRepository(undefined);
     setGitStatusCwd(undefined);
     setGitDiff(undefined);
     setCommitMessage("");
@@ -832,13 +850,18 @@ export function App() {
     const requestedCwd = workspaceCwd;
     setGitBusy(true);
     try {
-      const status = await call("git.status", { cwd: requestedCwd }) as GitStatus;
+      const [status, repository] = await Promise.all([
+        call("git.status", { cwd: requestedCwd }) as Promise<GitStatus>,
+        call("git.repository", { cwd: requestedCwd }) as Promise<GitRepository>,
+      ]);
       if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
       setGitStatus(status);
+      setGitRepository(repository);
       setGitStatusCwd(requestedCwd);
     } catch (error) {
       if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
       setGitStatus(undefined);
+      setGitRepository(undefined);
       setGitStatusCwd(undefined);
       setDiagnostic(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1122,6 +1145,7 @@ export function App() {
     setRailView(railForStandaloneChat);
     setSelectedFile(undefined);
     setGitStatus(undefined);
+    setGitRepository(undefined);
     setGitStatusCwd(undefined);
     setGitDiff(undefined);
     setCommitMessage("");
@@ -1599,6 +1623,63 @@ export function App() {
     } finally {
       if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitBusy(false);
     }
+  }
+
+  async function updateGit(method: "git.createBranch" | "git.switchBranch" | "git.push" | "git.pull", params: Record<string, unknown>) {
+    if (!workspaceCwd) return;
+    setGitBusy(true);
+    try {
+      const status = await call(method, { cwd: workspaceCwd, ...params }) as GitStatus;
+      setGitStatus(status);
+      setGitStatusCwd(workspaceCwd);
+      setGitRepository(await call("git.repository", { cwd: workspaceCwd }) as GitRepository);
+      setBranchDraft("");
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    } finally { setGitBusy(false); }
+  }
+
+  async function publishGit() {
+    if (!workspaceCwd || !publishName.trim()) return;
+    setGitBusy(true);
+    try {
+      const status = await call("git.publish", { cwd: workspaceCwd, name: publishName.trim(), visibility: publishVisibility }) as GitStatus;
+      setGitStatus(status);
+      setGitRepository(await call("git.repository", { cwd: workspaceCwd }) as GitRepository);
+      setDiagnostic(`Published ${publishName.trim()} as a ${publishVisibility} repository.`);
+    } catch (error) { setDiagnostic(error instanceof Error ? error.message : String(error)); }
+    finally { setGitBusy(false); }
+  }
+
+  async function createGitPullRequest() {
+    if (!workspaceCwd || !pullRequest.title.trim()) return;
+    setGitBusy(true);
+    try {
+      const result = await call("git.createPullRequest", { cwd: workspaceCwd, ...pullRequest, title: pullRequest.title.trim() }) as { url: string };
+      setDiagnostic(`Pull request created: ${result.url}`);
+      await openExternalLink(result.url);
+    } catch (error) { setDiagnostic(error instanceof Error ? error.message : String(error)); }
+    finally { setGitBusy(false); }
+  }
+
+  async function cloneGitRepository() {
+    const name = repositoryNameFromUrl(cloneUrl);
+    if (!name) { setDiagnostic("Enter a valid HTTPS or SSH repository URL."); return; }
+    try {
+      if (!isTauri()) throw new Error("Clone destination selection is available in the desktop app");
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const parent = await open({ directory: true, multiple: false, title: "Choose the parent folder for the cloned repository" });
+      if (typeof parent !== "string") return;
+      const destination = joinLocalPath(parent, name);
+      setGitBusy(true);
+      await call("git.clone", { url: cloneUrl.trim(), destination });
+      rememberWorkspace(destination);
+      setCwd(destination);
+      setNavView("projects");
+      setCloneUrl("");
+      setDiagnostic(`Cloned ${name}.`);
+    } catch (error) { setDiagnostic(error instanceof Error ? error.message : String(error)); }
+    finally { setGitBusy(false); }
   }
 
   async function openWorkspaceInEditor() {
@@ -2270,14 +2351,17 @@ export function App() {
             <div className="rail-contextbar"><span><GitBranch /> {gitStatus?.branch ?? "Git changes"}</span><button className="rail-icon" type="button" aria-label="Refresh Git status" disabled={gitBusy} onClick={() => void refreshGit()}><ArrowsClockwise /></button></div>
             {selectedFile && <section className="git-file-preview file-preview"><div><h2>{selectedFile.path}</h2><button type="button" aria-label="Close file preview" onClick={() => setSelectedFile(undefined)}><X /></button></div><pre>{selectedFile.content}</pre></section>}
             {gitStatus ? <>
+              {gitRepository && <section className="git-repository"><div className="git-branch-row"><select aria-label="Current Git branch" value={gitRepository.current} disabled={gitBusy} onChange={(event) => void updateGit("git.switchBranch", { branch: event.target.value })}>{gitRepository.branches.map((branch) => <option value={branch} key={branch}>{branch}</option>)}</select><button className="secondary" type="button" disabled={gitBusy} onClick={() => void updateGit("git.push", {})}><ArrowUp /> Push</button><button className="secondary" type="button" disabled={gitBusy || !gitStatus.upstream} onClick={() => void updateGit("git.pull", {})}><DownloadSimple /> Pull</button></div><div className="git-new-branch"><input value={branchDraft} onChange={(event) => setBranchDraft(event.target.value)} placeholder="new/branch-name" aria-label="New branch name" spellCheck={false} /><button type="button" disabled={gitBusy || !branchDraft.trim()} onClick={() => void updateGit("git.createBranch", { branch: branchDraft.trim() })}><Plus /> Create</button></div></section>}
               <div className="git-summary"><span>{gitStatus.files.length ? `${gitStatus.files.length} changed` : "Working tree clean"}</span>{gitStatus.upstream && <small>{gitStatus.ahead ? `↑${gitStatus.ahead}` : ""}{gitStatus.behind ? ` ↓${gitStatus.behind}` : ""} {gitStatus.upstream}</small>}</div>
               <section className="git-files" aria-label="Changed files">
                 {gitStatus.files.map((file) => <div className={`git-file ${gitDiff?.path === file.path ? "active" : ""}`} key={file.path}><button type="button" onClick={() => void openGitDiff(file.path)}><span className="git-file-status">{file.untracked ? "U" : `${file.indexStatus.replace(".", "")}${file.worktreeStatus.replace(".", "")}`}</span><span title={file.path}>{file.path}</span></button><button type="button" disabled={gitBusy} onClick={() => void changeGitStage(file)}>{file.staged ? "Unstage" : "Stage"}</button></div>)}
                 {!gitStatus.files.length && <div className="git-empty"><Check /> No local changes</div>}
               </section>
               <section className="git-commit"><label htmlFor="commit-message">Commit message</label><textarea id="commit-message" value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe this change" /><button className="primary" type="button" disabled={gitBusy || !commitMessage.trim() || !gitStatus.files.some((file) => file.staged)} onClick={() => void commitGit()}><GitCommit /> Commit staged</button></section>
+              {gitRepository && !gitRepository.remotes.length && <details className="git-network-action"><summary>Publish repository</summary><div><input value={publishName} onChange={(event) => setPublishName(event.target.value)} placeholder="owner/repository" aria-label="GitHub repository name" /><select value={publishVisibility} onChange={(event) => setPublishVisibility(event.target.value as "private" | "public")} aria-label="Repository visibility"><option value="private">Private</option><option value="public">Public</option></select><button type="button" disabled={gitBusy || !publishName.trim()} onClick={() => void publishGit()}>Publish with GitHub CLI</button><small>This creates a remote repository and pushes the current branch. GitHub CLI sign-in is required.</small></div></details>}
+              {gitStatus.upstream && <details className="git-network-action"><summary>Create pull request</summary><div><input value={pullRequest.title} onChange={(event) => setPullRequest((current) => ({ ...current, title: event.target.value }))} placeholder="Pull request title" aria-label="Pull request title" /><textarea value={pullRequest.body} onChange={(event) => setPullRequest((current) => ({ ...current, body: event.target.value }))} placeholder="Summary and test plan" aria-label="Pull request description" /><label><input type="checkbox" checked={pullRequest.draft} onChange={(event) => setPullRequest((current) => ({ ...current, draft: event.target.checked }))} /> Create as draft</label><button type="button" disabled={gitBusy || !pullRequest.title.trim()} onClick={() => void createGitPullRequest()}>Create with GitHub CLI</button></div></details>}
               {gitDiff && <section className="git-diff"><div><strong>{gitDiff.path}</strong><button type="button" onClick={() => setGitDiff(undefined)} aria-label="Close diff"><X /></button></div><pre>{gitDiff.diff || "No textual diff available."}</pre></section>}
-            </> : <div className="git-empty">{gitBusy ? "Reading repository…" : "This workspace is not a Git repository."}</div>}
+            </> : <div className="git-clone"><GitBranch /><strong>{gitBusy ? "Reading repository…" : "No Git repository here"}</strong><span>Clone an HTTPS or SSH repository into a folder you choose.</span><input value={cloneUrl} onChange={(event) => setCloneUrl(event.target.value)} placeholder="https://github.com/owner/repo.git" aria-label="Repository clone URL" spellCheck={false} /><button className="primary" type="button" disabled={gitBusy || !repositoryNameFromUrl(cloneUrl)} onClick={() => void cloneGitRepository()}><DownloadSimple /> Clone repository</button></div>}
           </>}
 
           {railView === "terminal" && <>
@@ -3714,7 +3798,7 @@ function ChangesCard({ diff, onReview }: { diff: string; onReview: () => void })
   if (!summary.files.length) return null;
   return <details className="changes-card">
     <summary><span><GitBranch /><strong>Edited {summary.files.length} {summary.files.length === 1 ? "file" : "files"}</strong></span><span className="diff-totals"><b>+{summary.additions}</b><i>−{summary.deletions}</i><CaretDown /></span></summary>
-    <div className="change-list">{summary.files.slice(0, showAll ? undefined : 3).map((file) => <div className="change-row" key={file.path}><span>{file.path}</span><small><b>+{file.additions}</b><i>−{file.deletions}</i></small></div>)}<div className="changes-actions">{summary.files.length > 3 && <button type="button" onClick={() => setShowAll((value) => !value)}>{showAll ? "Show less" : `Show ${summary.files.length - 3} more`}</button>}<button type="button" onClick={onReview}>Open Changes</button></div></div>
+    <div className="change-list">{summary.files.slice(0, showAll ? undefined : 3).map((file) => <div className="change-row" key={file.path}><span>{file.path}</span><small><b>+{file.additions}</b><i>−{file.deletions}</i></small></div>)}<div className="changes-actions">{summary.files.length > 3 && <button type="button" onClick={() => setShowAll((value) => !value)}>{showAll ? "Show less" : `Show ${summary.files.length - 3} more`}</button>}<button type="button" onClick={() => void navigator.clipboard.writeText(diff)}>Copy patch</button><button type="button" onClick={onReview}>Open Changes</button></div></div>
   </details>;
 }
 

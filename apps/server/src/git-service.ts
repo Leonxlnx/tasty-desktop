@@ -24,6 +24,8 @@ export type GitStatus = {
   files: GitFile[];
 };
 
+export type GitRepository = { current: string; branches: string[]; remotes: Array<{ name: string; url: string }> };
+
 export class GitService {
   readonly #git: string;
 
@@ -71,6 +73,80 @@ export class GitService {
     return { commit, status: await this.status(status.root) };
   }
 
+  async repository(cwd: string): Promise<GitRepository> {
+    const status = await this.status(cwd);
+    const branches = (await this.#run(status.root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])).split(/\r?\n/).filter(Boolean);
+    const remoteLines = (await this.#run(status.root, ["remote", "-v"])).split(/\r?\n/).filter((line) => line.endsWith(" (fetch)"));
+    return {
+      current: status.branch,
+      branches,
+      remotes: remoteLines.flatMap((line) => {
+        const match = /^(\S+)\s+(.+)\s+\(fetch\)$/.exec(line);
+        return match ? [{ name: match[1]!, url: match[2]! }] : [];
+      }),
+    };
+  }
+
+  async createBranch(cwd: string, branch: string): Promise<GitStatus> {
+    const status = await this.status(cwd);
+    await this.#validateBranch(status.root, branch);
+    await this.#run(status.root, ["switch", "-c", branch]);
+    return this.status(status.root);
+  }
+
+  async switchBranch(cwd: string, branch: string): Promise<GitStatus> {
+    const status = await this.status(cwd);
+    await this.#validateBranch(status.root, branch);
+    const branches = (await this.repository(status.root)).branches;
+    if (!branches.includes(branch)) throw new Error("Choose an existing local branch");
+    await this.#run(status.root, ["switch", branch]);
+    return this.status(status.root);
+  }
+
+  async push(cwd: string, remote = "origin"): Promise<GitStatus> {
+    const status = await this.status(cwd);
+    requireRemoteName(remote);
+    if (status.branch === "HEAD" || status.branch === "(detached)") throw new Error("Create or switch to a branch before pushing");
+    if (status.upstream) await this.#run(status.root, ["push"]);
+    else {
+      await this.#run(status.root, ["remote", "get-url", remote]);
+      await this.#run(status.root, ["push", "--set-upstream", remote, status.branch]);
+    }
+    return this.status(status.root);
+  }
+
+  async pull(cwd: string): Promise<GitStatus> {
+    const status = await this.status(cwd);
+    if (!status.upstream) throw new Error("Push this branch once before pulling");
+    await this.#run(status.root, ["pull", "--ff-only"]);
+    return this.status(status.root);
+  }
+
+  async clone(url: string, destination: string): Promise<GitStatus> {
+    requireRemoteUrl(url);
+    const target = resolve(destination);
+    await mkdir(dirname(target), { recursive: true });
+    await this.#run(dirname(target), ["clone", "--", url, target]);
+    return this.status(target);
+  }
+
+  async publish(cwd: string, name: string, visibility: "private" | "public"): Promise<GitStatus> {
+    const status = await this.status(cwd);
+    if (!/^(?:[a-zA-Z0-9_.-]+\/)?[a-zA-Z0-9_.-]+$/.test(name)) throw new Error("Repository name must be owner/name or name");
+    if ((await this.repository(status.root)).remotes.some((remote) => remote.name === "origin")) throw new Error("This repository already has an origin remote");
+    await this.#runGh(status.root, ["repo", "create", name, `--${visibility}`, "--source", status.root, "--remote", "origin", "--push"]);
+    return this.status(status.root);
+  }
+
+  async createPullRequest(cwd: string, title: string, body: string, draft: boolean): Promise<{ url: string }> {
+    const status = await this.status(cwd);
+    const args = ["pr", "create", "--title", title.trim(), "--body", body.trim() || "Created with Tasty"];
+    if (draft) args.push("--draft");
+    const url = await this.#runGh(status.root, args);
+    if (!/^https:\/\//.test(url)) throw new Error("GitHub CLI did not return a pull request URL");
+    return { url };
+  }
+
   async createWorktree(cwd: string, destination: string, id: string): Promise<{ cwd: string; sourceCwd: string; branch: string }> {
     const sourceCwd = await this.#root(cwd);
     const target = resolve(destination);
@@ -89,6 +165,11 @@ export class GitService {
     return resolve(await this.#run(resolve(cwd), ["rev-parse", "--show-toplevel"]));
   }
 
+  async #validateBranch(cwd: string, branch: string): Promise<void> {
+    if (!branch.trim() || branch.startsWith("-") || branch.length > 200) throw new Error("Enter a valid branch name");
+    await this.#run(cwd, ["check-ref-format", "--branch", branch]);
+  }
+
   async #run(cwd: string, args: string[], trim = true): Promise<string> {
     const result = await exec(this.#git, ["-C", resolve(cwd), ...args], { windowsHide: true, maxBuffer: 100 * 1024 * 1024 });
     return trim ? result.stdout.trim() : result.stdout;
@@ -103,6 +184,24 @@ export class GitService {
       throw error;
     }
   }
+
+  async #runGh(cwd: string, args: string[]): Promise<string> {
+    try {
+      const result = await exec(process.env.GH_BINARY ?? "gh", args, { cwd: resolve(cwd), windowsHide: true, maxBuffer: 10 * 1024 * 1024 });
+      return result.stdout.trim();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("Install and sign in to GitHub CLI to use publishing and pull requests");
+      throw error;
+    }
+  }
+}
+
+export function requireRemoteUrl(url: string): void {
+  if (!/^(?:https:\/\/[^\s]+|ssh:\/\/[^\s]+|git@[\w.-]+:[^\s]+)$/.test(url)) throw new Error("Clone URL must use HTTPS or SSH");
+}
+
+function requireRemoteName(remote: string): void {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(remote)) throw new Error("Invalid Git remote name");
 }
 
 export function parseStatus(root: string, output: string): GitStatus {

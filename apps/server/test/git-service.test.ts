@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { findGitBinary } from "../src/checkpoint-reactor.js";
-import { GitService } from "../src/git-service.js";
+import { GitService, requireRemoteUrl } from "../src/git-service.js";
 
 const exec = promisify(execFile);
 
@@ -44,6 +44,35 @@ describe("GitService", () => {
     await exec(git, ["-C", root, "init"]);
     const service = new GitService(git);
     await expect(service.stage(root, ["../outside.txt"])).rejects.toThrow("not part of the current change set");
+  });
+
+  it("creates, switches, and publishes branches to an explicit remote", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tasty-git-branches-"));
+    const remote = await mkdtemp(join(tmpdir(), "tasty-git-remote-"));
+    const git = findGitBinary();
+    await exec(git, ["-C", root, "init"]);
+    await exec(git, ["-C", root, "config", "user.name", "Test"]);
+    await exec(git, ["-C", root, "config", "user.email", "test@example.invalid"]);
+    await writeFile(join(root, "tracked.txt"), "base\n", "utf8");
+    await exec(git, ["-C", root, "add", "."]);
+    await exec(git, ["-C", root, "commit", "-m", "base"]);
+    await exec(git, ["-C", remote, "init", "--bare"]);
+    await exec(git, ["-C", root, "remote", "add", "origin", remote]);
+
+    const service = new GitService(git);
+    const initial = await service.status(root);
+    expect((await service.createBranch(root, "feature/safe")).branch).toBe("feature/safe");
+    expect((await service.repository(root)).branches).toContain("feature/safe");
+    expect((await service.switchBranch(root, initial.branch)).branch).toBe(initial.branch);
+    expect((await service.push(root)).upstream).toBe(`origin/${initial.branch}`);
+    await expect(service.switchBranch(root, "missing")).rejects.toThrow("existing local branch");
+  });
+
+  it("accepts only explicit HTTPS or SSH clone URLs", () => {
+    expect(() => requireRemoteUrl("https://github.com/example/repo.git")).not.toThrow();
+    expect(() => requireRemoteUrl("git@github.com:example/repo.git")).not.toThrow();
+    expect(() => requireRemoteUrl("C:\\private\\repo")).toThrow("HTTPS or SSH");
+    expect(() => requireRemoteUrl("--upload-pack=evil")).toThrow("HTTPS or SSH");
   });
 
   it("creates an isolated branch worktree and can clean up an unused creation", async () => {

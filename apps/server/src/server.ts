@@ -81,6 +81,14 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("git.stage"), params: z.object({ cwd: z.string().min(1), paths: z.array(z.string().min(1)).min(1).max(500) }) }),
   z.object({ id, method: z.literal("git.unstage"), params: z.object({ cwd: z.string().min(1), paths: z.array(z.string().min(1)).min(1).max(500) }) }),
   z.object({ id, method: z.literal("git.commit"), params: z.object({ cwd: z.string().min(1), message: z.string().trim().min(1).max(2000) }) }),
+  z.object({ id, method: z.literal("git.repository"), params: z.object({ cwd: z.string().min(1) }) }),
+  z.object({ id, method: z.literal("git.createBranch"), params: z.object({ cwd: z.string().min(1), branch: z.string().trim().min(1).max(200) }) }),
+  z.object({ id, method: z.literal("git.switchBranch"), params: z.object({ cwd: z.string().min(1), branch: z.string().trim().min(1).max(200) }) }),
+  z.object({ id, method: z.literal("git.push"), params: z.object({ cwd: z.string().min(1), remote: z.string().trim().min(1).max(100).default("origin") }) }),
+  z.object({ id, method: z.literal("git.pull"), params: z.object({ cwd: z.string().min(1) }) }),
+  z.object({ id, method: z.literal("git.clone"), params: z.object({ url: z.string().trim().min(1).max(2048), destination: z.string().min(1).max(32768) }) }),
+  z.object({ id, method: z.literal("git.publish"), params: z.object({ cwd: z.string().min(1), name: z.string().trim().min(1).max(200), visibility: z.enum(["private", "public"]) }) }),
+  z.object({ id, method: z.literal("git.createPullRequest"), params: z.object({ cwd: z.string().min(1), title: z.string().trim().min(1).max(300), body: z.string().max(20000).default(""), draft: z.boolean().default(true) }) }),
   z.object({ id, method: z.literal("terminal.start"), params: z.object({ cwd: z.string().min(1) }) }),
   z.object({ id, method: z.literal("terminal.write"), params: z.object({ sessionId: z.string().uuid(), command: z.string().min(1).max(4000) }) }),
   z.object({ id, method: z.literal("terminal.stop"), params: z.object({ sessionId: z.string().uuid() }) }),
@@ -447,6 +455,38 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     }
     if (request.method === "git.commit") {
       reply(socket, request.id, await git.commit(request.params.cwd, request.params.message));
+      return;
+    }
+    if (request.method === "git.repository") {
+      reply(socket, request.id, await git.repository(request.params.cwd));
+      return;
+    }
+    if (request.method === "git.createBranch") {
+      reply(socket, request.id, await git.createBranch(request.params.cwd, request.params.branch));
+      return;
+    }
+    if (request.method === "git.switchBranch") {
+      reply(socket, request.id, await git.switchBranch(request.params.cwd, request.params.branch));
+      return;
+    }
+    if (request.method === "git.push") {
+      reply(socket, request.id, await git.push(request.params.cwd, request.params.remote));
+      return;
+    }
+    if (request.method === "git.pull") {
+      reply(socket, request.id, await git.pull(request.params.cwd));
+      return;
+    }
+    if (request.method === "git.clone") {
+      reply(socket, request.id, await git.clone(request.params.url, request.params.destination));
+      return;
+    }
+    if (request.method === "git.publish") {
+      reply(socket, request.id, await git.publish(request.params.cwd, request.params.name, request.params.visibility));
+      return;
+    }
+    if (request.method === "git.createPullRequest") {
+      reply(socket, request.id, await git.createPullRequest(request.params.cwd, request.params.title, request.params.body, request.params.draft));
       return;
     }
     if (request.method === "usage.quota") {

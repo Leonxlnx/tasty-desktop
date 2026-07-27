@@ -104,7 +104,9 @@ The panel can be resized and moved through Layout settings. Its tabs keep one co
 
 ### Git changes
 
-The Git manager supports status, diff, stage, unstage, and commit. Destructive discard and reset actions are intentionally omitted.
+The Git manager supports status, diff, stage, unstage, commit, local branch creation and switching, upstream-aware push, fast-forward-only pull, HTTPS/SSH clone, and turn-level patch copying. Branch changes rely on Git's own dirty-worktree protection. Destructive discard and reset actions are intentionally omitted.
+
+Publishing and pull-request creation delegate to an already installed and authenticated GitHub CLI. Publishing defaults to private and requires an explicit button press; creating a pull request defaults to draft. Tasty does not store GitHub credentials. Clone accepts only explicit HTTPS or SSH URLs and asks you to choose the destination parent folder.
 
 Turn checkpoints use a private alternate Git index. They do not change the user's current branch, index, or pre-existing dirty work.
 
