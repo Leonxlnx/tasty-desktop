@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { Archive, ArrowCounterClockwise, ArrowSquareOut, ArrowsClockwise, ArrowUp, Brain, Browser, Broom, Bug, CaretDown, CaretRight, ChatCircleDots, Check, Circle, Copy, CornersIn, CornersOut, Cpu, DeviceMobile, DotsThree, DownloadSimple, FileText, FolderOpen, FolderSimple, Gauge, GearSix, GitBranch, GitCommit, Hammer, ImageSquare, Info, MagnifyingGlass, Minus, Palette, PaperPlaneRight, Paperclip, PencilSimple, PlugsConnected, Plus, Robot, ShieldCheck, SidebarSimple, SignIn, SignOut, SlidersHorizontal, Square, Stop, TerminalWindow, Trash, UserCircle, WarningCircle, X } from "@phosphor-icons/react";
+import { Archive, ArrowCounterClockwise, ArrowSquareOut, ArrowsClockwise, ArrowUp, Brain, Browser, Broom, Bug, CaretDown, CaretRight, ChatCircleDots, Check, Circle, Clock, Copy, CornersIn, CornersOut, Cpu, DeviceMobile, DotsThree, DownloadSimple, FileText, FolderOpen, FolderSimple, Gauge, GearSix, GitBranch, GitCommit, Hammer, ImageSquare, Info, MagnifyingGlass, Minus, Palette, PaperPlaneRight, Paperclip, PencilSimple, PlugsConnected, Plus, Robot, ShieldCheck, SidebarSimple, SignIn, SignOut, SlidersHorizontal, Square, Stop, TerminalWindow, Trash, UserCircle, WarningCircle, X } from "@phosphor-icons/react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -69,6 +69,7 @@ type RemoteConfig = { enabled: boolean; bind: "127.0.0.1" | "0.0.0.0"; port: num
 type RemoteDevice = { id: string; name: string; createdAt: string; lastSeenAt?: string; revokedAt?: string };
 type RemoteStatus = { config: RemoteConfig; devices: RemoteDevice[]; audit: Array<{ id: string; at: string; action: string; deviceId?: string; detail?: string }>; listening: boolean; addresses: string[] };
 type RemotePairing = { code: string; expiresAt: string };
+type Schedule = { id: string; name: string; threadId: string; text: string; provider: ProviderId; recurrence: "once" | "daily" | "weekly"; nextRunAt: string; enabled: boolean; lastRunAt?: string; lastResult?: string };
 type Preferences = {
   density: "comfortable" | "compact";
   sendKey: "enter" | "ctrl-enter";
@@ -106,7 +107,7 @@ type ConfigUpdate = { targetKey: string; configId: string; requestId: number };
 type UpdateStatus = { phase: "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error"; version?: string; currentVersion?: string; percent?: number; message?: string };
 type RailView = "git" | "terminal" | "preview" | "agents";
 type AppMenu = "file" | "edit" | "view" | "help";
-type SettingsCategory = "general" | "appearance" | "layout" | "account" | "environments" | "remote" | "usage" | "updates" | "diagnostics" | "about";
+type SettingsCategory = "general" | "appearance" | "layout" | "account" | "environments" | "remote" | "automations" | "usage" | "updates" | "diagnostics" | "about";
 type KeybindingAction = "palette" | "newChat" | "openFolder" | "toggleSidebar" | "terminal" | "settings";
 type ProjectScript = { name: string; command: string };
 type TerminalSessionInfo = { sessionId: string; cwd: string; shell: string };
@@ -390,6 +391,8 @@ export function App() {
   const [remoteStatus, setRemoteStatus] = useState<RemoteStatus>();
   const [remotePairing, setRemotePairing] = useState<RemotePairing>();
   const [remoteBusy, setRemoteBusy] = useState(false);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [schedulesBusy, setSchedulesBusy] = useState(false);
   const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
   const [images, setImages] = useState<PendingImage[]>([]);
   const [selectedFile, setSelectedFile] = useState<{ path: string; content: string }>();
@@ -803,6 +806,40 @@ export function App() {
     catch (error) { setDiagnostic(`Could not revoke the remote device: ${error instanceof Error ? error.message : String(error)}`); }
     finally { setRemoteBusy(false); }
   }, [call, setDiagnostic]);
+  const refreshSchedules = useCallback(async () => {
+    try { setSchedules((await call("schedules.list") as { schedules: Schedule[] }).schedules); }
+    catch (error) { setDiagnostic(`Could not load schedules: ${error instanceof Error ? error.message : String(error)}`); }
+  }, [call, setDiagnostic]);
+  const createSchedule = useCallback(async (input: { name: string; text: string; recurrence: Schedule["recurrence"]; nextRunAt: string }) => {
+    if (!activeThread) throw new Error("Open the chat this schedule should use");
+    setSchedulesBusy(true);
+    try {
+      await call("schedules.create", { ...input, threadId: activeThread.threadId });
+      await refreshSchedules();
+    } finally { setSchedulesBusy(false); }
+  }, [activeThread, call, refreshSchedules]);
+  const updateSchedule = useCallback(async (id: string, patch: Partial<Pick<Schedule, "enabled" | "name" | "text" | "recurrence" | "nextRunAt">>) => {
+    setSchedulesBusy(true);
+    try { await call("schedules.update", { id, ...patch }); await refreshSchedules(); }
+    finally { setSchedulesBusy(false); }
+  }, [call, refreshSchedules]);
+  const deleteSchedule = useCallback(async (id: string) => {
+    setSchedulesBusy(true);
+    try { await call("schedules.delete", { id }); await refreshSchedules(); }
+    finally { setSchedulesBusy(false); }
+  }, [call, refreshSchedules]);
+  const runSchedule = useCallback(async (id: string) => {
+    setSchedulesBusy(true);
+    try { await call("schedules.run", { id }); await refreshSchedules(); }
+    finally { setSchedulesBusy(false); }
+  }, [call, refreshSchedules]);
+  const exportSessions = useCallback(async (threadIds?: string[]) => {
+    try {
+      const result = await call("threads.export", threadIds ? { threadIds } : {}) as { path: string; threadCount: number };
+      setDiagnostic(`Exported ${result.threadCount} private chat${result.threadCount === 1 ? "" : "s"}. Review the archive before sharing.`);
+      await revealLocalPath(result.path);
+    } catch (error) { setDiagnostic(`Could not export chats: ${error instanceof Error ? error.message : String(error)}`); }
+  }, [call, revealLocalPath, setDiagnostic]);
 
   useEffect(() => {
     if (!settingsOpen || settingsCategory !== "environments") return;
@@ -813,6 +850,11 @@ export function App() {
     if (!settingsOpen || settingsCategory !== "remote") return;
     void refreshRemote();
   }, [refreshRemote, settingsCategory, settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsCategory !== "automations") return;
+    void refreshSchedules();
+  }, [refreshSchedules, settingsCategory, settingsOpen]);
   const recoverLocalServer = useCallback(async (force = false) => {
     if (serverRestarting.current) return;
     serverRestarting.current = true;
@@ -1052,6 +1094,11 @@ export function App() {
         if (dialog) setManageDialog(dialog);
       } else if (message.channel === "server.diagnostics") {
         setDiagnostic(String((message.payload as { message?: string }).message ?? "Runtime error"));
+      } else if (message.channel === "notifications.event") {
+        const notice = message.payload as { title?: string; message?: string };
+        const text = notice.message ?? notice.title ?? "Tasty task update";
+        setDiagnostic(text);
+        if (document.hidden && "Notification" in window && Notification.permission === "granted") new Notification(notice.title ?? "Tasty", { body: text });
       } else if (message.channel === "auth.status") {
         const status = message.payload as AuthState;
         setAuth(status);
@@ -2310,6 +2357,7 @@ export function App() {
         </div>
 
         <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title={`${providerName(providerId)} profiles and runtime capabilities`} onClick={() => { setRailView(undefined); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Agents & extensions</strong><small>{capabilities?.provider === providerId ? `${preferences.agentProfiles.filter((profile) => profile.provider === providerId).length} profiles · ${capabilities.skills.length} skills` : `${providerName(providerId)} capabilities`}</small></span><CaretRight /></button>
+        <button className={`capability-link ${settingsOpen && settingsCategory === "automations" ? "active" : ""}`} type="button" aria-current={settingsOpen && settingsCategory === "automations" ? "page" : undefined} title="Scheduled agent tasks" onClick={() => { setCapabilityCenterOpen(false); setSettingsCategory("automations"); setSettingsOpen(true); }}><Clock /><span><strong>Scheduled</strong><small>{schedules.filter((schedule) => schedule.enabled).length || ""}</small></span><CaretRight /></button>
 
         <div className="sidebar-body">
           <div className="sidebar-heading"><span>{navView === "projects" ? "Projects" : "Chats"}</span><button type="button" title={navView === "projects" ? "Open folder" : "New chat"} aria-label={navView === "projects" ? "Open folder" : "New chat"} disabled={navView === "chats" && !runtimeReady} onClick={() => navView === "projects" ? void chooseWorkspace() : createStandaloneChat()}>{navView === "projects" ? <FolderOpen /> : <Plus />}</button></div>
@@ -2533,6 +2581,10 @@ export function App() {
         remote={remoteStatus}
         remotePairing={remotePairing}
         remoteBusy={remoteBusy}
+        schedules={schedules}
+        schedulesBusy={schedulesBusy}
+        threads={threads}
+        activeThread={activeThread}
         selectedProvider={preferences.provider}
         cwd={cwd}
         quota={quota}
@@ -2552,11 +2604,16 @@ export function App() {
         onCheckUpdates={checkForUpdates}
         onInstallUpdate={installUpdate}
         onExportDiagnostics={exportDiagnostics}
+        onExportSessions={exportSessions}
         onRefreshEnvironments={refreshEnvironments}
         onRefreshRemote={refreshRemote}
         onConfigureRemote={configureRemote}
         onCreateRemotePairing={createRemotePairing}
         onRevokeRemoteDevice={revokeRemoteDevice}
+        onCreateSchedule={createSchedule}
+        onUpdateSchedule={updateSchedule}
+        onDeleteSchedule={deleteSchedule}
+        onRunSchedule={runSchedule}
         onShowOnboarding={() => { setShowOnboarding(true); setSettingsOpen(false); setSettingsQuery(""); }}
       />}
       {manageDialog && <ManageItemDialog dialog={manageDialog} onCancel={() => setManageDialog(undefined)} onConfirm={confirmManageAction} />}
@@ -2989,7 +3046,7 @@ export function applyDraftConfig(defaults: ConfigOption[], draft: Record<string,
   return defaults.map((option) => draft[option.id] !== undefined ? { ...option, currentValue: draft[option.id]! } : option);
 }
 
-function SettingsDialog({ category, query, preferences, auth, providers, environments, remote, remotePairing, remoteBusy, selectedProvider, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onExportDiagnostics, onRefreshEnvironments, onRefreshRemote, onConfigureRemote, onCreateRemotePairing, onRevokeRemoteDevice, onShowOnboarding }: {
+function SettingsDialog({ category, query, preferences, auth, providers, environments, remote, remotePairing, remoteBusy, schedules, schedulesBusy, threads, activeThread, selectedProvider, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onExportDiagnostics, onExportSessions, onRefreshEnvironments, onRefreshRemote, onConfigureRemote, onCreateRemotePairing, onRevokeRemoteDevice, onCreateSchedule, onUpdateSchedule, onDeleteSchedule, onRunSchedule, onShowOnboarding }: {
   category: SettingsCategory;
   query: string;
   preferences: Preferences;
@@ -2999,6 +3056,10 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
   remote: RemoteStatus | undefined;
   remotePairing: RemotePairing | undefined;
   remoteBusy: boolean;
+  schedules: Schedule[];
+  schedulesBusy: boolean;
+  threads: Thread[];
+  activeThread: Thread | undefined;
   selectedProvider: ProviderId;
   cwd: string;
   quota: KimiQuota | undefined;
@@ -3018,11 +3079,16 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
   onCheckUpdates: (manual?: boolean) => Promise<void>;
   onInstallUpdate: () => Promise<void>;
   onExportDiagnostics: () => Promise<void>;
+  onExportSessions: (threadIds?: string[]) => Promise<void>;
   onRefreshEnvironments: () => Promise<void>;
   onRefreshRemote: () => Promise<void>;
   onConfigureRemote: (config: RemoteConfig) => Promise<void>;
   onCreateRemotePairing: () => Promise<void>;
   onRevokeRemoteDevice: (deviceId: string) => Promise<void>;
+  onCreateSchedule: (input: { name: string; text: string; recurrence: Schedule["recurrence"]; nextRunAt: string }) => Promise<void>;
+  onUpdateSchedule: (id: string, patch: Partial<Pick<Schedule, "enabled" | "name" | "text" | "recurrence" | "nextRunAt">>) => Promise<void>;
+  onDeleteSchedule: (id: string) => Promise<void>;
+  onRunSchedule: (id: string) => Promise<void>;
   onShowOnboarding: () => void;
 }) {
   const categories: Array<{ id: SettingsCategory; label: string; keywords: string; icon: React.ReactNode }> = [
@@ -3032,6 +3098,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
     { id: "account", label: "Providers", keywords: "profile login logout kimi codex openai claude anthropic cursor cli", icon: <UserCircle /> },
     { id: "environments", label: "Environments", keywords: "windows wsl linux distributions runtime execution", icon: <TerminalWindow /> },
     { id: "remote", label: "Remote access", keywords: "phone mobile pairing device lan private network tailscale", icon: <DeviceMobile /> },
+    { id: "automations", label: "Automations", keywords: "scheduled tasks daily weekly recurring headless notifications", icon: <Clock /> },
     { id: "usage", label: "Usage & limits", keywords: "quota subscription plan limits", icon: <Gauge /> },
     { id: "updates", label: "Updates", keywords: "version install restart release", icon: <DownloadSimple /> },
     { id: "diagnostics", label: "Diagnostics", keywords: "support bundle logs errors troubleshooting privacy", icon: <Bug /> },
@@ -3085,11 +3152,13 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
               {remote?.audit.length ? <section className="settings-group"><h2>Recent security activity</h2><div className="remote-audit-list">{remote.audit.slice(0, 8).map((event) => <div key={event.id}><span>{event.action.replaceAll(".", " ")}</span><small>{relativeTime(event.at)}{event.detail ? ` · ${event.detail}` : ""}</small></div>)}</div></section> : null}
             </>}
 
+            {category === "automations" && <ScheduleSettings schedules={schedules} threads={threads} activeThread={activeThread} busy={schedulesBusy} onCreate={onCreateSchedule} onUpdate={onUpdateSchedule} onDelete={onDeleteSchedule} onRun={onRunSchedule} />}
+
             {category === "usage" && <div className="settings-usage"><UsagePanel quota={quota} error={quotaError} loading={quotaLoading} onRefresh={onRefreshQuota} /><p className="settings-note">Subscription limits come from the official local Kimi CLI <code>/usage</code> panel and refresh on focus and every minute. New official limit windows appear automatically.</p></div>}
 
             {category === "updates" && <section className="settings-group update-settings"><h2>App updates</h2><div className={`update-card ${updateStatus.phase}`}><span className="update-state-icon">{updateStatus.phase === "current" ? <Check /> : updateStatus.phase === "error" ? <WarningCircle /> : updateStatus.phase === "available" ? <DownloadSimple /> : <ArrowsClockwise />}</span><div><strong>{updateTitle}</strong><small>{updateMessage}</small></div><div className="update-actions"><button className="secondary" type="button" disabled={updateStatus.phase === "checking" || updateStatus.phase === "downloading" || updateStatus.phase === "installing"} onClick={() => void onCheckUpdates(true)}><ArrowsClockwise /> Check now</button>{updateStatus.phase === "available" && <button className="primary" type="button" title={turnRunning ? "Finish or cancel the active turn first" : "Install update and restart"} disabled={turnRunning} onClick={() => void onInstallUpdate()}><DownloadSimple /> Install & restart</button>}</div></div>{updateStatus.phase === "downloading" && <div className="update-meter"><span style={{ transform: `scaleX(${(updateStatus.percent ?? 0) / 100})` }} /></div>}<p className="settings-note">Signed releases are verified before installation. Check now performs a real update lookup.</p></section>}
 
-            {category === "diagnostics" && <section className="settings-group"><h2>Private support bundle</h2><SettingsRow title="Export diagnostics" description="Save a redacted JSON report with runtime versions, active-work counts, and recent errors. Prompts, credentials, session IDs, and workspace paths are excluded."><button className="secondary" type="button" onClick={() => void onExportDiagnostics()}><Bug /> Export support bundle</button></SettingsRow><p className="settings-note">Review the file before sharing it. Tasty never uploads support bundles automatically.</p></section>}
+            {category === "diagnostics" && <><section className="settings-group"><h2>Private support bundle</h2><SettingsRow title="Export diagnostics" description="Save a redacted JSON report with runtime versions, active-work counts, and recent errors. Prompts, credentials, session IDs, and workspace paths are excluded."><button className="secondary" type="button" onClick={() => void onExportDiagnostics()}><Bug /> Export support bundle</button></SettingsRow><p className="settings-note">Review the file before sharing it. Tasty never uploads support bundles automatically.</p></section><section className="settings-group"><h2>Private chat archive</h2><SettingsRow title="Export current chat" description="Save this chat as a redacted local JSON archive."><button className="secondary" type="button" disabled={!activeThread} onClick={() => activeThread && void onExportSessions([activeThread.threadId])}><DownloadSimple /> Export chat</button></SettingsRow><SettingsRow title="Export all chats" description="Save every local Tasty chat. Credentials, session IDs, raw tool payloads, and home paths are removed."><button className="secondary" type="button" onClick={() => void onExportSessions()}><Archive /> Export all</button></SettingsRow></section></>}
 
             {category === "about" && <section className="settings-group about-settings"><img src="/tasty-logo.png" alt="" aria-hidden="true" /><h2>Tasty</h2><p>An open-source local control panel for Kimi, OpenAI Codex, Anthropic Claude, and Cursor. Authentication stays with each provider; workspaces and Tasty's event projection remain local.</p><dl><div><dt>Runtimes</dt><dd>ACP, Codex App Server, and stream-json</dd></div><div><dt>Storage</dt><dd>Local compact event log</dd></div><div><dt>Source</dt><dd>github.com/Leonxlnx/tasty-desktop</dd></div></dl></section>}
           </div>
@@ -3097,6 +3166,40 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
       </div>
     </section>
   </div>;
+}
+
+function ScheduleSettings({ schedules, threads, activeThread, busy, onCreate, onUpdate, onDelete, onRun }: {
+  schedules: Schedule[]; threads: Thread[]; activeThread: Thread | undefined; busy: boolean;
+  onCreate: (input: { name: string; text: string; recurrence: Schedule["recurrence"]; nextRunAt: string }) => Promise<void>;
+  onUpdate: (id: string, patch: Partial<Pick<Schedule, "enabled">>) => Promise<void>;
+  onDelete: (id: string) => Promise<void>; onRun: (id: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState({ name: "", text: "", recurrence: "once" as Schedule["recurrence"], nextRunAt: localDateTimeValue(Date.now() + 60 * 60_000) });
+  const [error, setError] = useState<string>();
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError(undefined);
+    try {
+      await onCreate({ ...draft, name: draft.name.trim(), text: draft.text.trim(), nextRunAt: new Date(draft.nextRunAt).toISOString() });
+      setDraft((current) => ({ ...current, name: "", text: "", nextRunAt: localDateTimeValue(Date.now() + 60 * 60_000) }));
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  };
+  return <>
+    <section className="settings-group"><h2>New scheduled task</h2><form className="schedule-form" onSubmit={(event) => void submit(event)}>
+      <p>Schedules run in the currently open chat and retain its provider, workspace, and permission boundary.</p>
+      <label><span>Target</span><strong>{activeThread?.title ?? "Open a chat first"}</strong></label>
+      <label><span>Name</span><input required maxLength={120} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="Daily project review" /></label>
+      <label><span>Instruction</span><textarea required maxLength={100_000} value={draft.text} onChange={(event) => setDraft({ ...draft, text: event.target.value })} placeholder="Review open changes and report failures." /></label>
+      <div><label><span>Run</span><input required type="datetime-local" value={draft.nextRunAt} onChange={(event) => setDraft({ ...draft, nextRunAt: event.target.value })} /></label><label><span>Repeat</span><select value={draft.recurrence} onChange={(event) => setDraft({ ...draft, recurrence: event.target.value as Schedule["recurrence"] })}><option value="once">Once</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label></div>
+      {error && <p className="schedule-error" role="alert">{error}</p>}<button className="primary" type="submit" disabled={busy || !activeThread || !draft.name.trim() || !draft.text.trim()}><Clock /> Schedule task</button>
+    </form></section>
+    <section className="settings-group"><h2>Schedules</h2><div className="schedule-list">{schedules.map((schedule) => { const thread = threads.find((candidate) => candidate.threadId === schedule.threadId); return <article key={schedule.id}><Clock /><span><strong>{schedule.name}</strong><small>{schedule.enabled ? `${schedule.recurrence} · ${relativeTime(schedule.nextRunAt)}` : "Paused"} · {thread?.title ?? "Unavailable chat"}</small>{schedule.lastResult && <small>{schedule.lastResult}</small>}</span><div><button className="secondary" type="button" disabled={busy} onClick={() => void onRun(schedule.id)}>Run now</button><button className="secondary" type="button" disabled={busy} onClick={() => void onUpdate(schedule.id, { enabled: !schedule.enabled })}>{schedule.enabled ? "Pause" : "Resume"}</button><button className="secondary danger-text" type="button" disabled={busy} aria-label={`Delete ${schedule.name}`} onClick={() => void onDelete(schedule.id)}><Trash /></button></div></article>; })}{!schedules.length && <p>No scheduled tasks yet.</p>}</div><p className="settings-note">Missed recurring times advance to the next calendar slot instead of replaying a backlog. Failed runs stay visible here and never change permissions automatically.</p></section>
+  </>;
+}
+
+function localDateTimeValue(timestamp: number): string {
+  const date = new Date(timestamp - new Date(timestamp).getTimezoneOffset() * 60_000);
+  return date.toISOString().slice(0, 16);
 }
 
 function SettingsRow({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
@@ -3131,6 +3234,7 @@ function settingsDescription(category: SettingsCategory): string {
     account: "Local provider runtimes, accounts, and defaults.",
     environments: "Windows and WSL execution boundaries for local agents.",
     remote: "Pair and revoke private-network companion devices.",
+    automations: "Schedule explicit agent tasks and review delivery state.",
     usage: "Kimi subscription quota reported by the local CLI.",
     updates: "Signed releases and update installation.",
     diagnostics: "Local, redacted troubleshooting information.",
