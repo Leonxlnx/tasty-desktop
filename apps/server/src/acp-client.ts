@@ -18,6 +18,7 @@ export type RuntimeEvent =
 export type AcpClientOptions = {
   binary: string;
   args?: string[];
+  env?: NodeJS.ProcessEnv;
   kimiCodeHome?: string;
   mcpServers?: (canonicalCwd: string) => Promise<acp.McpServer[]>;
   onEvent: (event: RuntimeEvent) => unknown | Promise<unknown>;
@@ -69,6 +70,7 @@ export class AcpClient {
         KIMI_CODE_NO_AUTO_UPDATE: "1",
         KIMI_LOG_LEVEL: "info",
         ...(this.#options.kimiCodeHome ? { KIMI_CODE_HOME: this.#options.kimiCodeHome } : {}),
+        ...this.#options.env,
       },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,

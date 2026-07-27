@@ -45,6 +45,7 @@ describe("orchestration engine", () => {
       payload: {
         sessionId: "codex-side-session",
         provider: "codex",
+        instanceId: "work",
         parentThreadId: "parent",
         cwd: "C:/work",
         title: "Side chat",
@@ -57,6 +58,7 @@ describe("orchestration engine", () => {
     await restored.open();
     expect(restored.thread("side")).toMatchObject({
       provider: "codex",
+      instanceId: "work",
       parentThreadId: "parent",
       goal: { objective: "Verify the provider layer", status: "active" },
     });

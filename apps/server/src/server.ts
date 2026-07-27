@@ -25,7 +25,7 @@ import { TerminalService } from "./terminal-service.js";
 import { installKimiSkill, readKimiCapabilities, readKimiMcpServers } from "./kimi-capabilities.js";
 import { createDesktopPreviewMcpServer, desktopPreviewMcpName, isPreviewBridgeRequest, normalizeDesktopPreviewUrl } from "./desktop-preview.js";
 import { readRecoverableJson, writeRecoverableJson } from "./recoverable-json.js";
-import { providerDescriptors, providerName, requireProviderBinary, resolveProviderBinary } from "./provider-runtime.js";
+import { providerDescriptors, providerName, readProviderInstances, requireProviderBinary, resolveProviderBinary, type ProviderInstance } from "./provider-runtime.js";
 import { ProviderAuthService, type ProviderAuthEvent } from "./provider-auth.js";
 import { DiagnosticJournal, redactDiagnosticText, type DiagnosticLevel } from "./diagnostics.js";
 import {
@@ -45,14 +45,14 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("env.confirmUpdate"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("env.cancelUpdate"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("env.installCli"), params: z.object({}).default({}) }),
-  z.object({ id, method: z.literal("auth.beginLogin"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi") }).default({ provider: "kimi" }) }),
-  z.object({ id, method: z.literal("auth.cancel"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi") }).default({ provider: "kimi" }) }),
-  z.object({ id, method: z.literal("auth.logout"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi") }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("auth.beginLogin"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi") }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("auth.cancel"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi") }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("auth.logout"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi") }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("providers.list"), params: z.object({}).default({}) }),
-  z.object({ id, method: z.literal("threads.list"), params: z.object({ cwd: z.string().optional(), provider: z.enum(["kimi", "codex", "claude", "cursor"]).optional() }).default({}) }),
-  z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), isolate: z.boolean().default(false), provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi"), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
+  z.object({ id, method: z.literal("threads.list"), params: z.object({ cwd: z.string().optional(), provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).optional(), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional() }).default({}) }),
+  z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), isolate: z.boolean().default(false), provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional(), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
   z.object({ id, method: z.literal("threads.createSide"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120).optional() }) }),
-  z.object({ id, method: z.literal("threads.resume"), params: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), cwd: z.string().min(1), provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi"), replay: z.boolean().default(false) }) }),
+  z.object({ id, method: z.literal("threads.resume"), params: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), cwd: z.string().min(1), provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional(), replay: z.boolean().default(false) }) }),
   z.object({ id, method: z.literal("threads.rename"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120) }) }),
   z.object({ id, method: z.literal("threads.setGoal"), params: z.object({ threadId: z.string().min(1), objective: z.string().trim().min(1).max(20_000) }) }),
   z.object({ id, method: z.literal("threads.clearGoal"), params: z.object({ threadId: z.string().min(1) }) }),
@@ -72,7 +72,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("threads.interruptTurn"), params: z.object({ threadId: z.string().min(1), clearQueue: z.boolean().default(true) }) }),
   z.object({ id, method: z.literal("threads.respondToRequest"), params: z.object({ threadId: z.string().min(1), requestId: z.string().min(1), optionId: z.string().optional() }) }),
   z.object({ id, method: z.literal("threads.setConfigOption"), params: z.object({ threadId: z.string().min(1), configId: z.string().min(1), value: z.union([z.string(), z.boolean()]) }) }),
-  z.object({ id, method: z.literal("runtime.configDefaults"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi") }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("runtime.configDefaults"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional() }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("checkpoints.list"), params: z.object({ threadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("checkpoints.revert"), params: z.object({ threadId: z.string().min(1), turnId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("files.tree"), params: z.object({ cwd: z.string().min(1), query: z.string().max(200).default("") }) }),
@@ -111,7 +111,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("usage.quota"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("diagnostics.snapshot"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("diagnostics.export"), params: z.object({}).default({}) }),
-  z.object({ id, method: z.literal("capabilities.list"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi"), cwd: z.string().min(1).optional() }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("capabilities.list"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), cwd: z.string().min(1).optional() }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("skills.install"), params: z.object({ cwd: z.string().min(1), source: z.string().min(1) }) }),
 ]);
 const persistedQueueSchema = z.record(z.string(), z.array(z.object({
@@ -134,6 +134,10 @@ await mkdir(configuredDataHome, { recursive: true });
 await mkdir(configuredKimiHome, { recursive: true });
 const dataHome = await realpath(configuredDataHome);
 const kimiHome = await realpath(configuredKimiHome);
+const providerInstances = await readProviderInstances(join(dataHome, "provider-instances.json")).catch((error) => {
+  console.error(`[providers] ${error instanceof Error ? error.message : String(error)}`);
+  return [] as ProviderInstance[];
+});
 const diagnostics = new DiagnosticJournal([homedir(), dataHome, kimiHome]);
 const quotaProbeCwd = join(dataHome, "runtime", "quota-probe");
 const standaloneChatCwd = join(dataHome, "runtime", "chats");
@@ -171,9 +175,9 @@ const sessionResumes = new Map<string, Promise<SessionConfigOption[]>>();
 const sessionConfigWrites = new Map<string, Promise<void>>();
 type UpdateLease = { owner: WebSocket };
 let queueWrite: Promise<void> = Promise.resolve();
-const runtimes = new Map<ProviderId, AgentRuntime>();
-const runtimeStarts = new Map<ProviderId, Promise<AgentRuntime>>();
-const initializeResults = new Map<ProviderId, unknown>();
+const runtimes = new Map<string, AgentRuntime>();
+const runtimeStarts = new Map<string, Promise<AgentRuntime>>();
+const initializeResults = new Map<string, unknown>();
 let quotaRead: Promise<Awaited<ReturnType<typeof readKimiQuota>>> | undefined;
 let configDefaultsLive = false;
 let updateLease: UpdateLease | undefined;
@@ -232,20 +236,38 @@ function releaseUpdateLease(owner: WebSocket): boolean {
   return true;
 }
 
-async function ensureRuntime(provider: ProviderId = "kimi"): Promise<AgentRuntime> {
-  const current = runtimes.get(provider);
+function runtimeKey(provider: ProviderId, instanceId?: string): string {
+  return instanceId ? `${provider}:${instanceId}` : provider;
+}
+
+function providerInstance(provider: ProviderId, instanceId?: string): ProviderInstance | undefined {
+  if (!instanceId) return undefined;
+  const instance = providerInstances.find((candidate) => candidate.id === instanceId && candidate.provider === provider);
+  if (!instance) throw new Error(`Unknown ${providerName(provider)} instance ${instanceId}`);
+  return instance;
+}
+
+function providerRuntimeReady(provider: ProviderId): boolean {
+  return [...runtimes].some(([key, runtime]) => (key === provider || key.startsWith(`${provider}:`)) && runtime.isOpen());
+}
+
+async function ensureRuntime(provider: ProviderId = "kimi", instanceId?: string): Promise<AgentRuntime> {
+  const key = runtimeKey(provider, instanceId);
+  const current = runtimes.get(key);
   if (current?.isOpen()) return current;
-  const pending = runtimeStarts.get(provider);
+  const pending = runtimeStarts.get(key);
   if (pending) return pending;
-  const starting = startRuntime(provider).finally(() => runtimeStarts.delete(provider));
-  runtimeStarts.set(provider, starting);
+  const starting = startRuntime(provider, instanceId).finally(() => runtimeStarts.delete(key));
+  runtimeStarts.set(key, starting);
   return starting;
 }
 
-async function startRuntime(provider: ProviderId): Promise<AgentRuntime> {
-  const stale = runtimes.get(provider);
-  runtimes.delete(provider);
-  initializeResults.delete(provider);
+async function startRuntime(provider: ProviderId, instanceId?: string): Promise<AgentRuntime> {
+  const key = runtimeKey(provider, instanceId);
+  const instance = providerInstance(provider, instanceId);
+  const stale = runtimes.get(key);
+  runtimes.delete(key);
+  initializeResults.delete(key);
   if (provider === "kimi") configDefaultsLive = false;
   await stale?.close();
   const currentFile = fileURLToPath(import.meta.url);
@@ -264,21 +286,22 @@ async function startRuntime(provider: ProviderId): Promise<AgentRuntime> {
       }
     },
     onClose: () => {
-      if (runtimes.get(provider) !== client) return;
-      runtimes.delete(provider);
-      initializeResults.delete(provider);
+      if (runtimes.get(key) !== client) return;
+      runtimes.delete(key);
+      initializeResults.delete(key);
       if (provider === "kimi") configDefaultsLive = false;
       sessionResumes.clear();
     },
   };
   if (provider === "codex") {
-    client = new CodexRuntime({ binary: requireProviderBinary("codex"), ...runtimeEvents });
+    client = new CodexRuntime({ binary: requireProviderBinary("codex", instance?.binary), ...(instance ? { env: instance.environment } : {}), ...runtimeEvents });
   } else if (provider === "claude") {
-    client = new ClaudeRuntime({ binary: requireProviderBinary("claude"), ...runtimeEvents });
-  } else if (provider === "kimi" || provider === "cursor") {
+    client = new ClaudeRuntime({ binary: requireProviderBinary("claude", instance?.binary), ...(instance ? { env: instance.environment } : {}), ...runtimeEvents });
+  } else if (provider === "kimi" || provider === "cursor" || provider === "opencode") {
     client = new AcpClient({
-      binary: useFake ? process.execPath : requireProviderBinary(provider),
+      binary: useFake ? process.execPath : requireProviderBinary(provider, instance?.binary),
       args: useFake ? (currentFile.endsWith(".ts") ? ["--import", "tsx", fakePath] : [fakePath]) : ["acp"],
+      ...(instance ? { env: instance.environment } : {}),
       ...(provider === "kimi" ? { kimiCodeHome: kimiHome } : {}),
       ...(provider === "kimi" ? { mcpServers: async (workspace: string) => {
       const configured = await readKimiMcpServers(kimiHome);
@@ -297,8 +320,8 @@ async function startRuntime(provider: ProviderId): Promise<AgentRuntime> {
   }
   if (!client) throw new Error(`Unsupported provider ${provider}`);
   try {
-    initializeResults.set(provider, await client.start());
-    runtimes.set(provider, client);
+    initializeResults.set(key, await client.start());
+    runtimes.set(key, client);
     return client;
   } catch (error) {
     await client.close();
@@ -390,6 +413,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         initialize: initializeResults.get("kimi"),
         binary: runtimeBinaryDescription(),
         providers: providerDescriptors(),
+        instances: providerInstances.map(({ id, name, provider, binary }) => ({ id, name, provider, installed: Boolean(binary ?? resolveProviderBinary(provider)) })),
         defaultCwd,
         auth: authStatus,
         degraded: Boolean(runtimeError),
@@ -535,9 +559,10 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     }
     if (request.method === "providers.list") {
       const providers = await Promise.all(providerDescriptors().map(async (provider) => provider.id === "kimi"
-        ? { ...provider, provider: "kimi" as const, ...auth.status(), runtimeReady: Boolean(runtimes.get("kimi")?.isOpen()) }
-        : { ...provider, ...await providerAuth.status(provider.id), runtimeReady: Boolean(runtimes.get(provider.id)?.isOpen()) }));
-      reply(socket, request.id, { providers });
+        ? { ...provider, provider: "kimi" as const, ...auth.status(), runtimeReady: providerRuntimeReady("kimi") }
+        : { ...provider, ...await providerAuth.status(provider.id), runtimeReady: providerRuntimeReady(provider.id) }));
+      const instances = providerInstances.map(({ id, name, provider, binary }) => ({ id, name, provider, installed: Boolean(binary ?? resolveProviderBinary(provider)), runtimeReady: Boolean(runtimes.get(runtimeKey(provider, id))?.isOpen()) }));
+      reply(socket, request.id, { providers, instances });
       return;
     }
     if (request.method === "skills.install") {
@@ -547,7 +572,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     if (request.method === "runtime.configDefaults") {
       const provider = request.params.provider;
       const cached = await configDefaults.load();
-      const fromThreads = engine.threads().filter((thread) => thread.provider === provider).map((thread) => thread.configOptions).find((options) => options.length);
+      const fromThreads = engine.threads().filter((thread) => thread.provider === provider && thread.instanceId === request.params.instanceId).map((thread) => thread.configOptions).find((options) => options.length);
       const fallback = cached ?? fromThreads ?? [];
       if (provider === "kimi" && configDefaultsLive) {
         reply(socket, request.id, { configOptions: fallback });
@@ -558,7 +583,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         return;
       }
       try {
-        const acp = await ensureRuntime(provider);
+        const acp = await ensureRuntime(provider, request.params.instanceId);
         await mkdir(configProbeCwd, { recursive: true });
         const probed = (await acp.newSession(configProbeCwd)).configOptions ?? [];
         if (provider === "kimi") await rememberLiveConfigOptions(probed);
@@ -596,7 +621,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     if (request.method === "threads.list") {
       let runtimeSessions: unknown[] = [];
       const provider = request.params.provider ?? "kimi";
-      const acp = runtimeForLocalCancellation(provider);
+      const acp = runtimeForLocalCancellation(provider, request.params.instanceId);
       if (acp) {
         try {
           runtimeSessions = (await acp.listSessions(request.params.cwd)).sessions.filter((session) => !isInternalProbeSession(session)).map(classifyRuntimeSession);
@@ -614,7 +639,8 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     }
     if (request.method === "threads.create") {
       const provider = request.params.provider;
-      const acp = await ensureRuntime(provider);
+      const instanceId = request.params.instanceId;
+      const acp = await ensureRuntime(provider, instanceId);
       if (!request.params.standalone && !request.params.cwd) throw new Error("Workspace path is required for a project chat");
       if (request.params.standalone && request.params.isolate) throw new Error("Standalone chats do not use Git worktrees");
       const threadId = crypto.randomUUID();
@@ -633,7 +659,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
           if (applied.configOptions) configOptions = applied.configOptions;
         }
         if (provider === "kimi") void rememberLiveConfigOptions(configOptions);
-        await engine.append(threadId, { type: "ThreadCreated", payload: { sessionId: session.sessionId, provider, cwd: targetCwd, ...(createdWorktree ? { worktree: { sourceCwd: createdWorktree.sourceCwd, branch: createdWorktree.branch } } : {}), kind: request.params.standalone ? "chat" : "project", title: request.params.standalone ? "New chat" : "New Tasty session", configOptions } });
+        await engine.append(threadId, { type: "ThreadCreated", payload: { sessionId: session.sessionId, provider, ...(instanceId ? { instanceId } : {}), cwd: targetCwd, ...(createdWorktree ? { worktree: { sourceCwd: createdWorktree.sourceCwd, branch: createdWorktree.branch } } : {}), kind: request.params.standalone ? "chat" : "project", title: request.params.standalone ? "New chat" : "New Tasty session", configOptions } });
         reply(socket, request.id, { thread: engine.thread(threadId) });
       } catch (error) {
         if (createdWorktree) await git.discardNewWorktree(createdWorktree).catch((cleanupError) => emitDiagnostic("error", cleanupError, "worktree-cleanup"));
@@ -644,7 +670,8 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     if (request.method === "threads.resume") {
       const existing = engine.thread(request.params.threadId);
       const provider = existing?.provider ?? request.params.provider;
-      const acp = await ensureRuntime(provider);
+      const instanceId = existing?.instanceId ?? request.params.instanceId;
+      const acp = await ensureRuntime(provider, instanceId);
       engine.assertSessionAvailable(request.params.sessionId, request.params.threadId);
       const configOptions = existing && !request.params.replay
         ? await ensureThreadSession(acp, existing)
@@ -653,7 +680,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
           : await resumeRuntimeSession(acp, request.params.sessionId, resolve(request.params.cwd))).configOptions ?? [];
       if (!hasConfiguredModel(configOptions)) throw new Error(`${providerName(provider)} has no configured model. Complete provider sign-in, then retry.`);
       if (provider === "kimi") void rememberLiveConfigOptions(configOptions);
-      if (!existing) await engine.append(request.params.threadId, { type: "ThreadCreated", payload: { sessionId: request.params.sessionId, provider, cwd: resolve(request.params.cwd), kind: isStandaloneChatPath(request.params.cwd) ? "chat" : "project", title: "Resumed Tasty session", configOptions } });
+      if (!existing) await engine.append(request.params.threadId, { type: "ThreadCreated", payload: { sessionId: request.params.sessionId, provider, ...(instanceId ? { instanceId } : {}), cwd: resolve(request.params.cwd), kind: isStandaloneChatPath(request.params.cwd) ? "chat" : "project", title: "Resumed Tasty session", configOptions } });
       else if (request.params.replay) await engine.append(existing.threadId, { type: "ConfigOptionsReplaced", payload: { options: configOptions } });
       reply(socket, request.id, { thread: engine.thread(request.params.threadId) });
       return;
@@ -661,7 +688,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     const thread = engine.thread(request.params.threadId);
     if (!thread) throw new Error(`Unknown thread ${request.params.threadId}`);
     if (request.method === "threads.createSide") {
-      const acp = await ensureRuntime(thread.provider);
+      const acp = await ensureRuntime(thread.provider, thread.instanceId);
       const session = await acp.newSession(thread.cwd);
       let configOptions = session.configOptions ?? [];
       const inherited = Object.fromEntries(thread.configOptions.map((option) => [option.id, option.currentValue]));
@@ -675,6 +702,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         payload: {
           sessionId: session.sessionId,
           provider: thread.provider,
+          ...(thread.instanceId ? { instanceId: thread.instanceId } : {}),
           parentThreadId: thread.threadId,
           cwd: thread.cwd,
           ...(thread.worktree ? { worktree: thread.worktree } : {}),
@@ -706,7 +734,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       await persistQueues();
       publishQueue(thread.threadId);
       if (thread.running) {
-        const acp = runtimeForLocalCancellation(thread.provider);
+        const acp = runtimeForLocalCancellation(thread.provider, thread.instanceId);
         await cancelThreadTurn(acp, thread);
       }
       await ingestion.flush(thread.sessionId);
@@ -754,7 +782,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       publishQueue(thread.threadId);
       if (steering && thread.running) {
         await resolveThreadApprovals(thread.threadId);
-        const acp = runtimeForLocalCancellation(thread.provider);
+        const acp = runtimeForLocalCancellation(thread.provider, thread.instanceId);
         await cancelThreadTurn(acp, thread);
       }
       else if (steering && startingAdmission) {
@@ -788,7 +816,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       publishQueue(thread.threadId);
       if (thread.running) {
         await resolveThreadApprovals(thread.threadId);
-        const acp = runtimeForLocalCancellation(thread.provider);
+        const acp = runtimeForLocalCancellation(thread.provider, thread.instanceId);
         await cancelThreadTurn(acp, thread);
       } else {
         void runNextQueued(thread.threadId);
@@ -828,14 +856,14 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     }
     if (request.method === "subagents.inspect") {
       if (!isLinkedSubagent(thread, request.params.agentThreadId)) throw new Error("Subagent thread is not linked to this Tasty chat");
-      const runtime = await ensureRuntime(thread.provider);
+      const runtime = await ensureRuntime(thread.provider, thread.instanceId);
       if (!runtime.inspectSubagent) throw new Error(`${providerName(thread.provider)} does not expose inspectable subagent transcripts`);
       reply(socket, request.id, { inspection: await runtime.inspectSubagent(request.params.agentThreadId) });
       return;
     }
     if (request.method === "subagents.stop") {
       if (!isLinkedSubagent(thread, request.params.agentThreadId)) throw new Error("Subagent thread is not linked to this Tasty chat");
-      const runtime = await ensureRuntime(thread.provider);
+      const runtime = await ensureRuntime(thread.provider, thread.instanceId);
       if (!runtime.stopSubagent) throw new Error(`${providerName(thread.provider)} does not support stopping an individual subagent`);
       await runtime.stopSubagent(request.params.agentThreadId);
       reply(socket, request.id, {});
@@ -858,7 +886,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "threads.respondToRequest") {
-      const acp = await ensureRuntime(thread.provider);
+      const acp = await ensureRuntime(thread.provider, thread.instanceId);
       await engine.append(thread.threadId, { type: "ApprovalResolved", payload: request.params.optionId ? { requestId: request.params.requestId, optionId: request.params.optionId } : { requestId: request.params.requestId } });
       acp.respondToPermission(request.params.requestId, request.params.optionId);
       reply(socket, request.id, {});
@@ -888,14 +916,14 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         publishQueue(thread.threadId);
       }
       await resolveThreadApprovals(thread.threadId);
-      const acp = runtimeForLocalCancellation(thread.provider);
+      const acp = runtimeForLocalCancellation(thread.provider, thread.instanceId);
       await cancelThreadTurn(acp, thread);
       requestQueueRestart(thread.threadId, admission);
       reply(socket, request.id, {});
       return;
     }
     const configOptions = await serializeSessionConfig(thread.sessionId, async () => {
-      const acp = await ensureRuntime(thread.provider);
+      const acp = await ensureRuntime(thread.provider, thread.instanceId);
       const current = engine.thread(thread.threadId);
       if (!current) throw new Error(`Unknown thread ${thread.threadId}`);
       const liveOptions = await ensureThreadSession(acp, current);
@@ -981,8 +1009,8 @@ async function cancelThreadTurn(acp: AgentRuntime | undefined, thread: ThreadPro
   void runNextQueued(thread.threadId);
 }
 
-function runtimeForLocalCancellation(provider: ProviderId): AgentRuntime | undefined {
-  const runtime = runtimes.get(provider);
+function runtimeForLocalCancellation(provider: ProviderId, instanceId?: string): AgentRuntime | undefined {
+  const runtime = runtimes.get(runtimeKey(provider, instanceId));
   return runtime?.isOpen() ? runtime : undefined;
 }
 
@@ -1044,7 +1072,7 @@ async function startQueuedTurn(threadId: string, admission: QueueAdmission): Pro
   admission.turnId = turnId;
   await engine.append(threadId, { type: "TurnPhaseChanged", payload: { phase: "preparing", turnId, queuedId: queued.queuedId } });
   await waitForSessionConfig(pendingThread.sessionId);
-  const acp = await ensureRuntime(pendingThread.provider);
+  const acp = await ensureRuntime(pendingThread.provider, pendingThread.instanceId);
   const thread = engine.thread(threadId);
   if (!thread) throw new Error(`Unknown thread ${threadId}`);
   if (thread.running) throw new Error("A turn is already running");
@@ -1278,7 +1306,7 @@ async function queueBackgroundTaskReport(
     publishQueue(threadId);
   }
   if (!task.reportQueued) await engine.append(threadId, { type: "BackgroundTaskReportQueued", payload: { taskId } });
-  if (dispatch && runtimes.get(thread.provider)?.isOpen()) void runNextQueued(threadId);
+  if (dispatch && runtimes.get(runtimeKey(thread.provider, thread.instanceId))?.isOpen()) void runNextQueued(threadId);
 }
 
 async function markBackgroundTaskReportAttempted(threadId: string, queuedId: string): Promise<void> {
@@ -1413,7 +1441,7 @@ async function retryUnknownSessionOnce<T>(
     if (!isUnknownAcpSessionError(error) && !/unknown .*?(?:session|thread)/i.test(error instanceof Error ? error.message : String(error))) throw error;
     const current = engine.thread(thread.threadId);
     if (!current) throw new Error(`Unknown thread ${thread.threadId}`);
-    const client = await ensureRuntime(thread.provider);
+    const client = await ensureRuntime(thread.provider, thread.instanceId);
     await ensureThreadSession(client, current);
     return operation(client);
   }
@@ -1543,11 +1571,14 @@ async function shutdown(): Promise<void> {
 }
 
 async function resetRuntime(provider: ProviderId = "kimi"): Promise<void> {
-  await runtimeStarts.get(provider)?.catch(() => undefined);
-  runtimeStarts.delete(provider);
-  await runtimes.get(provider)?.close();
-  runtimes.delete(provider);
-  initializeResults.delete(provider);
+  const keys = new Set([...runtimeStarts.keys(), ...runtimes.keys()].filter((key) => key === provider || key.startsWith(`${provider}:`)));
+  await Promise.all([...keys].map((key) => runtimeStarts.get(key)?.catch(() => undefined)));
+  await Promise.all([...keys].map((key) => runtimes.get(key)?.close()));
+  for (const key of keys) {
+    runtimeStarts.delete(key);
+    runtimes.delete(key);
+    initializeResults.delete(key);
+  }
   if (provider === "kimi") configDefaultsLive = false;
 }
 

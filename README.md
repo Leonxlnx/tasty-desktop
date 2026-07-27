@@ -1,9 +1,9 @@
 # Tasty
 
-Tasty is an open-source desktop control panel for local coding agents. It brings Kimi, OpenAI Codex, Anthropic Claude, and Cursor into one project-aware workspace without moving provider credentials into the app.
+Tasty is an open-source desktop control panel for local coding agents. It brings Kimi, OpenAI Codex, Anthropic Claude, Cursor, and OpenCode into one project-aware workspace without moving provider credentials into the app.
 
 > [!IMPORTANT]
-> Tasty is a community project. It is not affiliated with or endorsed by Moonshot AI, OpenAI, Anthropic, or Cursor.
+> Tasty is a community project. It is not affiliated with or endorsed by Moonshot AI, OpenAI, Anthropic, Cursor, or OpenCode.
 
 ## Download
 

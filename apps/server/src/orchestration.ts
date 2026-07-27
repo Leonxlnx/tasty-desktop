@@ -7,7 +7,7 @@ export type ToolCall = { toolCallId: string; turnId?: string; title?: string; ki
 export type Approval = { requestId: string; turnId?: string; title: string; kind: "permission" | "question" | "plan_review"; options: Array<{ optionId: string; name: string; kind: string }> };
 export type TurnCheckpoint = Checkpoint & { diff?: string };
 export type ThreadUsage = { context?: UsageUpdate; tokens?: Usage };
-export type ProviderId = "kimi" | "codex" | "claude" | "cursor";
+export type ProviderId = "kimi" | "codex" | "claude" | "cursor" | "opencode";
 export type ThreadGoal = {
   objective: string;
   status: "active" | "complete";
@@ -54,6 +54,7 @@ export type ThreadProjection = {
   threadId: string;
   sessionId: string;
   provider: ProviderId;
+  instanceId?: string;
   parentThreadId?: string;
   cwd: string;
   worktree?: ThreadWorktree;
@@ -83,7 +84,7 @@ export type ThreadProjection = {
 
 export type DomainEvent =
   | { type: "ThreadSnapshot"; payload: { thread: ThreadProjection } }
-  | { type: "ThreadCreated"; payload: { sessionId: string; provider?: ProviderId; parentThreadId?: string; cwd: string; worktree?: ThreadWorktree; kind?: "project" | "chat"; title: string; configOptions?: SessionConfigOption[] } }
+  | { type: "ThreadCreated"; payload: { sessionId: string; provider?: ProviderId; instanceId?: string; parentThreadId?: string; cwd: string; worktree?: ThreadWorktree; kind?: "project" | "chat"; title: string; configOptions?: SessionConfigOption[] } }
   | { type: "ThreadRenamed"; payload: { title: string } }
   | { type: "ThreadGoalSet"; payload: { objective: string; status?: ThreadGoal["status"] } }
   | { type: "ThreadGoalCleared"; payload: Record<string, never> }
@@ -223,6 +224,7 @@ export class OrchestrationEngine {
         threadId: event.threadId,
         sessionId: payload.sessionId,
         provider: payload.provider ?? "kimi",
+        ...(payload.instanceId ? { instanceId: payload.instanceId } : {}),
         ...(payload.parentThreadId ? { parentThreadId: payload.parentThreadId } : {}),
         cwd: payload.cwd,
         ...(payload.worktree ? { worktree: payload.worktree } : {}),

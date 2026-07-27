@@ -42,12 +42,12 @@ type ActivityEntry = { id: string; turnId: string; kind: "thought" | "tool"; sta
 type QueuedPrompt = { queuedId: string; text: string; mode: "queue" | "steer"; createdAt: string; images: Array<{ name: string; mimeType: string }>; origin?: "user" | "background_task" };
 type DesktopPreviewCommand = { action: "open" | "resize"; url?: string; panelWidth?: number; viewportWidth?: number; viewportHeight?: number };
 type SkillInstallRequest = { cwd: string; source: string; name: string };
-type ProviderId = "kimi" | "codex" | "claude" | "cursor";
+type ProviderId = "kimi" | "codex" | "claude" | "cursor" | "opencode";
 type TurnPhase = "idle" | "preparing" | "running" | "stopping" | "checkpointing" | "blocked" | "failed";
 type TurnLifecycle = { phase: TurnPhase; updatedAt: string; turnId?: string; queuedId?: string; error?: string };
 type ThreadGoal = { objective: string; updatedAt: string };
 type Thread = {
-  threadId: string; sessionId: string; provider: ProviderId; parentThreadId?: string; goal?: ThreadGoal; cwd: string; worktree?: { sourceCwd: string; branch: string }; kind: "project" | "chat"; title: string; createdAt: string; updatedAt: string; archivedAt?: string; running: boolean;
+  threadId: string; sessionId: string; provider: ProviderId; instanceId?: string; parentThreadId?: string; goal?: ThreadGoal; cwd: string; worktree?: { sourceCwd: string; branch: string }; kind: "project" | "chat"; title: string; createdAt: string; updatedAt: string; archivedAt?: string; running: boolean;
   activeTurnId: string | undefined; stopReason: string | undefined; lifecycle: TurnLifecycle; turns: TurnRecord[]; messages: Message[]; plan: Array<{ content: string; status: string }>;
   activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; configOptions: ConfigOption[]; commands: AvailableCommand[]; modeId: string | undefined; checkpoints: Checkpoint[]; backgroundTasks: BackgroundTask[]; usage?: Usage; queue: QueuedPrompt[];
 };
@@ -63,6 +63,7 @@ type ProviderState = {
   event?: AuthState["event"];
   capabilities?: ProviderCapabilitySupport;
 };
+type ProviderInstance = { id: string; name: string; provider: ProviderId; installed: boolean; runtimeReady?: boolean };
 type Preferences = {
   density: "comfortable" | "compact";
   sendKey: "enter" | "ctrl-enter";
@@ -86,6 +87,7 @@ type Preferences = {
   composerConfig: Record<string, string>;
   yoloAcknowledged: boolean;
   provider: ProviderId;
+  providerInstances: Partial<Record<ProviderId, string>>;
   editor: "system" | "vscode" | "cursor";
   keybindings: Record<KeybindingAction, string>;
   agentProfiles: AgentProfile[];
@@ -120,7 +122,7 @@ const terminalLayoutKey = "tasty.terminal-layout.v1";
 const defaultPreferences: Preferences = {
   density: "comfortable", sendKey: "enter", workspace: "", onboardingDone: false, sidebarCollapsed: false, projects: [], zoom: 1,
   theme: "system", font: "system", fontSize: 15, accent: "neutral", paletteVersion: 4, sidebarSide: "left", railSide: "right", sidebarWidth: 272, railWidth: 420,
-  projectAliases: {}, hiddenProjects: [], hiddenSessions: [], composerConfig: {}, yoloAcknowledged: false, provider: "kimi", editor: "system",
+  projectAliases: {}, hiddenProjects: [], hiddenSessions: [], composerConfig: {}, yoloAcknowledged: false, provider: "kimi", providerInstances: {}, editor: "system",
   keybindings: { palette: "Ctrl+K", newChat: "Ctrl+N", openFolder: "Ctrl+O", toggleSidebar: "Ctrl+B", terminal: "Ctrl+J", settings: "Ctrl+," }, agentProfiles: [],
 };
 const keybindingActions: Array<{ id: KeybindingAction; label: string }> = [
@@ -378,6 +380,7 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
   const [auth, setAuth] = useState<AuthState>();
   const [providers, setProviders] = useState<ProviderState[]>([]);
+  const [providerInstances, setProviderInstances] = useState<ProviderInstance[]>([]);
   const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
   const [images, setImages] = useState<PendingImage[]>([]);
   const [selectedFile, setSelectedFile] = useState<{ path: string; content: string }>();
@@ -438,8 +441,10 @@ export function App() {
 
   const activeThread = threads.find((thread) => thread.threadId === activeThreadId);
   const providerId = activeThread?.provider ?? preferences.provider;
+  const instanceId = activeThread?.instanceId ?? preferences.providerInstances[providerId];
   const providerState = providers.find((provider) => provider.id === providerId);
-  const runtimeReady = providerId === "kimi" ? Boolean(auth?.authenticated && kimiRuntimeReady) : providerUsable(providerState);
+  const instanceState = providerInstances.find((instance) => instance.id === instanceId && instance.provider === providerId);
+  const runtimeReady = instanceId ? Boolean(instanceState?.installed) : providerId === "kimi" ? Boolean(auth?.authenticated && kimiRuntimeReady) : providerUsable(providerState);
   const promptTrigger = useMemo(() => composerTrigger(prompt), [prompt]);
   const composerProjectCwd = activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : undefined;
   const fileSuggestionQuery = promptTrigger?.kind === "file" ? promptTrigger.query : undefined;
@@ -754,8 +759,9 @@ export function App() {
     }
   }, [call, revealLocalPath, setDiagnostic]);
   const refreshProviders = useCallback(async () => {
-    const result = await call("providers.list") as { providers: ProviderState[] };
+    const result = await call("providers.list") as { providers: ProviderState[]; instances?: ProviderInstance[] };
     setProviders(result.providers.map((provider) => ({ ...provider, id: normalizeProvider(provider.id ?? provider.provider), provider: normalizeProvider(provider.provider ?? provider.id) })));
+    setProviderInstances(result.instances?.map((instance) => ({ ...instance, provider: normalizeProvider(instance.provider) })) ?? []);
   }, [call]);
   const recoverLocalServer = useCallback(async (force = false) => {
     if (serverRestarting.current) return;
@@ -1062,7 +1068,7 @@ export function App() {
       setKimiRuntimeReady(Boolean(environment.initialize));
       if (environment.runtimeError) setDiagnostic(`Agent runtime unavailable: ${environment.runtimeError}`);
       if (environment.auth.authenticated) void refreshQuota();
-      return call("threads.list", { provider: preferences.provider });
+      return call("threads.list", { provider: preferences.provider, ...(preferences.providerInstances[preferences.provider] ? { instanceId: preferences.providerInstances[preferences.provider] } : {}) });
     }).then((result) => {
       const listed = result as { threads: Thread[]; runtimeSessions: RuntimeSession[] };
       const incoming = listed.threads.map(normalizeThread);
@@ -1070,7 +1076,7 @@ export function App() {
       setRuntimeSessions(listed.runtimeSessions);
       setActiveThreadId((current) => current ?? incoming[0]?.threadId);
     }).catch((error: Error) => setDiagnostic(error.message)).finally(() => setBootstrapping(false));
-  }, [call, connection, preferences.provider, refreshQuota]);
+  }, [call, connection, preferences.provider, preferences.providerInstances, refreshQuota]);
 
   useEffect(() => {
     if (providerId !== "kimi" || connection !== "connected" || bootstrapping || runtimeReady || !auth?.authenticated) return;
@@ -1102,18 +1108,18 @@ export function App() {
   useEffect(() => {
     setConfigDefaults([]);
     setDraftConfig({});
-  }, [providerId]);
+  }, [providerId, instanceId]);
 
   useEffect(() => {
     if (!runtimeReady || configDefaults.length) return;
     let cancelled = false;
-    void call("runtime.configDefaults", { provider: providerId }).then((result) => {
+    void call("runtime.configDefaults", { provider: providerId, ...(instanceId ? { instanceId } : {}) }).then((result) => {
       if (cancelled) return;
       const options = (result as { configOptions?: unknown }).configOptions;
       if (Array.isArray(options)) setConfigDefaults(options as ConfigOption[]);
     }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [call, configDefaults.length, providerId, runtimeReady]);
+  }, [call, configDefaults.length, instanceId, providerId, runtimeReady]);
 
   useEffect(() => {
     if (!draftChat || activeThread) return;
@@ -1123,10 +1129,10 @@ export function App() {
   useEffect(() => {
     if (!runtimeReady || !activeThread || activeThread.archivedAt || isThreadBusy(activeThread)) return;
     let cancelled = false;
-    void call("threads.resume", { threadId: activeThread.threadId, sessionId: activeThread.sessionId, cwd: activeThread.cwd, provider: activeThread.provider, replay: false })
+    void call("threads.resume", { threadId: activeThread.threadId, sessionId: activeThread.sessionId, cwd: activeThread.cwd, provider: activeThread.provider, ...(activeThread.instanceId ? { instanceId: activeThread.instanceId } : {}), replay: false })
       .catch((error: Error) => { if (!cancelled) setDiagnostic(error.message); });
     return () => { cancelled = true; };
-  }, [activeThread?.archivedAt, activeThread?.cwd, activeThread?.lifecycle.phase, activeThread?.running, activeThread?.sessionId, activeThread?.threadId, call, runtimeReady]);
+  }, [activeThread?.archivedAt, activeThread?.cwd, activeThread?.instanceId, activeThread?.lifecycle.phase, activeThread?.running, activeThread?.sessionId, activeThread?.threadId, call, runtimeReady]);
 
   function createThread(targetCwd = cwd, isolate = false) {
     if (!targetCwd) return;
@@ -1140,9 +1146,9 @@ export function App() {
     window.setTimeout(() => composerInput.current?.focus(), 0);
   }
 
-  function selectProvider(provider: ProviderId) {
-    if (activeThread || provider === preferences.provider) return;
-    setPreferences((current) => ({ ...current, provider }));
+  function selectProvider(provider: ProviderId, selectedInstanceId?: string) {
+    if (activeThread || (provider === preferences.provider && selectedInstanceId === preferences.providerInstances[provider])) return;
+    setPreferences((current) => ({ ...current, provider, providerInstances: { ...current.providerInstances, [provider]: selectedInstanceId } }));
     setDiagnostics([]);
   }
 
@@ -1207,7 +1213,7 @@ export function App() {
     setCapabilityCenterOpen(false);
     setDraftChat(undefined);
     setActiveThreadId(thread.threadId);
-    setPreferences((current) => current.provider === thread.provider ? current : { ...current, provider: thread.provider });
+    setPreferences((current) => ({ ...current, provider: thread.provider, providerInstances: { ...current.providerInstances, [thread.provider]: thread.instanceId } }));
     setNavView(thread.kind === "chat" ? "chats" : "projects");
   }
 
@@ -1217,7 +1223,8 @@ export function App() {
         setCwd(session.cwd);
         rememberWorkspace(session.cwd);
       }
-      const result = await call("threads.resume", { threadId: session.sessionId, sessionId: session.sessionId, cwd: session.cwd, provider: preferences.provider, replay: false }) as { thread: Thread };
+      const selectedInstanceId = preferences.providerInstances[preferences.provider];
+      const result = await call("threads.resume", { threadId: session.sessionId, sessionId: session.sessionId, cwd: session.cwd, provider: preferences.provider, ...(selectedInstanceId ? { instanceId: selectedInstanceId } : {}), replay: false }) as { thread: Thread };
       const thread = normalizeThread(result.thread);
       setThreads((current) => current.some((item) => item.threadId === thread.threadId) ? current : [thread, ...current]);
       selectThread(thread);
@@ -1264,6 +1271,7 @@ export function App() {
         ...(draftChat?.kind === "chat" ? { standalone: true } : { cwd: draftChat?.cwd }),
         ...(draftChat?.isolate ? { isolate: true } : {}),
         provider: preferences.provider,
+        ...(preferences.providerInstances[preferences.provider] ? { instanceId: preferences.providerInstances[preferences.provider] } : {}),
         ...(Object.keys(draftConfig).length ? { config: draftConfig } : {}),
       }) as { thread: Thread };
       const thread = activeThread ?? normalizeThread(created!.thread);
@@ -2372,7 +2380,7 @@ export function App() {
               </div>
             </div>
             <div className="composer-controls">
-              {(activeThread || draftChat) && <ProviderPicker providers={providers} selected={providerId} locked={Boolean(activeThread)} disabled={updateMutationsBlocked || configMutationPending} onSelect={selectProvider} />}
+              {(activeThread || draftChat) && <ProviderPicker providers={providers} instances={providerInstances} selected={providerId} {...(instanceId ? { selectedInstanceId: instanceId } : {})} locked={Boolean(activeThread)} disabled={updateMutationsBlocked || configMutationPending} onSelect={selectProvider} />}
               {(activeThread || draftChat) && <ComposerConfig options={composerOptions} busyId={configBusyId} disabled={!runtimeReady || updateMutationsBlocked || configMutationPending} onChange={changeConfig} />}
               <button className={`icon-button primary composer-submit ${primaryComposerAction === "stop" ? "composer-stop" : ""}`} type={primaryComposerAction === "stop" ? "button" : "submit"} aria-label={composerPrimaryLabel(primaryComposerAction)} title={composerPrimaryLabel(primaryComposerAction)} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked || (primaryComposerAction !== "stop" && (!composerSubmitReady || !prompt.trim()))} onClick={primaryComposerAction === "stop" && activeThread ? () => stopThread(activeThread.threadId) : undefined}>{primaryComposerAction === "stop" ? <Stop weight="fill" /> : <ArrowUp weight="bold" />}</button>
             </div>
@@ -2685,25 +2693,26 @@ type ComposerControl = {
   choices: Array<{ value: string; name: string; description?: string; danger?: boolean }>;
 };
 
-function ProviderPicker({ providers, selected, locked, disabled, onSelect }: { providers: ProviderState[]; selected: ProviderId; locked: boolean; disabled: boolean; onSelect: (provider: ProviderId) => void }) {
+function ProviderPicker({ providers, instances, selected, selectedInstanceId, locked, disabled, onSelect }: { providers: ProviderState[]; instances: ProviderInstance[]; selected: ProviderId; selectedInstanceId?: string; locked: boolean; disabled: boolean; onSelect: (provider: ProviderId, instanceId?: string) => void }) {
   const [open, setOpen] = useState(false);
   const provider = providers.find((item) => item.id === selected);
   const choices = providers.map((item) => ({
     value: item.id,
     name: item.name,
     description: !item.installed ? "CLI not installed" : item.authenticated === false ? "Sign in required" : item.account ?? `${item.protocol} runtime`,
-  }));
+  })).concat(instances.map((instance) => ({ value: `${instance.provider}:${instance.id}` as ProviderId, name: instance.name, description: `${providerName(instance.provider)} · configured instance${instance.installed ? "" : " · CLI missing"}` })));
+  const selectedInstance = instances.find((instance) => instance.id === selectedInstanceId && instance.provider === selected);
   const control: ComposerControl = {
     id: "provider",
     label: "Provider",
     icon: <Robot />,
     tooltip: locked ? "Provider is fixed for this chat" : "AI provider for the new chat",
-    current: provider?.name ?? providerName(selected),
-    value: selected,
+    current: selectedInstance?.name ?? provider?.name ?? providerName(selected),
+    value: selectedInstance ? `${selected}:${selectedInstance.id}` : selected,
     choices,
     disabled: locked || disabled || !choices.length,
   };
-  return <div className="provider-picker"><ConfigControl control={control} open={open} onToggle={() => setOpen((current) => !current)} onClose={() => setOpen(false)} onPick={(value) => { onSelect(normalizeProvider(value)); setOpen(false); }} /></div>;
+  return <div className="provider-picker"><ConfigControl control={control} open={open} onToggle={() => setOpen((current) => !current)} onClose={() => setOpen(false)} onPick={(value) => { const [providerValue, instanceValue] = value.split(":", 2); onSelect(normalizeProvider(providerValue), instanceValue); setOpen(false); }} /></div>;
 }
 
 export function ComposerConfig({ options, busyId, disabled = false, onChange }: { options: ConfigOption[]; busyId?: string | undefined; disabled?: boolean; onChange: (configId: string, value: string) => void }) {
@@ -3194,7 +3203,7 @@ function ProviderGate({ provider, onInstall, onLogin, onOpenUrl, onCancel }: {
 }
 
 function ProviderMark({ provider }: { provider: ProviderId }) {
-  return <span className={`provider-mark provider-${provider}`} aria-hidden="true">{provider === "kimi" ? "K" : provider === "codex" ? "O" : provider === "claude" ? "A" : "C"}</span>;
+  return <span className={`provider-mark provider-${provider}`} aria-hidden="true">{provider === "kimi" ? "K" : provider === "codex" ? "O" : provider === "claude" ? "A" : provider === "cursor" ? "C" : "OC"}</span>;
 }
 
 function ProviderSkeleton() {
@@ -3315,6 +3324,9 @@ function loadPreferences(): Preferences {
       : {};
     const savedKeybindings: Partial<Record<KeybindingAction, string>> = value.keybindings && typeof value.keybindings === "object" && !Array.isArray(value.keybindings) ? value.keybindings : {};
     const keybindings = Object.fromEntries(keybindingActions.map(({ id }) => [id, typeof savedKeybindings[id] === "string" && savedKeybindings[id] ? savedKeybindings[id] : defaultPreferences.keybindings[id]])) as Record<KeybindingAction, string>;
+    const providerInstances = value.providerInstances && typeof value.providerInstances === "object" && !Array.isArray(value.providerInstances)
+      ? Object.fromEntries(Object.entries(value.providerInstances).filter(([provider, id]) => ["kimi", "codex", "claude", "cursor", "opencode"].includes(provider) && typeof id === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(id)))
+      : {};
     const agentProfiles = Array.isArray(value.agentProfiles) ? value.agentProfiles.flatMap((profile) => {
       if (!profile || typeof profile !== "object") return [];
       const candidate = profile as Partial<AgentProfile>;
@@ -3346,6 +3358,7 @@ function loadPreferences(): Preferences {
       composerConfig,
       yoloAcknowledged: value.yoloAcknowledged === true,
       provider: normalizeProvider(value.provider),
+      providerInstances,
       editor: value.editor === "vscode" || value.editor === "cursor" ? value.editor : "system",
       keybindings,
       agentProfiles,
@@ -3955,7 +3968,7 @@ export function applyEvents(threads: Thread[], events: StoredEvent[]): Thread[] 
   const mutable = new Map<string, Thread>();
   for (const event of events) {
     if (event.type === "ThreadCreated") {
-      const payload = event.payload as { sessionId: string; provider?: ProviderId; parentThreadId?: string; cwd: string; worktree?: { sourceCwd: string; branch: string }; kind?: "project" | "chat"; title: string; configOptions: ConfigOption[] };
+      const payload = event.payload as { sessionId: string; provider?: ProviderId; instanceId?: string; parentThreadId?: string; cwd: string; worktree?: { sourceCwd: string; branch: string }; kind?: "project" | "chat"; title: string; configOptions: ConfigOption[] };
       const created: Thread = { threadId: event.threadId, ...payload, provider: normalizeProvider(payload.provider), kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, lifecycle: { phase: "idle", updatedAt: event.createdAt }, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], backgroundTasks: [], usage: {}, queue: [] };
       mutable.set(event.threadId, created);
       nextThreads = [created, ...nextThreads.filter((thread) => thread.threadId !== event.threadId)];
@@ -4152,6 +4165,7 @@ export function normalizeThread(value: Thread): Thread {
     threadId: String(thread.threadId ?? ""),
     sessionId: String(thread.sessionId ?? ""),
     provider: normalizeProvider(thread.provider),
+    ...(typeof thread.instanceId === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(thread.instanceId) ? { instanceId: thread.instanceId } : {}),
     ...(typeof thread.parentThreadId === "string" && thread.parentThreadId ? { parentThreadId: thread.parentThreadId } : {}),
     ...(thread.goal && typeof thread.goal.objective === "string" && thread.goal.objective ? { goal: {
       objective: thread.goal.objective,
@@ -4208,11 +4222,11 @@ export function filterByTitle<T extends { title?: string }>(items: T[], query: s
 }
 
 function normalizeProvider(value: unknown): ProviderId {
-  return value === "codex" || value === "claude" || value === "cursor" ? value : "kimi";
+  return value === "codex" || value === "claude" || value === "cursor" || value === "opencode" ? value : "kimi";
 }
 
 function providerName(provider: ProviderId): string {
-  return provider === "codex" ? "OpenAI Codex" : provider === "claude" ? "Anthropic Claude" : provider === "cursor" ? "Cursor" : "Kimi";
+  return provider === "codex" ? "OpenAI Codex" : provider === "claude" ? "Anthropic Claude" : provider === "cursor" ? "Cursor" : provider === "opencode" ? "OpenCode" : "Kimi";
 }
 
 export function providerUsable(provider: ProviderState | undefined): boolean {

@@ -23,6 +23,7 @@ type ClaudeSession = {
 export type ClaudeRuntimeOptions = {
   binary: string;
   argsPrefix?: string[];
+  env?: NodeJS.ProcessEnv;
   onEvent: (event: RuntimeEvent) => unknown | Promise<unknown>;
   onClose?: () => void;
 };
@@ -159,7 +160,7 @@ export class ClaudeRuntime implements AgentRuntime {
     ];
     const child = spawn(this.#options.binary, [...this.#options.argsPrefix ?? [], ...args], {
       cwd: session.cwd,
-      env: { ...process.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" },
+      env: { ...process.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", ...this.#options.env },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       shell: process.platform === "win32" && /\.cmd$/i.test(this.#options.binary),

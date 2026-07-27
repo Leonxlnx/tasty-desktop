@@ -85,6 +85,8 @@ Status: complete. Profiles preserve provider-supported prompt/model/reasoning/pe
 - Allow named provider instances without copying credentials.
 - Generate provider capability documentation from conformance fixtures.
 
+Status: complete. OpenCode uses its official ACP command. Named instances select validated CLI/provider-home paths without accepting credentials, persist on threads, and inherit into side chats. Provider capability fixtures cover every adapter.
+
 ### 8. WSL and language intelligence
 
 - Run the orchestration boundary inside a selected WSL distribution with explicit path translation and health checks.

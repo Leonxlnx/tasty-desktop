@@ -1,16 +1,18 @@
 # User Guide
 
-Tasty is a Windows desktop control panel for Kimi Code CLI, OpenAI Codex CLI, Anthropic Claude Code, and Cursor Agent CLI. It uses the accounts, sessions, models, and capabilities available to the current Windows user.
+Tasty is a Windows desktop control panel for Kimi Code CLI, OpenAI Codex CLI, Anthropic Claude Code, Cursor Agent CLI, and OpenCode. It uses the accounts, sessions, models, and capabilities available to the current Windows user.
 
 ## Install and sign in
 
 1. Download the newest installer from [GitHub Releases](https://github.com/Leonxlnx/tasty-desktop/releases/latest).
 2. Run the installer and open Tasty.
-3. Choose Kimi, OpenAI Codex, Anthropic Claude, or Cursor during onboarding.
+3. Choose Kimi, OpenAI Codex, Anthropic Claude, Cursor, or OpenCode during onboarding.
 4. If the provider CLI is missing, open its official guide and install it yourself. Tasty never downloads or executes remote install scripts.
 5. Select **Sign in** and complete the provider CLI flow.
 
 Signing out delegates credential removal to the selected provider CLI. Provider configuration, sessions, and Tasty chat history remain on the Windows account.
+
+Named provider instances configured in `provider-instances.json` appear beside the defaults in the composer selector. Use them to point a chat at an existing work or personal CLI home without importing credentials into Tasty. The selected instance is fixed after the first message and inherited by side chats.
 
 ## Projects and chats
 

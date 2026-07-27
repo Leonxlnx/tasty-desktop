@@ -54,6 +54,15 @@ Changing Claude configuration restarts the provider process and resumes the same
 
 Cursor uses the same hardened ACP boundary as Kimi but no Kimi-specific home, quota, or capabilities are projected.
 
+## OpenCode
+
+- Binary: `opencode` on `PATH`
+- Transport: OpenCode's official `opencode acp` Agent Client Protocol server
+- Authentication: `opencode providers list`, `opencode providers login`, and `opencode providers logout`
+- Runtime-owned features: sessions, models, reasoning variants, permissions, commands, images, agents, MCP servers, and plugins exposed by the installed OpenCode release
+
+Tasty uses the local OpenCode credential store directly and never copies provider tokens. The adapter was checked against the official `opencode-ai` 1.18.5 Windows package and its advertised ACP command.
+
 ## Binary overrides
 
 Contributors and portable installations can set an absolute path with one of these environment variables:
@@ -62,8 +71,28 @@ Contributors and portable installations can set an absolute path with one of the
 - `CODEX_BINARY`
 - `CLAUDE_BINARY`
 - `CURSOR_BINARY`
+- `OPENCODE_BINARY`
 
 Tasty rejects a configured path that does not exist. Provider child processes inherit the user's environment and use hidden Windows process creation.
+
+## Named instances
+
+Create `provider-instances.json` inside the Tasty data directory to expose additional named runtimes in the composer provider picker. An instance references an existing provider CLI and provider-owned home directories; it never contains or copies an API key.
+
+```json
+[
+  {
+    "id": "work-codex",
+    "name": "Work Codex",
+    "provider": "codex",
+    "environment": {
+      "CODEX_HOME": "C:\\Users\\you\\.codex-work"
+    }
+  }
+]
+```
+
+`id` is a stable 1–64 character identifier. `binary`, when present, must be an existing absolute path. Environment values must be absolute paths and are limited to provider-owned home/config variables: `KIMI_CODE_HOME`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `CURSOR_CONFIG_DIR`, and the standard `XDG_*_HOME` variables used by OpenCode. Arbitrary environment variables and secret values are rejected. A thread persists its instance ID, and side chats inherit it.
 
 ## Compatibility storage
 

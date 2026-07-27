@@ -98,6 +98,10 @@ export function parseProviderAuthStatus(provider: ExternalProvider, result: Prob
       return { provider, installed: true, authenticated: result.code === 0 ? authenticated || null : false, loginRunning, ...(combined ? { message: combined } : {}) };
     }
   }
+  if (provider === "opencode") {
+    const count = /\b(\d+)\s+credentials?\b/i.exec(combined)?.[1];
+    return { provider, installed: true, authenticated: count && Number(count) > 0 ? true : result.code === 0 ? null : false, loginRunning, ...(combined ? { message: combined } : {}) };
+  }
   try {
     const value = JSON.parse(result.stdout) as Record<string, unknown>;
     const account = typeof value.userEmail === "string" ? value.userEmail : undefined;
@@ -113,18 +117,21 @@ export function parseProviderAuthStatus(provider: ExternalProvider, result: Prob
 function statusArgs(provider: ExternalProvider): string[] {
   if (provider === "codex") return ["login", "status"];
   if (provider === "claude") return ["auth", "status", "--json"];
+  if (provider === "opencode") return ["providers", "list"];
   return ["about", "--json"];
 }
 
 function loginArgs(provider: ExternalProvider): string[] {
   if (provider === "codex") return ["login", "--device-auth"];
   if (provider === "claude") return ["auth", "login"];
+  if (provider === "opencode") return ["providers", "login"];
   return ["login"];
 }
 
 function logoutArgs(provider: ExternalProvider): string[] {
   if (provider === "codex") return ["logout"];
   if (provider === "claude") return ["auth", "logout"];
+  if (provider === "opencode") return ["providers", "logout"];
   return ["logout"];
 }
 

@@ -35,6 +35,7 @@ type PendingApproval = { rpcId: JsonRpcId; method: string };
 export type CodexRuntimeOptions = {
   binary: string;
   args?: string[];
+  env?: NodeJS.ProcessEnv;
   onEvent: (event: RuntimeEvent) => unknown | Promise<unknown>;
   onClose?: () => void;
   requestTimeoutMs?: number;
@@ -62,7 +63,7 @@ export class CodexRuntime implements AgentRuntime {
     if (this.#child) throw new Error("Codex runtime already started");
     this.#closing = false;
     const child = spawn(this.#options.binary, this.#options.args ?? ["app-server", "--stdio"], {
-      env: process.env,
+      env: { ...process.env, ...this.#options.env },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });

@@ -629,11 +629,11 @@ describe("legacy thread ingress", () => {
     expect(thread.provider).toBe("kimi");
   });
 
-  it("preserves provider, parent, and goal metadata", () => {
+  it("preserves provider instance, parent, and goal metadata", () => {
     expect(normalizeThread({
-      threadId: "side", sessionId: "session", provider: "codex", parentThreadId: "main", cwd: "C:\\work", title: "Investigate",
+      threadId: "side", sessionId: "session", provider: "codex", instanceId: "work", parentThreadId: "main", cwd: "C:\\work", title: "Investigate",
       goal: { objective: "Find the regression", updatedAt: "2026-07-26T00:00:00.000Z" },
-    } as never)).toMatchObject({ provider: "codex", parentThreadId: "main", goal: { objective: "Find the regression" } });
+    } as never)).toMatchObject({ provider: "codex", instanceId: "work", parentThreadId: "main", goal: { objective: "Find the regression" } });
   });
 
   it("preserves isolated worktree and archive metadata", () => {
