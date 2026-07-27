@@ -82,6 +82,8 @@ type Preferences = {
   composerConfig: Record<string, string>;
   yoloAcknowledged: boolean;
   provider: ProviderId;
+  editor: "system" | "vscode" | "cursor";
+  keybindings: Record<KeybindingAction, string>;
 };
 type ProjectGroup = { cwd: string; name: string; threads: Thread[]; runtimeSessions: RuntimeSession[] };
 type DraftChat = { kind: "project" | "chat"; cwd?: string; isolate?: boolean };
@@ -93,6 +95,8 @@ type UpdateStatus = { phase: "idle" | "checking" | "current" | "available" | "do
 type RailView = "git" | "terminal" | "preview" | "agents";
 type AppMenu = "file" | "edit" | "view" | "help";
 type SettingsCategory = "general" | "appearance" | "layout" | "account" | "usage" | "updates" | "diagnostics" | "about";
+type KeybindingAction = "palette" | "newChat" | "openFolder" | "toggleSidebar" | "terminal" | "settings";
+type ProjectScript = { name: string; command: string };
 type TerminalSessionInfo = { sessionId: string; cwd: string; shell: string };
 type TerminalEvent = { sessionId: string; type: "stdout" | "stderr" | "exit"; text?: string; code?: number | null };
 type TerminalEntry = { id: number; kind: "command" | "stdout" | "stderr" | "system"; text: string };
@@ -109,8 +113,13 @@ const preferenceKey = "kimi-code-desktop.preferences.v1";
 const defaultPreferences: Preferences = {
   density: "comfortable", sendKey: "enter", workspace: "", onboardingDone: false, sidebarCollapsed: false, projects: [], zoom: 1,
   theme: "system", font: "system", fontSize: 15, accent: "neutral", paletteVersion: 4, sidebarSide: "left", railSide: "right", sidebarWidth: 272, railWidth: 420,
-  projectAliases: {}, hiddenProjects: [], hiddenSessions: [], composerConfig: {}, yoloAcknowledged: false, provider: "kimi",
+  projectAliases: {}, hiddenProjects: [], hiddenSessions: [], composerConfig: {}, yoloAcknowledged: false, provider: "kimi", editor: "system",
+  keybindings: { palette: "Ctrl+K", newChat: "Ctrl+N", openFolder: "Ctrl+O", toggleSidebar: "Ctrl+B", terminal: "Ctrl+J", settings: "Ctrl+," },
 };
+const keybindingActions: Array<{ id: KeybindingAction; label: string }> = [
+  { id: "palette", label: "Command palette" }, { id: "newChat", label: "New chat" }, { id: "openFolder", label: "Open folder" },
+  { id: "toggleSidebar", label: "Toggle sidebar" }, { id: "terminal", label: "Toggle terminal" }, { id: "settings", label: "Open settings" },
+];
 const collapsedSidebarWidth = 60;
 const initialTurnWindow = 60;
 let terminalEntryId = 0;
@@ -172,6 +181,36 @@ export function presentDiagnostic(message: string): string {
   return /ACP connection closed|Server disconnected|Server is not connected/i.test(message)
     ? "Agent runtime disconnected. Reconnecting without stopping active work."
     : message;
+}
+
+export function shortcutFromEvent(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }): string | undefined {
+  const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  if (["Control", "Meta", "Alt", "Shift"].includes(key)) return undefined;
+  const modifiers = [event.ctrlKey || event.metaKey ? "Ctrl" : "", event.altKey ? "Alt" : "", event.shiftKey ? "Shift" : ""].filter(Boolean);
+  return modifiers.length ? [...modifiers, key === " " ? "Space" : key].join("+") : undefined;
+}
+
+export function matchesShortcut(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }, shortcut: string): boolean {
+  return shortcutFromEvent(event)?.toLowerCase() === shortcut.toLowerCase();
+}
+
+export function keybindingConflicts(keybindings: Record<KeybindingAction, string>): Set<KeybindingAction> {
+  const owners = new Map<string, KeybindingAction[]>();
+  for (const { id } of keybindingActions) owners.set(keybindings[id].toLowerCase(), [...owners.get(keybindings[id].toLowerCase()) ?? [], id]);
+  return new Set([...owners.values()].filter((actions) => actions.length > 1).flat());
+}
+
+export function parseProjectScripts(content: string): ProjectScript[] {
+  try {
+    const parsed = JSON.parse(content) as { scripts?: Record<string, unknown> };
+    return Object.entries(parsed.scripts ?? {})
+      .filter((entry): entry is [string, string] => /^[\w:.-]+$/.test(entry[0]) && typeof entry[1] === "string")
+      .map(([name, command]) => ({ name, command }));
+  } catch { return []; }
+}
+
+export function editorUrl(editor: "vscode" | "cursor", path: string): string {
+  return `${editor}://file/${encodeURI(path.replaceAll("\\", "/"))}`;
 }
 
 export function shouldScheduleRuntimeRecovery(connection: ConnectionState, scheduled: boolean): boolean {
@@ -330,6 +369,8 @@ export function App() {
   const [terminalHistory, setTerminalHistory] = useState<string[]>([]);
   const [terminalHistoryIndex, setTerminalHistoryIndex] = useState(-1);
   const [terminalStarting, setTerminalStarting] = useState(false);
+  const [pendingTerminalCommand, setPendingTerminalCommand] = useState<string>();
+  const [projectScripts, setProjectScripts] = useState<ProjectScript[]>([]);
   const [previewDraft, setPreviewDraft] = useState("http://localhost:3000");
   const [previewUrl, setPreviewUrl] = useState<string>();
   const [previewRevision, setPreviewRevision] = useState(0);
@@ -613,46 +654,47 @@ export function App() {
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return;
-      if (event.key.toLowerCase() === "n" && !event.shiftKey) {
+      const conflicts = keybindingConflicts(preferences.keybindings);
+      const triggered = (action: KeybindingAction) => !conflicts.has(action) && matchesShortcut(event, preferences.keybindings[action]);
+      if (triggered("newChat")) {
         event.preventDefault();
         if (runtimeReady) navView === "chats" ? createStandaloneChat() : createThread(cwd);
-      } else if (event.key.toLowerCase() === "n" && event.shiftKey) {
+      } else if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "n") {
         event.preventDefault();
         void createAppWindow();
-      } else if (event.key.toLowerCase() === "o") {
+      } else if (triggered("openFolder")) {
         event.preventDefault();
         void chooseWorkspace();
-      } else if (event.key.toLowerCase() === "b") {
+      } else if (triggered("toggleSidebar")) {
         event.preventDefault();
         setPreferences((current) => ({ ...current, sidebarCollapsed: !current.sidebarCollapsed }));
-      } else if (event.key.toLowerCase() === "j") {
+      } else if (triggered("terminal")) {
         event.preventDefault();
-        toggleRail("terminal");
-      } else if (event.key.toLowerCase() === "k") {
+        if (workspaceForView(navView, activeThread, draftChat, cwd)) toggleRail("terminal");
+      } else if (triggered("palette")) {
         event.preventDefault();
         setSearchOpen(true);
-      } else if (event.key.toLowerCase() === "w") {
-        event.preventDefault();
-        void runWindowAction("close");
-      } else if (event.key === ",") {
+      } else if (triggered("settings")) {
         event.preventDefault();
         setSettingsCategory("general");
         setSettingsOpen(true);
-      } else if (event.key === "0") {
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "w") {
+        event.preventDefault();
+        void runWindowAction("close");
+      } else if ((event.ctrlKey || event.metaKey) && event.key === "0") {
         event.preventDefault();
         setPreferences((current) => ({ ...current, zoom: 1 }));
-      } else if (event.key === "+" || event.key === "=") {
+      } else if ((event.ctrlKey || event.metaKey) && (event.key === "+" || event.key === "=")) {
         event.preventDefault();
         setPreferences((current) => ({ ...current, zoom: clampZoom(current.zoom + .1) }));
-      } else if (event.key === "-") {
+      } else if ((event.ctrlKey || event.metaKey) && event.key === "-") {
         event.preventDefault();
         setPreferences((current) => ({ ...current, zoom: clampZoom(current.zoom - .1) }));
       }
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [cwd, navView, runtimeReady]);
+  }, [activeThread, cwd, draftChat, navView, preferences.keybindings, runtimeReady]);
 
   const call = useCallback((method: string, params: Record<string, unknown> = {}) => supervisor.current?.request(method, params) ?? Promise.reject(new Error("Server is not connected")), []);
   const exportDiagnostics = useCallback(async () => {
@@ -708,6 +750,18 @@ export function App() {
     setCommitMessage("");
     setGitBusy(false);
   }, [workspaceCwd]);
+
+  useEffect(() => {
+    if (connection !== "connected" || !workspaceCwd) {
+      setProjectScripts([]);
+      return;
+    }
+    let disposed = false;
+    void call("files.read", { cwd: workspaceCwd, path: "package.json" })
+      .then((result) => { if (!disposed) setProjectScripts(parseProjectScripts((result as { content: string }).content)); })
+      .catch(() => { if (!disposed) setProjectScripts([]); });
+    return () => { disposed = true; };
+  }, [call, connection, workspaceCwd]);
 
   const refreshQuota = useCallback(async () => {
     if (quotaRefreshInFlight.current) return;
@@ -815,6 +869,17 @@ export function App() {
     })();
     return () => { disposed = true; };
   }, [call, connection, railView, setDiagnostic, terminalSession, workspaceCwd]);
+
+  useEffect(() => {
+    if (!pendingTerminalCommand || !terminalSession || !workspaceCwd || !samePath(terminalSession.cwd, workspaceCwd)) return;
+    const command = pendingTerminalCommand;
+    setPendingTerminalCommand(undefined);
+    setTerminalEntries((current) => [...current, terminalEntry("command", `› ${command}\n`)].slice(-1_000));
+    setTerminalHistory((current) => [...current.filter((item) => item !== command), command].slice(-100));
+    void call("terminal.write", { sessionId: terminalSession.sessionId, command }).catch((error: Error) => {
+      setTerminalEntries((current) => [...current, terminalEntry("stderr", `${error.message}\n`)].slice(-1_000));
+    });
+  }, [call, pendingTerminalCommand, terminalSession, workspaceCwd]);
 
   useEffect(() => {
     let disposed = false;
@@ -1507,6 +1572,25 @@ export function App() {
     }
   }
 
+  async function openWorkspaceInEditor() {
+    if (!workspaceCwd) return;
+    setSearchOpen(false);
+    setThreadFilter("");
+    if (preferences.editor === "system") {
+      await revealLocalPath(workspaceCwd);
+      return;
+    }
+    await openExternalLink(editorUrl(preferences.editor, workspaceCwd));
+  }
+
+  function runProjectScript(script: ProjectScript) {
+    if (!workspaceCwd) return;
+    setSearchOpen(false);
+    setThreadFilter("");
+    setPendingTerminalCommand(`npm run ${script.name}`);
+    setRailView("terminal");
+  }
+
   function runTerminalCommand(event: FormEvent) {
     event.preventDefault();
     const command = terminalCommand.trim();
@@ -1801,6 +1885,16 @@ export function App() {
   const projects = useMemo(() => groupProjects(preferences.projects, projectThreads, projectRuntimeSessions, preferences.projectAliases)
     .filter((project) => !preferences.hiddenProjects.some((hidden) => samePath(hidden, project.cwd))), [preferences.hiddenProjects, preferences.projectAliases, preferences.projects, projectRuntimeSessions, projectThreads]);
   const visibleProjects = useMemo(() => filterProjects(projects, threadFilter), [projects, threadFilter]);
+  const commandQuery = threadFilter.trim().toLowerCase();
+  const paletteActions = [
+    { id: "new-chat", label: "New chat", detail: navView === "chats" ? "Start a standalone conversation" : "Start in the current project", icon: <Plus />, shortcut: preferences.keybindings.newChat, disabled: !runtimeReady || (navView === "projects" && !cwd), run: () => { navView === "chats" ? createStandaloneChat() : createThread(cwd); setSearchOpen(false); setThreadFilter(""); } },
+    { id: "open-folder", label: "Open folder", detail: "Choose a local workspace", icon: <FolderOpen />, shortcut: preferences.keybindings.openFolder, run: () => { setSearchOpen(false); setThreadFilter(""); void chooseWorkspace(); } },
+    { id: "open-editor", label: "Open workspace in editor", detail: preferences.editor === "system" ? "Reveal in the system file manager" : `Open with ${preferences.editor === "vscode" ? "Visual Studio Code" : "Cursor"}`, icon: <ArrowSquareOut />, disabled: !workspaceCwd, run: () => void openWorkspaceInEditor() },
+    { id: "terminal", label: "Toggle terminal", detail: "Open a shell in the active workspace", icon: <TerminalWindow />, shortcut: preferences.keybindings.terminal, disabled: !workspaceCwd, run: () => { toggleRail("terminal"); setSearchOpen(false); setThreadFilter(""); } },
+    { id: "agents", label: "Show subagents", detail: "Inspect active and completed delegated work", icon: <Robot />, disabled: !activeThread && !workspaceCwd, run: () => { setRailView("agents"); setSearchOpen(false); setThreadFilter(""); } },
+    { id: "settings", label: "Open settings", detail: "Appearance, shortcuts, providers, and updates", icon: <GearSix />, shortcut: preferences.keybindings.settings, run: () => { setSettingsCategory("general"); setSettingsOpen(true); setSearchOpen(false); setThreadFilter(""); } },
+  ].filter((action) => !commandQuery || `${action.label} ${action.detail}`.toLowerCase().includes(commandQuery));
+  const visibleProjectScripts = projectScripts.filter((script) => !commandQuery || `${script.name} ${script.command}`.toLowerCase().includes(commandQuery));
   const turnViews = useMemo(() => activeThread ? projectTurns(activeThread) : [], [activeThread]);
   const visibleTurnViews = useMemo(() => recentTurns(turnViews, visibleTurnLimit), [turnViews, visibleTurnLimit]);
   const hiddenTurnCount = turnViews.length - visibleTurnViews.length;
@@ -1908,8 +2002,9 @@ export function App() {
             <button ref={(element) => { menuTriggers.current.file = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "file"} onClick={() => setOpenMenu((current) => current === "file" ? undefined : "file")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("file", event)}>File</button>
             {openMenu === "file" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus}>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void createAppWindow(); }}><span>New Window</span><kbd>Ctrl Shift N</kbd></button>
-              <button type="button" role="menuitem" disabled={!runtimeReady || (navView === "projects" && !cwd)} onClick={() => { setOpenMenu(undefined); navView === "chats" ? createStandaloneChat() : createThread(cwd); }}><span>New Chat</span><kbd>Ctrl N</kbd></button>
-              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void chooseWorkspace(); }}><span>Open Folder…</span><kbd>Ctrl O</kbd></button>
+              <button type="button" role="menuitem" disabled={!runtimeReady || (navView === "projects" && !cwd)} onClick={() => { setOpenMenu(undefined); navView === "chats" ? createStandaloneChat() : createThread(cwd); }}><span>New Chat</span><kbd>{preferences.keybindings.newChat}</kbd></button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void chooseWorkspace(); }}><span>Open Folder…</span><kbd>{preferences.keybindings.openFolder}</kbd></button>
+              <button type="button" role="menuitem" disabled={!workspaceCwd} onClick={() => { setOpenMenu(undefined); void openWorkspaceInEditor(); }}><span>Open in Editor</span></button>
               <span className="menu-separator" role="separator" />
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void runWindowAction("close"); }}><span>Close Window</span><kbd>Ctrl W</kbd></button>
               <button type="button" role="menuitem" disabled={!providerState?.installed} onClick={() => { setOpenMenu(undefined); void logout(providerId); }}>Log Out of {providerName(providerId)}</button>
@@ -1934,9 +2029,9 @@ export function App() {
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setPreferences((current) => ({ ...current, zoom: clampZoom(current.zoom - .1) })); }}><span>Zoom Out</span><kbd>Ctrl −</kbd></button>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setPreferences((current) => ({ ...current, zoom: 1 })); }}><span>Actual Size</span><kbd>Ctrl 0</kbd></button>
               <span className="menu-separator" role="separator" />
-              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setPreferences((current) => ({ ...current, sidebarCollapsed: !current.sidebarCollapsed })); }}><span>{preferences.sidebarCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}</span><kbd>Ctrl B</kbd></button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setPreferences((current) => ({ ...current, sidebarCollapsed: !current.sidebarCollapsed })); }}><span>{preferences.sidebarCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}</span><kbd>{preferences.keybindings.toggleSidebar}</kbd></button>
               <button type="button" role="menuitem" disabled={!workspaceTools} onClick={() => { setOpenMenu(undefined); toggleRail("git"); }}>Git Changes</button>
-              <button type="button" role="menuitem" disabled={!workspaceTools} onClick={() => { setOpenMenu(undefined); toggleRail("terminal"); }}><span>Terminal</span><kbd>Ctrl J</kbd></button>
+              <button type="button" role="menuitem" disabled={!workspaceTools} onClick={() => { setOpenMenu(undefined); toggleRail("terminal"); }}><span>Terminal</span><kbd>{preferences.keybindings.terminal}</kbd></button>
               <button type="button" role="menuitem" disabled={!workspaceTools} onClick={() => { setOpenMenu(undefined); showPreview(); }}>App Preview</button>
             </div>}
           </div>
@@ -1967,7 +2062,7 @@ export function App() {
             <button className={!capabilityCenterOpen && navView === "projects" ? "active" : ""} type="button" aria-current={!capabilityCenterOpen && navView === "projects" ? "page" : undefined} title="Projects" onClick={() => changeNavView("projects")}><FolderSimple /><span>Projects</span></button>
             <button className={!capabilityCenterOpen && navView === "chats" ? "active" : ""} type="button" aria-current={!capabilityCenterOpen && navView === "chats" ? "page" : undefined} title="Chats" onClick={() => changeNavView("chats")}><ChatCircleDots /><span>Chats</span></button>
           </nav>
-          <button className="toolbar-icon" type="button" aria-label="Search projects and chats" title="Search (Ctrl+K)" onClick={() => setSearchOpen(true)}><MagnifyingGlass /></button>
+          <button className="toolbar-icon" type="button" aria-label="Open command palette" title={`Command palette (${preferences.keybindings.palette})`} onClick={() => setSearchOpen(true)}><MagnifyingGlass /></button>
         </div>
 
         {providerId === "kimi" && <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title="Kimi skills, MCP, plugins, and agents" onClick={() => { setRailView(undefined); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Kimi capabilities</strong><small>{capabilities ? `${capabilities.skills.length} skills · ${capabilities.mcpServers.length} MCP` : "Skills, MCP, agents"}</small></span><CaretRight /></button>}
@@ -2163,14 +2258,16 @@ export function App() {
       </aside>}
 
       {searchOpen && <div className="command-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setSearchOpen(false); setThreadFilter(""); } }}>
-        <section className="command-palette" role="dialog" aria-modal="true" aria-label="Search projects and chats" onKeyDown={trapDialogFocus}>
-          <label className="command-input"><MagnifyingGlass /><input autoFocus value={threadFilter} onChange={(event) => setThreadFilter(event.target.value)} placeholder="Search projects and chats…" /><kbd>Esc</kbd></label>
+        <section className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette" onKeyDown={trapDialogFocus}>
+          <label className="command-input"><MagnifyingGlass /><input autoFocus value={threadFilter} onChange={(event) => setThreadFilter(event.target.value)} placeholder="Search actions, projects, chats, and scripts…" /><kbd>Esc</kbd></label>
           <div className="command-results">
+            {paletteActions.length > 0 && <section><h2>Actions</h2>{paletteActions.map((action) => <button type="button" key={action.id} disabled={action.disabled} onClick={action.run}>{action.icon}<span><strong>{action.label}</strong><small>{action.detail}</small></span>{action.shortcut && <kbd>{action.shortcut}</kbd>}</button>)}</section>}
+            {visibleProjectScripts.length > 0 && <section><h2>Project scripts</h2>{visibleProjectScripts.slice(0, 8).map((script) => <button type="button" key={script.name} onClick={() => runProjectScript(script)}><TerminalWindow /><span><strong>npm run {script.name}</strong><small>{script.command}</small></span></button>)}</section>}
             {visibleProjects.length > 0 && <section><h2>Projects</h2>{visibleProjects.slice(0, 6).map((project) => <button type="button" key={project.cwd} onClick={() => { setCapabilityCenterOpen(false); setCwd(project.cwd); rememberWorkspace(project.cwd); setNavView("projects"); setDraftChat(undefined); const first = project.threads[0]; if (first) selectThread(first); else setActiveThreadId(undefined); setSearchOpen(false); setThreadFilter(""); }}><FolderSimple /><span><strong>{project.name}</strong><small>{project.cwd}</small></span></button>)}</section>}
             {(visibleThreads.length > 0 || visibleRuntimeSessions.length > 0) && <section><h2>Chats</h2>{visibleThreads.slice(0, 8).map((thread) => <button type="button" key={thread.threadId} onClick={() => { selectThread(thread); setSearchOpen(false); setThreadFilter(""); }}><ChatCircleDots /><span><strong>{thread.title}</strong><small>{providerName(thread.provider)}</small></span></button>)}{visibleRuntimeSessions.slice(0, Math.max(0, 8 - visibleThreads.length)).map((session) => <button type="button" key={session.sessionId} onClick={() => { setSearchOpen(false); setThreadFilter(""); void resumeSession(session); }}><ChatCircleDots /><span><strong>{session.title ?? "Agent chat"}</strong><small>{providerName(preferences.provider)}</small></span></button>)}</section>}
-            {!visibleProjects.length && !visibleThreads.length && !visibleRuntimeSessions.length && <div className="command-empty"><MagnifyingGlass /><strong>No matches</strong><span>Try a project, folder, or chat title.</span></div>}
+            {!paletteActions.length && !visibleProjectScripts.length && !visibleProjects.length && !visibleThreads.length && !visibleRuntimeSessions.length && <div className="command-empty"><MagnifyingGlass /><strong>No matches</strong><span>Try an action, project, chat, or script name.</span></div>}
           </div>
-          <footer><span>Search all local projects and chats</span><span><kbd>Ctrl K</kbd></span></footer>
+          <footer><span>Everything stays local</span><span><kbd>{preferences.keybindings.palette}</kbd></span></footer>
         </section>
       </div>}
 
@@ -2670,6 +2767,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, selecte
   const normalizedQuery = query.trim().toLowerCase();
   const visibleCategories = categories.filter((item) => !normalizedQuery || `${item.label} ${item.keywords}`.toLowerCase().includes(normalizedQuery));
   const current = categories.find((item) => item.id === category) ?? categories[0]!;
+  const shortcutConflicts = keybindingConflicts(preferences.keybindings);
   const updateTitle = updateStatus.phase === "available" ? `Version ${updateStatus.version} is available` : updateStatus.phase === "downloading" ? `Downloading ${updateStatus.version}` : updateStatus.phase === "installing" ? `Installing ${updateStatus.version}` : updateStatus.phase === "checking" ? "Checking for updates" : updateStatus.phase === "current" ? "Tasty is up to date" : updateStatus.phase === "error" ? "Update check failed" : "Automatic updates";
   const updateMessage = updateStatus.phase === "downloading" ? `${updateStatus.percent ?? 0}% complete` : updateStatus.phase === "installing" ? "The app will restart when installation finishes." : updateStatus.phase === "error" ? updateStatus.message : updateStatus.currentVersion ? `Installed version ${updateStatus.currentVersion}` : updateStatus.version ? `Installed version ${updateStatus.version}` : "Updates are checked automatically when the app starts.";
 
@@ -2690,6 +2788,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, selecte
             {category === "general" && <>
               <section className="settings-group"><h2>Workspace</h2><SettingsRow title="Current project" description={cwd || "No project folder selected."}><button className="secondary" type="button" onClick={() => void onChooseWorkspace()}><FolderOpen /> Open folder</button></SettingsRow></section>
               <section className="settings-group"><h2>Behavior</h2><SettingsRow title="Interface density" description="Choose how much information fits on screen."><ChoiceButtons value={preferences.density} options={[{ value: "comfortable", label: "Comfortable" }, { value: "compact", label: "Compact" }]} onChange={(density) => onPreferences({ density: density as Preferences["density"] })} /></SettingsRow><SettingsRow title="Send message" description="Shift+Enter always inserts a new line."><ChoiceButtons value={preferences.sendKey} options={[{ value: "enter", label: "Enter" }, { value: "ctrl-enter", label: "Ctrl+Enter" }]} onChange={(sendKey) => onPreferences({ sendKey: sendKey as Preferences["sendKey"] })} /></SettingsRow><SettingsRow title="Getting started" description="Run the optional setup flow again without changing projects or sessions."><button className="secondary" type="button" onClick={onShowOnboarding}><ArrowsClockwise /> Show onboarding</button></SettingsRow></section>
+              <section className="settings-group"><h2>Tools & shortcuts</h2><SettingsRow title="External editor" description="The command palette can hand the active workspace to your editor."><select className="settings-select" value={preferences.editor} onChange={(event) => onPreferences({ editor: event.target.value as Preferences["editor"] })}><option value="system">System file manager</option><option value="vscode">Visual Studio Code</option><option value="cursor">Cursor</option></select></SettingsRow>{keybindingActions.map((action) => <SettingsRow key={action.id} title={action.label} description={shortcutConflicts.has(action.id) ? "Conflicts with another shortcut and is disabled until changed." : "Click, then press a modifier and key."}><KeybindingInput value={preferences.keybindings[action.id]} conflict={shortcutConflicts.has(action.id)} onChange={(shortcut) => onPreferences({ keybindings: { ...preferences.keybindings, [action.id]: shortcut } })} /></SettingsRow>)}</section>
             </>}
 
             {category === "appearance" && <>
@@ -2724,6 +2823,16 @@ function SettingsRow({ title, description, children }: { title: string; descript
 
 function ChoiceButtons({ value, options, onChange }: { value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void }) {
   return <div className="settings-choices">{options.map((option) => <button className={value === option.value ? "active" : ""} type="button" aria-pressed={value === option.value} key={option.value} onClick={() => onChange(option.value)}>{option.label}</button>)}</div>;
+}
+
+function KeybindingInput({ value, conflict, onChange }: { value: string; conflict: boolean; onChange: (value: string) => void }) {
+  return <button className={`keybinding-input ${conflict ? "conflict" : ""}`} type="button" aria-invalid={conflict} title="Press a modifier and key" onKeyDown={(event) => {
+    const shortcut = shortcutFromEvent(event);
+    if (!shortcut) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onChange(shortcut);
+  }}><kbd>{value}</kbd></button>;
 }
 
 function settingsDescription(category: SettingsCategory): string {
@@ -2992,6 +3101,8 @@ function loadPreferences(): Preferences {
     const composerConfig = value.composerConfig && typeof value.composerConfig === "object" && !Array.isArray(value.composerConfig)
       ? Object.fromEntries(Object.entries(value.composerConfig).filter((entry): entry is [string, string] => typeof entry[1] === "string" && Boolean(entry[1])))
       : {};
+    const savedKeybindings: Partial<Record<KeybindingAction, string>> = value.keybindings && typeof value.keybindings === "object" && !Array.isArray(value.keybindings) ? value.keybindings : {};
+    const keybindings = Object.fromEntries(keybindingActions.map(({ id }) => [id, typeof savedKeybindings[id] === "string" && savedKeybindings[id] ? savedKeybindings[id] : defaultPreferences.keybindings[id]])) as Record<KeybindingAction, string>;
     const savedPaletteVersion = Number(value.paletteVersion);
     const fontSize = savedPaletteVersion === 4 && typeof value.fontSize === "number" ? Math.min(18, Math.max(13, Math.round(value.fontSize))) : defaultPreferences.fontSize;
     return {
@@ -3017,6 +3128,8 @@ function loadPreferences(): Preferences {
       composerConfig,
       yoloAcknowledged: value.yoloAcknowledged === true,
       provider: normalizeProvider(value.provider),
+      editor: value.editor === "vscode" || value.editor === "cursor" ? value.editor : "system",
+      keybindings,
     };
   } catch {
     return { ...defaultPreferences };

@@ -66,6 +66,12 @@ Use **Edit task** on a previous prompt to copy it back into the composer. If wor
 
 Absolute Windows paths in prompts and summaries can be revealed in Explorer. Tool locations first open as text inside the work panel and fall back to Explorer for folders or non-text files.
 
+## Command palette and shortcuts
+
+Open the global command palette with `Ctrl+K`. It searches app actions, projects, chats, and safe root-level `package.json` scripts. Selecting a script starts it in the active workspace terminal. The File menu and palette can also hand the active workspace to Visual Studio Code or Cursor, or reveal it in the system file manager.
+
+General settings can record a different modifier shortcut for the palette, new chat, open folder, sidebar, terminal, and settings actions. A shortcut conflict is shown immediately and both conflicting actions remain disabled until one binding changes. Actions that need a provider or project are unavailable outside that context.
+
 ## Commands, skills, plugins, and subagents
 
 The capability center currently combines the live Kimi command catalog with local Kimi configuration. Other providers keep their native models, reasoning, permissions, and tool activity, but do not show a fabricated Kimi-style capability inventory.

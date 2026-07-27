@@ -1,7 +1,26 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, latestTimelineItemId, localServerUrl, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, presentDiagnostic, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, serverWebSocketUrl, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, parseProjectScripts, presentDiagnostic, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+
+describe("global commands", () => {
+  it("captures configurable shortcuts and disables conflicts", () => {
+    const event = { key: "k", ctrlKey: true, metaKey: false, altKey: false, shiftKey: true };
+    expect(shortcutFromEvent(event)).toBe("Ctrl+Shift+K");
+    expect(matchesShortcut(event, "ctrl+shift+k")).toBe(true);
+    expect(shortcutFromEvent({ ...event, key: "Control" })).toBeUndefined();
+    const bindings = { palette: "Ctrl+K", newChat: "Ctrl+N", openFolder: "Ctrl+O", toggleSidebar: "Ctrl+B", terminal: "Ctrl+K", settings: "Ctrl+," } as const;
+    expect([...keybindingConflicts(bindings as never)].sort()).toEqual(["palette", "terminal"]);
+  });
+
+  it("discovers safe package scripts and creates editor handoff URLs", () => {
+    expect(parseProjectScripts('{"scripts":{"dev":"vite","test:unit":"vitest","bad name":"nope"}}')).toEqual([
+      { name: "dev", command: "vite" }, { name: "test:unit", command: "vitest" },
+    ]);
+    expect(parseProjectScripts("not json")).toEqual([]);
+    expect(editorUrl("vscode", "E:\\hello world")).toBe("vscode://file/E:/hello%20world");
+  });
+});
 
 describe("agent skill install requests", () => {
   it("opens confirmation only for a source inside the requested workspace", () => {

@@ -45,6 +45,7 @@ See [Provider runtimes](docs/PROVIDERS.md) for supported behavior and current li
 - Shows runtime-provided models, reasoning effort, permissions, context, and Kimi quota without inventing unavailable controls
 - Projects subagent activity into an Agents panel and opens supported Codex subagent transcripts
 - Includes Git changes, terminal, file inspection, and an agent-controlled localhost preview panel
+- Includes a global command palette for actions, chats, projects, safe package scripts, and editor handoff
 - Discovers Kimi skills, plugins, MCP servers, and agent shortcuts from the local installation
 - Persists a compact local event projection for crash recovery and long sessions
 - Supports configurable theme, typography, density, panel placement, and panel sizing
@@ -64,6 +65,7 @@ Existing pre-rebrand 0.9 installations upgrade in place. Tasty keeps the require
 
 | Action | Shortcut |
 | --- | --- |
+| Command palette | `Ctrl+K` |
 | New chat | `Ctrl+N` |
 | Toggle sidebar | `Ctrl+B` |
 | Open terminal | `Ctrl+J` |
@@ -72,7 +74,7 @@ Existing pre-rebrand 0.9 installations upgrade in place. Tasty keeps the require
 | Steer active work | `Ctrl+Enter` |
 | Insert line break | `Shift+Enter` |
 
-The idle send shortcut can be changed in General settings.
+Global shortcuts, the idle send shortcut, and the external editor can be changed in General settings. Conflicting global shortcuts are disabled until resolved.
 
 ## Privacy and security
 
