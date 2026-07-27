@@ -1,7 +1,7 @@
 import { build } from "esbuild";
 
 await build({
-  entryPoints: { server: "src/server.ts", "preview-mcp": "src/preview-mcp.ts" },
+  entryPoints: { server: "src/server.ts", "preview-mcp": "src/preview-mcp.ts", "headless-cli": "src/headless-cli.ts" },
   bundle: true,
   platform: "node",
   format: "esm",
