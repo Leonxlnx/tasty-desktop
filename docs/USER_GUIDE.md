@@ -110,7 +110,9 @@ Turn checkpoints use a private alternate Git index. They do not change the user'
 
 ### Terminal
 
-Terminal commands run locally with the current Windows user's permissions in the selected project folder. The current implementation supports normal PowerShell commands and streamed output, but not full-screen interactive terminal programs.
+Terminal commands run locally with the current Windows user's permissions in the selected project folder. Each project can keep multiple named terminal tabs, and two tabs can be viewed in a responsive split. Tab descriptors survive an app restart, but Tasty starts fresh shells after reconnecting; it never leaves an invisible process detached from the authenticated desktop session.
+
+Output is bounded in memory. Use **Attach output to prompt** to deliberately append only the most recent output tail inside an explicit `<terminal_context>` block. Terminal output is never added to a prompt automatically. The current implementation supports normal PowerShell commands and streamed output, but not full-screen interactive terminal programs.
 
 ### App preview
 

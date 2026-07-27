@@ -100,6 +100,7 @@ type ProjectScript = { name: string; command: string };
 type TerminalSessionInfo = { sessionId: string; cwd: string; shell: string };
 type TerminalEvent = { sessionId: string; type: "stdout" | "stderr" | "exit"; text?: string; code?: number | null };
 type TerminalEntry = { id: number; kind: "command" | "stdout" | "stderr" | "system"; text: string };
+type TerminalTab = { tabId: string; cwd: string; name: string; session?: TerminalSessionInfo | undefined; entries: TerminalEntry[]; command: string; starting: boolean };
 type ItemMenu = { kind: "project"; id: string } | { kind: "thread"; id: string } | { kind: "session"; id: string };
 type ManageDialog =
   | { kind: "rename-project"; cwd: string; name: string }
@@ -110,6 +111,7 @@ type ManageDialog =
   | { kind: "delete-thread"; threadId: string; sessionId: string; name: string }
   | { kind: "install-skill"; cwd: string; source: string; name: string };
 const preferenceKey = "kimi-code-desktop.preferences.v1";
+const terminalLayoutKey = "tasty.terminal-layout.v1";
 const defaultPreferences: Preferences = {
   density: "comfortable", sendKey: "enter", workspace: "", onboardingDone: false, sidebarCollapsed: false, projects: [], zoom: 1,
   theme: "system", font: "system", fontSize: 15, accent: "neutral", paletteVersion: 4, sidebarSide: "left", railSide: "right", sidebarWidth: 272, railWidth: 420,
@@ -144,6 +146,30 @@ const fallbackCommands: AvailableCommand[] = [
 
 function terminalEntry(kind: TerminalEntry["kind"], text: string): TerminalEntry {
   return { id: ++terminalEntryId, kind, text: text.slice(-100_000) };
+}
+
+function createTerminalTab(cwd: string, index: number): TerminalTab {
+  return { tabId: globalThis.crypto?.randomUUID?.() ?? `terminal-${Date.now()}-${index}`, cwd, name: `Terminal ${index}`, entries: [], command: "", starting: false };
+}
+
+function loadTerminalLayout(): TerminalTab[] {
+  if (typeof localStorage === "undefined") return [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(terminalLayoutKey) ?? "[]") as Array<Partial<TerminalTab>>;
+    return parsed.slice(-12).flatMap((tab) => typeof tab.tabId === "string" && typeof tab.cwd === "string" && typeof tab.name === "string"
+      ? [{ tabId: tab.tabId, cwd: tab.cwd, name: tab.name, entries: [], command: "", starting: false }]
+      : []);
+  } catch { return []; }
+}
+
+function saveTerminalLayout(tabs: TerminalTab[]): void {
+  if (typeof localStorage === "undefined") return;
+  try { localStorage.setItem(terminalLayoutKey, JSON.stringify(tabs.slice(-12).map(({ tabId, cwd, name }) => ({ tabId, cwd, name })))); } catch { /* keep terminal state in memory */ }
+}
+
+export function terminalContext(entries: TerminalEntry[], maxCharacters = 4_000): string {
+  const output = entries.map((entry) => entry.text).join("").trim().slice(-maxCharacters);
+  return output ? `<terminal_context>\n${output}\n</terminal_context>\n` : "";
 }
 
 function cleanTerminalOutput(text: string): string {
@@ -363,12 +389,11 @@ export function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ phase: "idle" });
   const [updateNotice, setUpdateNotice] = useState<string>();
   const [updatePreparing, setUpdatePreparing] = useState(false);
-  const [terminalSession, setTerminalSession] = useState<TerminalSessionInfo>();
-  const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([]);
-  const [terminalCommand, setTerminalCommand] = useState("");
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>(loadTerminalLayout);
+  const [activeTerminalTabId, setActiveTerminalTabId] = useState<string>();
+  const [splitTerminalTabId, setSplitTerminalTabId] = useState<string>();
   const [terminalHistory, setTerminalHistory] = useState<string[]>([]);
   const [terminalHistoryIndex, setTerminalHistoryIndex] = useState(-1);
-  const [terminalStarting, setTerminalStarting] = useState(false);
   const [pendingTerminalCommand, setPendingTerminalCommand] = useState<string>();
   const [projectScripts, setProjectScripts] = useState<ProjectScript[]>([]);
   const [previewDraft, setPreviewDraft] = useState("http://localhost:3000");
@@ -738,6 +763,11 @@ export function App() {
     : draftChat
       ? draftChat.kind === "project" ? draftChat.cwd : undefined
       : navView === "projects" ? cwd : undefined;
+  const workspaceTerminalTabs = workspaceCwd ? terminalTabs.filter((tab) => samePath(tab.cwd, workspaceCwd)) : [];
+  const activeTerminalTab = workspaceTerminalTabs.find((tab) => tab.tabId === activeTerminalTabId) ?? workspaceTerminalTabs[0];
+  const splitTerminalTab = workspaceTerminalTabs.find((tab) => tab.tabId === splitTerminalTabId && tab.tabId !== activeTerminalTab?.tabId);
+  const visibleTerminalTabs = [activeTerminalTab, splitTerminalTab].filter((tab): tab is TerminalTab => Boolean(tab));
+  const terminalLayoutRevision = terminalTabs.map(({ tabId, cwd, name }) => `${tabId}\0${cwd}\0${name}`).join("\x01");
 
   useEffect(() => {
     if (activeThread?.kind === "chat" && railView && railView !== "agents") setRailView("agents");
@@ -837,49 +867,50 @@ export function App() {
 
   useEffect(() => {
     if (connection !== "connected") {
-      setTerminalSession(undefined);
-      setTerminalStarting(false);
+      setTerminalTabs((current) => current.map((tab) => ({ ...tab, session: undefined, starting: false })));
     }
   }, [connection]);
 
+  useEffect(() => { saveTerminalLayout(terminalTabs); }, [terminalLayoutRevision]);
+
   useEffect(() => {
     terminalEnd.current?.scrollIntoView({ block: "end" });
-  }, [terminalEntries]);
+  }, [activeTerminalTab?.entries]);
 
   useEffect(() => {
     if (railView !== "terminal" || connection !== "connected" || !workspaceCwd) return;
-    if (terminalSession && samePath(terminalSession.cwd, workspaceCwd)) return;
-    let disposed = false;
-    setTerminalStarting(true);
-    void (async () => {
-      try {
-        if (terminalSession) await call("terminal.stop", { sessionId: terminalSession.sessionId });
-        const session = await call("terminal.start", { cwd: workspaceCwd }) as TerminalSessionInfo;
-        if (disposed) {
-          await call("terminal.stop", { sessionId: session.sessionId });
-          return;
-        }
-        setTerminalSession(session);
-        setTerminalEntries((current) => [...current, terminalEntry("system", `${session.shell} · ${session.cwd}\n`)].slice(-1_000));
-      } catch (error) {
-        if (!disposed) setDiagnostic(error instanceof Error ? error.message : String(error));
-      } finally {
-        if (!disposed) setTerminalStarting(false);
-      }
-    })();
-    return () => { disposed = true; };
-  }, [call, connection, railView, setDiagnostic, terminalSession, workspaceCwd]);
+    if (!workspaceTerminalTabs.length) {
+      const tab = createTerminalTab(workspaceCwd, 1);
+      setTerminalTabs((current) => [...current, tab].slice(-12));
+      setActiveTerminalTabId(tab.tabId);
+    } else if (!activeTerminalTab) {
+      setActiveTerminalTabId(workspaceTerminalTabs[0]!.tabId);
+    }
+  }, [activeTerminalTab, connection, railView, workspaceCwd, workspaceTerminalTabs.length]);
 
   useEffect(() => {
-    if (!pendingTerminalCommand || !terminalSession || !workspaceCwd || !samePath(terminalSession.cwd, workspaceCwd)) return;
+    if (railView !== "terminal" || connection !== "connected") return;
+    for (const tab of visibleTerminalTabs) {
+      if (tab.session || tab.starting) continue;
+      updateTerminalTab(tab.tabId, (current) => ({ ...current, starting: true }));
+      void call("terminal.start", { cwd: tab.cwd }).then((session) => {
+        updateTerminalTab(tab.tabId, (current) => ({ ...current, session: session as TerminalSessionInfo, starting: false, entries: [...current.entries, terminalEntry("system", `${(session as TerminalSessionInfo).shell} · ${(session as TerminalSessionInfo).cwd}\n`)].slice(-1_000) }));
+      }).catch((error: Error) => {
+        updateTerminalTab(tab.tabId, (current) => ({ ...current, starting: false, entries: [...current.entries, terminalEntry("stderr", `${error.message}\n`)].slice(-1_000) }));
+      });
+    }
+  }, [call, connection, railView, visibleTerminalTabs]);
+
+  useEffect(() => {
+    if (!pendingTerminalCommand || !activeTerminalTab?.session) return;
     const command = pendingTerminalCommand;
     setPendingTerminalCommand(undefined);
-    setTerminalEntries((current) => [...current, terminalEntry("command", `› ${command}\n`)].slice(-1_000));
+    updateTerminalTab(activeTerminalTab.tabId, (current) => ({ ...current, entries: [...current.entries, terminalEntry("command", `› ${command}\n`)].slice(-1_000) }));
     setTerminalHistory((current) => [...current.filter((item) => item !== command), command].slice(-100));
-    void call("terminal.write", { sessionId: terminalSession.sessionId, command }).catch((error: Error) => {
-      setTerminalEntries((current) => [...current, terminalEntry("stderr", `${error.message}\n`)].slice(-1_000));
+    void call("terminal.write", { sessionId: activeTerminalTab.session.sessionId, command }).catch((error: Error) => {
+      updateTerminalTab(activeTerminalTab.tabId, (current) => ({ ...current, entries: [...current.entries, terminalEntry("stderr", `${error.message}\n`)].slice(-1_000) }));
     });
-  }, [call, pendingTerminalCommand, terminalSession, workspaceCwd]);
+  }, [activeTerminalTab, call, pendingTerminalCommand]);
 
   useEffect(() => {
     let disposed = false;
@@ -961,8 +992,11 @@ export function App() {
       } else if (message.channel === "terminal.output") {
         const event = message.payload as TerminalEvent;
         const text = event.type === "exit" ? `Process exited${event.code == null ? "" : ` with code ${event.code}`}\n` : cleanTerminalOutput(event.text ?? "");
-        if (text) setTerminalEntries((current) => [...current, terminalEntry(event.type === "exit" ? "system" : event.type, text)].slice(-1_000));
-        if (event.type === "exit") setTerminalSession((current) => current?.sessionId === event.sessionId ? undefined : current);
+        setTerminalTabs((current) => current.map((tab) => tab.session?.sessionId !== event.sessionId ? tab : {
+          ...tab,
+          ...(event.type === "exit" ? { session: undefined, starting: tab.starting } : {}),
+          entries: text ? [...tab.entries, terminalEntry(event.type === "exit" ? "system" : event.type, text)].slice(-1_000) : tab.entries,
+        }));
       }
     }
   }, [refreshProviders, serverLookupAttempt]);
@@ -1094,13 +1128,8 @@ export function App() {
     setGitBusy(false);
     setPreviewUrl(undefined);
     setPreviewDraft("http://localhost:3000");
-    setTerminalEntries([]);
-    setTerminalCommand("");
-    setTerminalStarting(false);
-    if (terminalSession) {
-      void call("terminal.stop", { sessionId: terminalSession.sessionId }).catch((error: Error) => setDiagnostic(error.message));
-      setTerminalSession(undefined);
-    }
+    setActiveTerminalTabId(undefined);
+    setSplitTerminalTabId(undefined);
   }
 
   function createStandaloneChat() {
@@ -1591,28 +1620,68 @@ export function App() {
     setRailView("terminal");
   }
 
-  function runTerminalCommand(event: FormEvent) {
-    event.preventDefault();
-    const command = terminalCommand.trim();
-    if (!command || !terminalSession) return;
-    setTerminalCommand("");
-    setTerminalHistoryIndex(-1);
-    if (command === "clear" || command === "cls") {
-      setTerminalEntries([]);
+  function updateTerminalTab(tabId: string, update: (tab: TerminalTab) => TerminalTab) {
+    setTerminalTabs((current) => current.map((tab) => tab.tabId === tabId ? update(tab) : tab));
+  }
+
+  function addTerminalTab(split = false) {
+    if (!workspaceCwd) return;
+    const tab = createTerminalTab(workspaceCwd, workspaceTerminalTabs.length + 1);
+    setTerminalTabs((current) => [...current, tab].slice(-12));
+    if (split) setSplitTerminalTabId(tab.tabId);
+    else setActiveTerminalTabId(tab.tabId);
+  }
+
+  function selectTerminalTab(tabId: string) {
+    if (tabId === splitTerminalTabId && activeTerminalTabId) setSplitTerminalTabId(activeTerminalTabId);
+    setActiveTerminalTabId(tabId);
+  }
+
+  async function closeTerminalTab(tab: TerminalTab) {
+    setTerminalTabs((current) => current.filter((item) => item.tabId !== tab.tabId));
+    if (activeTerminalTabId === tab.tabId) setActiveTerminalTabId(workspaceTerminalTabs.find((item) => item.tabId !== tab.tabId)?.tabId);
+    if (splitTerminalTabId === tab.tabId) setSplitTerminalTabId(undefined);
+    if (tab.session) await call("terminal.stop", { sessionId: tab.session.sessionId }).catch((error: Error) => setDiagnostic(error.message));
+  }
+
+  function toggleTerminalSplit() {
+    if (splitTerminalTab) {
+      setSplitTerminalTabId(undefined);
       return;
     }
-    setTerminalEntries((current) => [...current, terminalEntry("command", `› ${command}\n`)].slice(-1_000));
+    const other = workspaceTerminalTabs.find((tab) => tab.tabId !== activeTerminalTab?.tabId);
+    if (other) setSplitTerminalTabId(other.tabId);
+    else addTerminalTab(true);
+  }
+
+  function runTerminalCommand(event: FormEvent, tab: TerminalTab) {
+    event.preventDefault();
+    const command = tab.command.trim();
+    if (!command || !tab.session) return;
+    updateTerminalTab(tab.tabId, (current) => ({ ...current, command: "" }));
+    setTerminalHistoryIndex(-1);
+    if (command === "clear" || command === "cls") {
+      updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: [] }));
+      return;
+    }
+    updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: [...current.entries, terminalEntry("command", `› ${command}\n`)].slice(-1_000) }));
     setTerminalHistory((current) => [...current.filter((item) => item !== command), command].slice(-100));
-    void call("terminal.write", { sessionId: terminalSession.sessionId, command }).catch((error: Error) => {
-      setTerminalEntries((current) => [...current, terminalEntry("stderr", `${error.message}\n`)].slice(-1_000));
+    void call("terminal.write", { sessionId: tab.session.sessionId, command }).catch((error: Error) => {
+      updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: [...current.entries, terminalEntry("stderr", `${error.message}\n`)].slice(-1_000) }));
     });
   }
 
-  async function restartTerminal() {
-    const current = terminalSession;
-    setTerminalSession(undefined);
-    setTerminalEntries([]);
-    if (current) await call("terminal.stop", { sessionId: current.sessionId }).catch(() => undefined);
+  async function restartTerminal(tab: TerminalTab) {
+    updateTerminalTab(tab.tabId, (current) => ({ ...current, starting: true, entries: [] }));
+    if (tab.session) await call("terminal.stop", { sessionId: tab.session.sessionId }).catch(() => undefined);
+    updateTerminalTab(tab.tabId, (current) => ({ ...current, session: undefined, starting: false }));
+  }
+
+  function attachTerminalContext(tab: TerminalTab) {
+    const context = terminalContext(tab.entries);
+    if (!context) return;
+    setPrompt((current) => `${current}${current && !/\s$/.test(current) ? "\n\n" : ""}${context}`);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
   }
 
   function showPreview(candidate = previewDraft) {
@@ -2212,29 +2281,34 @@ export function App() {
           </>}
 
           {railView === "terminal" && <>
-            <div className="rail-contextbar"><span title={terminalSession?.cwd ?? workspaceCwd}><TerminalWindow /> {terminalSession?.cwd ?? workspaceCwd ?? "Open a workspace first"}</span><div><button className="rail-icon" type="button" aria-label="Clear terminal" title="Clear terminal" onClick={() => setTerminalEntries([])}><Broom /></button><button className="rail-icon" type="button" aria-label="Restart terminal" title="Restart terminal" onClick={() => void restartTerminal()}><ArrowsClockwise /></button></div></div>
-            <div className="terminal-screen" role="log" aria-live="polite" aria-label="Terminal output">
-              {!terminalEntries.length && <div className="terminal-empty">{terminalStarting ? "Starting PowerShell…" : "Run a command in this workspace."}</div>}
-              {terminalEntries.map((entry) => <pre className={entry.kind} key={entry.id}>{entry.text}</pre>)}
-              <div ref={terminalEnd} />
+            <div className="terminal-tabs" role="tablist" aria-label="Workspace terminals"><div>{workspaceTerminalTabs.map((tab) => <button className={tab.tabId === activeTerminalTab?.tabId ? "active" : ""} type="button" role="tab" aria-selected={tab.tabId === activeTerminalTab?.tabId} key={tab.tabId} onClick={() => selectTerminalTab(tab.tabId)}><TerminalWindow /><span>{tab.name}</span><i className={tab.session ? "live" : ""} /></button>)}</div><span><button className="rail-icon" type="button" aria-label="New terminal" title="New terminal" onClick={() => addTerminalTab()}><Plus /></button><button className={`rail-icon ${splitTerminalTab ? "active" : ""}`} type="button" aria-label="Toggle terminal split" title="Split terminal" onClick={toggleTerminalSplit}><SidebarSimple /></button></span></div>
+            <div className={`terminal-grid ${splitTerminalTab ? "split" : ""}`}>
+              {visibleTerminalTabs.map((tab) => <section className={`terminal-pane ${tab.tabId === activeTerminalTab?.tabId ? "active" : ""}`} key={tab.tabId} onPointerDown={() => selectTerminalTab(tab.tabId)}>
+                <div className="rail-contextbar"><span title={tab.session?.cwd ?? tab.cwd}><TerminalWindow /> {tab.session?.shell ?? "Terminal"}</span><div><button className="rail-icon" type="button" aria-label="Attach recent terminal output to prompt" title="Attach output to prompt" disabled={!tab.entries.length} onClick={() => attachTerminalContext(tab)}><Paperclip /></button><button className="rail-icon" type="button" aria-label="Clear terminal" title="Clear terminal" onClick={() => updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: [] }))}><Broom /></button><button className="rail-icon" type="button" aria-label="Restart terminal" title="Restart terminal" onClick={() => void restartTerminal(tab)}><ArrowsClockwise /></button><button className="rail-icon" type="button" aria-label={`Close ${tab.name}`} title="Close terminal" onClick={() => void closeTerminalTab(tab)}><X /></button></div></div>
+                <div className="terminal-screen" role="log" aria-live="polite" aria-label={`${tab.name} output`}>
+                  {!tab.entries.length && <div className="terminal-empty">{tab.starting ? "Starting PowerShell…" : "Run a command in this workspace."}</div>}
+                  {tab.entries.map((entry) => <pre className={entry.kind} key={entry.id}>{entry.text}</pre>)}
+                  {tab.tabId === activeTerminalTab?.tabId && <div ref={terminalEnd} />}
+                </div>
+                <form className="terminal-input" onSubmit={(event) => runTerminalCommand(event, tab)}>
+                  <span aria-hidden="true">›</span>
+                  <input value={tab.command} onChange={(event) => { updateTerminalTab(tab.tabId, (current) => ({ ...current, command: event.target.value })); setTerminalHistoryIndex(-1); }} onKeyDown={(event) => {
+                    if (event.key === "ArrowUp" && terminalHistory.length) {
+                      event.preventDefault();
+                      const next = Math.min(terminalHistory.length - 1, terminalHistoryIndex + 1);
+                      setTerminalHistoryIndex(next);
+                      updateTerminalTab(tab.tabId, (current) => ({ ...current, command: terminalHistory[terminalHistory.length - 1 - next] ?? "" }));
+                    } else if (event.key === "ArrowDown" && terminalHistoryIndex >= 0) {
+                      event.preventDefault();
+                      const next = terminalHistoryIndex - 1;
+                      setTerminalHistoryIndex(next);
+                      updateTerminalTab(tab.tabId, (current) => ({ ...current, command: next < 0 ? "" : terminalHistory[terminalHistory.length - 1 - next] ?? "" }));
+                    }
+                  }} aria-label={`${tab.name} command`} autoComplete="off" spellCheck={false} placeholder={tab.session ? "Type a command" : "Terminal is starting…"} disabled={!tab.session} />
+                  <button type="submit" aria-label="Run command" disabled={!tab.session || !tab.command.trim()}><PaperPlaneRight weight="fill" /></button>
+                </form>
+              </section>)}
             </div>
-            <form className="terminal-input" onSubmit={runTerminalCommand}>
-              <span aria-hidden="true">›</span>
-              <input value={terminalCommand} onChange={(event) => { setTerminalCommand(event.target.value); setTerminalHistoryIndex(-1); }} onKeyDown={(event) => {
-                if (event.key === "ArrowUp" && terminalHistory.length) {
-                  event.preventDefault();
-                  const next = Math.min(terminalHistory.length - 1, terminalHistoryIndex + 1);
-                  setTerminalHistoryIndex(next);
-                  setTerminalCommand(terminalHistory[terminalHistory.length - 1 - next] ?? "");
-                } else if (event.key === "ArrowDown" && terminalHistoryIndex >= 0) {
-                  event.preventDefault();
-                  const next = terminalHistoryIndex - 1;
-                  setTerminalHistoryIndex(next);
-                  setTerminalCommand(next < 0 ? "" : terminalHistory[terminalHistory.length - 1 - next] ?? "");
-                }
-              }} aria-label="Terminal command" autoComplete="off" spellCheck={false} placeholder={terminalSession ? "Type a command" : "Terminal is starting…"} disabled={!terminalSession} />
-              <button type="submit" aria-label="Run command" disabled={!terminalSession || !terminalCommand.trim()}><PaperPlaneRight weight="fill" /></button>
-            </form>
           </>}
 
           {railView === "preview" && <>
