@@ -782,6 +782,8 @@ button:disabled { opacity: .45; cursor: default; }
 .settings-provider-list article > button svg { width: 14px; height: 14px; }
 .settings-group > button, .settings-group > .settings-note { margin: var(--space-4); }
 .settings-note { color: var(--color-text-tertiary); font-size: var(--text-xs); line-height: 1.55; }
+.environment-status { display: inline-flex; min-height: 26px; align-items: center; border: 1px solid var(--color-border); border-radius: var(--radius-pill); padding: 0 9px; color: var(--color-text-tertiary); font-size: var(--text-xs); }
+.environment-status.healthy { border-color: color-mix(in srgb, var(--color-success) 35%, var(--color-border)); color: var(--color-success); }
 .settings-usage .quota-panel { border-radius: var(--radius-lg); }
 .settings-usage > .settings-note { margin: var(--space-3) 2px 0; }
 .about-settings { padding: var(--space-6); text-align: center; }

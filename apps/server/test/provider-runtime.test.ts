@@ -23,5 +23,7 @@ describe("provider runtime discovery", () => {
     expect(await readProviderInstances(path)).toEqual([{ id: "work", name: "Work Codex", provider: "codex", environment: { CODEX_HOME: root } }]);
     await writeFile(path, JSON.stringify([{ id: "unsafe", name: "Unsafe", provider: "codex", environment: { OPENAI_API_KEY: "secret" } }]));
     await expect(readProviderInstances(path)).rejects.toThrow("allowed absolute provider-owned paths");
+    await writeFile(path, JSON.stringify([{ id: "ubuntu", name: "Ubuntu OpenCode", provider: "opencode", wsl: { distribution: "Ubuntu-24.04", binary: "/usr/local/bin/opencode" } }]));
+    expect(await readProviderInstances(path)).toEqual([{ id: "ubuntu", name: "Ubuntu OpenCode", provider: "opencode", environment: {}, wsl: { distribution: "Ubuntu-24.04", binary: "/usr/local/bin/opencode" } }]);
   });
 });

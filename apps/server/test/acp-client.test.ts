@@ -163,6 +163,43 @@ describe("AcpClient", () => {
     }
   });
 
+  it("keeps Windows workspace authorization while an ACP agent uses translated paths", async () => {
+    const fakePath = join(dirname(fileURLToPath(import.meta.url)), "../src/fake-acp.ts");
+    const workspace = await mkdtemp(join(tmpdir(), "tasty-acp-translated-"));
+    const source = join(workspace, "source.txt");
+    const projectedLocation = join(workspace, "projected-package.json");
+    await writeFile(source, "translated", "utf8");
+    const agentRoot = "/work";
+    const events: RuntimeEvent[] = [];
+    let client!: AcpClient;
+    client = new AcpClient({
+      binary: process.execPath,
+      args: ["--import", "tsx", fakePath],
+      cwdToAgent: async () => agentRoot,
+      pathFromAgent: async (path) => path === agentRoot ? workspace : path.startsWith(`${agentRoot}/`) ? join(workspace, path.slice(agentRoot.length + 1)) : path === join(process.cwd(), "package.json") ? projectedLocation : path,
+      onEvent: (event) => {
+        events.push(event);
+        if (event.type === "permission_request") client.respondToPermission(event.requestId, "allow-once");
+      },
+    });
+    try {
+      await client.start();
+      const session = await client.newSession(workspace);
+      await expect(client.listSessions(workspace)).resolves.toMatchObject({ sessions: [expect.objectContaining({ cwd: workspace })] });
+      await expect(client.prompt(session.sessionId, [{ type: "text", text: `__READ_TEXT_FILE__:${agentRoot}/source.txt` }])).resolves.toEqual({ stopReason: "end_turn" });
+      expect(events.some((event) => event.type === "session_update"
+        && event.params.update.sessionUpdate === "agent_message_chunk"
+        && "content" in event.params.update
+        && event.params.update.content.type === "text"
+        && event.params.update.content.text === "translated")).toBe(true);
+      await expect(client.prompt(session.sessionId, [{ type: "text", text: "Project a tool location" }])).resolves.toEqual({ stopReason: "end_turn" });
+      const location = events.find((event) => event.type === "session_update" && event.params.update.sessionUpdate === "tool_call");
+      expect(location?.type === "session_update" && location.params.update.sessionUpdate === "tool_call" ? location.params.update.locations?.[0]?.path : undefined).toBe(projectedLocation);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("reads only its own background-task output log outside the workspace", async () => {
     const fakePath = join(dirname(fileURLToPath(import.meta.url)), "../src/fake-acp.ts");
     const home = await mkdtemp(join(tmpdir(), "kimi-acp-home-"));

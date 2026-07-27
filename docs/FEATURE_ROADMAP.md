@@ -92,6 +92,8 @@ Status: complete. OpenCode uses its official ACP command. Named instances select
 - Run the orchestration boundary inside a selected WSL distribution with explicit path translation and health checks.
 - Project provider- or LSP-owned diagnostics without creating another editor language engine.
 
+Status: complete. Named ACP instances can execute Kimi, Cursor, or OpenCode inside a healthy WSL user distribution while Windows retains the canonical workspace authorization boundary. Session roots and ACP file requests are translated explicitly in both directions. Provider tool activity, file locations, and diagnostics continue through the existing bounded activity projection; Tasty does not ship a competing LSP engine.
+
 ### 9. Secure remote environments
 
 - Model an execution environment separately from its access endpoint.

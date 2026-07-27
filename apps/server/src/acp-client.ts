@@ -19,6 +19,8 @@ export type AcpClientOptions = {
   binary: string;
   args?: string[];
   env?: NodeJS.ProcessEnv;
+  cwdToAgent?: (path: string) => Promise<string>;
+  pathFromAgent?: (path: string) => Promise<string>;
   kimiCodeHome?: string;
   mcpServers?: (canonicalCwd: string) => Promise<acp.McpServer[]>;
   onEvent: (event: RuntimeEvent) => unknown | Promise<unknown>;
@@ -91,7 +93,7 @@ export class AcpClient {
     );
     const client: acp.Client = {
       sessionUpdate: async (params) => {
-        await this.#options.onEvent({ type: "session_update", params });
+        await this.#options.onEvent({ type: "session_update", params: await this.#translateLocations(params) });
       },
       requestPermission: (params) => this.#approvalBroker.request(params),
       readTextFile: (params) => this.#readTextFile(params),
@@ -117,10 +119,11 @@ export class AcpClient {
   async newSession(cwd: string): Promise<acp.NewSessionResponse> {
     if (!isAbsolute(cwd)) throw new Error("Workspace path must be absolute");
     const root = await realpath(resolve(cwd));
+    const agentRoot = await this.#agentPath(root);
     const mcpServers = await this.#mcpServers(root);
     const result = await this.#controlRequest(
       "session/new",
-      () => this.#agent().newSession({ cwd: root, mcpServers }),
+      () => this.#agent().newSession({ cwd: agentRoot, mcpServers }),
     );
     this.#sessionRoots.set(result.sessionId, root);
     return result;
@@ -129,20 +132,24 @@ export class AcpClient {
   async listSessions(cwd?: string): Promise<acp.ListSessionsResponse> {
     if (cwd && !isAbsolute(cwd)) throw new Error("Workspace path must be absolute");
     const root = cwd ? await realpath(resolve(cwd)) : undefined;
-    return this.#controlRequest(
+    const agentRoot = root ? await this.#agentPath(root) : undefined;
+    const result = await this.#controlRequest(
       "session/list",
-      () => this.#agent().listSessions(root ? { cwd: root } : {}),
+      () => this.#agent().listSessions(agentRoot ? { cwd: agentRoot } : {}),
     );
+    if (!this.#options.pathFromAgent) return result;
+    return { ...result, sessions: await Promise.all(result.sessions.map(async (session) => ({ ...session, ...(session.cwd ? { cwd: await this.#options.pathFromAgent!(session.cwd) } : {}) }))) };
   }
 
   async resumeSession(sessionId: string, cwd: string): Promise<acp.ResumeSessionResponse> {
     if (!isAbsolute(cwd)) throw new Error("Workspace path must be absolute");
     const root = await realpath(resolve(cwd));
+    const agentRoot = await this.#agentPath(root);
     const mcpServers = await this.#mcpServers(root);
     const result = await this.#controlSessionRequest(
       "session/resume",
       sessionId,
-      () => this.#agent().resumeSession({ sessionId, cwd: root, mcpServers }),
+      () => this.#agent().resumeSession({ sessionId, cwd: agentRoot, mcpServers }),
     );
     this.#sessionRoots.set(sessionId, root);
     return result;
@@ -151,11 +158,12 @@ export class AcpClient {
   async loadSession(sessionId: string, cwd: string): Promise<acp.LoadSessionResponse> {
     if (!isAbsolute(cwd)) throw new Error("Workspace path must be absolute");
     const root = await realpath(resolve(cwd));
+    const agentRoot = await this.#agentPath(root);
     const mcpServers = await this.#mcpServers(root);
     const result = await this.#controlSessionRequest(
       "session/load",
       sessionId,
-      () => this.#agent().loadSession({ sessionId, cwd: root, mcpServers }),
+      () => this.#agent().loadSession({ sessionId, cwd: agentRoot, mcpServers }),
     );
     this.#sessionRoots.set(sessionId, root);
     return result;
@@ -269,8 +277,12 @@ export class AcpClient {
     return this.#options.mcpServers?.(canonicalCwd) ?? Promise.resolve([]);
   }
 
+  #agentPath(path: string): Promise<string> {
+    return this.#options.cwdToAgent?.(path) ?? Promise.resolve(path);
+  }
+
   async #readTextFile(params: acp.ReadTextFileRequest): Promise<acp.ReadTextFileResponse> {
-    const readable = await this.#readablePath(params.sessionId, params.path);
+    const readable = await this.#readablePath(params.sessionId, await this.#fromAgentPath(params.path));
     if (!readable.backgroundTaskOutput && params.line == null && params.limit == null) {
       const info = await stat(readable.path);
       if (!info.isFile() || info.size > MAX_BACKGROUND_OUTPUT_BYTES) {
@@ -302,10 +314,24 @@ export class AcpClient {
   }
 
   async #writeTextFile(params: acp.WriteTextFileRequest): Promise<acp.WriteTextFileResponse> {
-    const path = await this.#writableWorkspacePath(params.sessionId, params.path);
+    const path = await this.#writableWorkspacePath(params.sessionId, await this.#fromAgentPath(params.path));
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, params.content, "utf8");
     return {};
+  }
+
+  #fromAgentPath(path: string): Promise<string> {
+    return this.#options.pathFromAgent?.(path) ?? Promise.resolve(path);
+  }
+
+  async #translateLocations(params: acp.SessionNotification): Promise<acp.SessionNotification> {
+    const update = params.update;
+    if (!this.#options.pathFromAgent || !("locations" in update) || !Array.isArray(update.locations)) return params;
+    const locations = await Promise.all(update.locations.map(async (location) => {
+      try { return { ...location, path: await this.#options.pathFromAgent!(location.path) }; }
+      catch { return location; }
+    }));
+    return { ...params, update: { ...update, locations } } as acp.SessionNotification;
   }
 
   #workspaceRequest(sessionId: string, path: string): { root: string; resolved: string } {

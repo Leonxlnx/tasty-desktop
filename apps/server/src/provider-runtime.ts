@@ -21,7 +21,7 @@ export type ProviderCapabilities = {
   subagents: { activity: boolean; inspect: boolean; stop: boolean; steer: boolean };
 };
 
-export type ProviderInstance = { id: string; name: string; provider: ProviderId; binary?: string; environment: Record<string, string> };
+export type ProviderInstance = { id: string; name: string; provider: ProviderId; binary?: string; environment: Record<string, string>; wsl?: { distribution: string; binary: string } };
 
 const instanceEnvironmentKeys = new Set(["KIMI_CODE_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CURSOR_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]);
 
@@ -107,11 +107,17 @@ export async function readProviderInstances(path: string): Promise<ProviderInsta
     seen.add(id);
     const binary = typeof item.binary === "string" ? item.binary : undefined;
     if (binary && (!isAbsolute(binary) || !existsSync(binary))) throw new Error(`Provider instance ${id} binary must be an existing absolute path`);
+    const wslValue = item.wsl && typeof item.wsl === "object" && !Array.isArray(item.wsl) ? item.wsl as Record<string, unknown> : undefined;
+    const wsl = wslValue && typeof wslValue.distribution === "string" && /^[\w.-]{1,80}$/.test(wslValue.distribution) && typeof wslValue.binary === "string" && wslValue.binary.startsWith("/")
+      ? { distribution: wslValue.distribution, binary: wslValue.binary }
+      : undefined;
+    if (item.wsl && (!wsl || provider === "codex" || provider === "claude")) throw new Error(`Provider instance ${id} has an invalid or unsupported WSL runtime`);
+    if (binary && wsl) throw new Error(`Provider instance ${id} cannot combine Windows and WSL binaries`);
     const environment = item.environment && typeof item.environment === "object" && !Array.isArray(item.environment) ? Object.fromEntries(Object.entries(item.environment).map(([key, value]) => {
       if (!instanceEnvironmentKeys.has(key) || typeof value !== "string" || !isAbsolute(value)) throw new Error(`Provider instance ${id} environment values must be allowed absolute provider-owned paths`);
       return [key, resolve(value)];
     })) : {};
-    return { id, name, provider, ...(binary ? { binary: resolve(binary) } : {}), environment };
+    return { id, name, provider, ...(binary ? { binary: resolve(binary) } : {}), environment, ...(wsl ? { wsl } : {}) };
   });
 }
 

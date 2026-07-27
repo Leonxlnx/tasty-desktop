@@ -28,6 +28,7 @@ import { readRecoverableJson, writeRecoverableJson } from "./recoverable-json.js
 import { providerDescriptors, providerName, readProviderInstances, requireProviderBinary, resolveProviderBinary, type ProviderInstance } from "./provider-runtime.js";
 import { ProviderAuthService, type ProviderAuthEvent } from "./provider-auth.js";
 import { DiagnosticJournal, redactDiagnosticText, type DiagnosticLevel } from "./diagnostics.js";
+import { WslEnvironments } from "./wsl-environments.js";
 import {
   BackgroundTaskMonitor,
   MAX_ACTIVE_BACKGROUND_TASKS,
@@ -111,6 +112,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("usage.quota"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("diagnostics.snapshot"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("diagnostics.export"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("environments.list"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("capabilities.list"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), cwd: z.string().min(1).optional() }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("skills.install"), params: z.object({ cwd: z.string().min(1), source: z.string().min(1) }) }),
 ]);
@@ -155,6 +157,7 @@ const checkpointReactor = new CheckpointReactor(findGitBinary(), dataHome);
 const configDefaults = new ConfigDefaults(join(dataHome, "runtime-defaults.json"));
 const git = new GitService(findGitBinary());
 const terminal = new TerminalService();
+const wsl = new WslEnvironments();
 const socketTerminals = new WeakMap<WebSocket, Set<string>>();
 type QueuedTurn = {
   queuedId: string;
@@ -251,6 +254,16 @@ function providerRuntimeReady(provider: ProviderId): boolean {
   return [...runtimes].some(([key, runtime]) => (key === provider || key.startsWith(`${provider}:`)) && runtime.isOpen());
 }
 
+async function publicProviderInstances(): Promise<Array<{ id: string; name: string; provider: ProviderId; installed: boolean; runtimeReady: boolean; environment?: string }>> {
+  const distributions = providerInstances.some((instance) => instance.wsl) ? await wsl.list() : [];
+  return providerInstances.map(({ id, name, provider, binary, wsl: configuredWsl }) => ({
+    id, name, provider,
+    installed: configuredWsl ? Boolean(distributions.find((distribution) => distribution.name === configuredWsl.distribution)?.healthy) : Boolean(binary ?? resolveProviderBinary(provider)),
+    runtimeReady: Boolean(runtimes.get(runtimeKey(provider, id))?.isOpen()),
+    ...(configuredWsl ? { environment: `WSL · ${configuredWsl.distribution}` } : {}),
+  }));
+}
+
 async function ensureRuntime(provider: ProviderId = "kimi", instanceId?: string): Promise<AgentRuntime> {
   const key = runtimeKey(provider, instanceId);
   const current = runtimes.get(key);
@@ -298,12 +311,14 @@ async function startRuntime(provider: ProviderId, instanceId?: string): Promise<
   } else if (provider === "claude") {
     client = new ClaudeRuntime({ binary: requireProviderBinary("claude", instance?.binary), ...(instance ? { env: instance.environment } : {}), ...runtimeEvents });
   } else if (provider === "kimi" || provider === "cursor" || provider === "opencode") {
+    const wslRuntime = instance?.wsl;
     client = new AcpClient({
-      binary: useFake ? process.execPath : requireProviderBinary(provider, instance?.binary),
-      args: useFake ? (currentFile.endsWith(".ts") ? ["--import", "tsx", fakePath] : [fakePath]) : ["acp"],
+      binary: useFake ? process.execPath : wslRuntime ? wsl.binary : requireProviderBinary(provider, instance?.binary),
+      args: useFake ? (currentFile.endsWith(".ts") ? ["--import", "tsx", fakePath] : [fakePath]) : wslRuntime ? ["--distribution", wslRuntime.distribution, "--exec", wslRuntime.binary, "acp"] : ["acp"],
       ...(instance ? { env: instance.environment } : {}),
-      ...(provider === "kimi" ? { kimiCodeHome: kimiHome } : {}),
-      ...(provider === "kimi" ? { mcpServers: async (workspace: string) => {
+      ...(wslRuntime ? { cwdToAgent: (path: string) => wsl.toLinux(wslRuntime.distribution, path), pathFromAgent: (path: string) => wsl.toWindows(wslRuntime.distribution, path) } : {}),
+      ...(provider === "kimi" && !wslRuntime ? { kimiCodeHome: kimiHome } : {}),
+      ...(provider === "kimi" && !wslRuntime ? { mcpServers: async (workspace: string) => {
       const configured = await readKimiMcpServers(kimiHome);
       return [
         createDesktopPreviewMcpServer(
@@ -413,7 +428,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         initialize: initializeResults.get("kimi"),
         binary: runtimeBinaryDescription(),
         providers: providerDescriptors(),
-        instances: providerInstances.map(({ id, name, provider, binary }) => ({ id, name, provider, installed: Boolean(binary ?? resolveProviderBinary(provider)) })),
+        instances: await publicProviderInstances(),
         defaultCwd,
         auth: authStatus,
         degraded: Boolean(runtimeError),
@@ -525,7 +540,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "diagnostics.snapshot") {
-      reply(socket, request.id, { diagnostics: diagnostics.snapshot(), blockers: updateBlockers() });
+      reply(socket, request.id, { diagnostics: diagnostics.snapshot(), blockers: updateBlockers(), environments: await wsl.list() });
       return;
     }
     if (request.method === "diagnostics.export") {
@@ -540,6 +555,10 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         runtimeProviders: [...runtimes.entries()].filter(([, runtime]) => runtime.isOpen()).map(([provider]) => provider).join(",") || "none",
       });
       reply(socket, request.id, { path });
+      return;
+    }
+    if (request.method === "environments.list") {
+      reply(socket, request.id, { environments: await wsl.list() });
       return;
     }
     if (request.method === "capabilities.list") {
@@ -561,7 +580,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       const providers = await Promise.all(providerDescriptors().map(async (provider) => provider.id === "kimi"
         ? { ...provider, provider: "kimi" as const, ...auth.status(), runtimeReady: providerRuntimeReady("kimi") }
         : { ...provider, ...await providerAuth.status(provider.id), runtimeReady: providerRuntimeReady(provider.id) }));
-      const instances = providerInstances.map(({ id, name, provider, binary }) => ({ id, name, provider, installed: Boolean(binary ?? resolveProviderBinary(provider)), runtimeReady: Boolean(runtimes.get(runtimeKey(provider, id))?.isOpen()) }));
+      const instances = await publicProviderInstances();
       reply(socket, request.id, { providers, instances });
       return;
     }

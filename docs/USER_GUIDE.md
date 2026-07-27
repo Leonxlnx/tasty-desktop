@@ -14,6 +14,8 @@ Signing out delegates credential removal to the selected provider CLI. Provider 
 
 Named provider instances configured in `provider-instances.json` appear beside the defaults in the composer selector. Use them to point a chat at an existing work or personal CLI home without importing credentials into Tasty. The selected instance is fixed after the first message and inherited by side chats.
 
+Open **Settings → Environments** to inspect Windows and installed WSL distributions. Healthy user distributions can back named Kimi, Cursor, or OpenCode instances; WSL system distributions are deliberately unavailable. Windows remains the default, and Tasty never installs Linux distributions or provider CLIs for you.
+
 ## Projects and chats
 
 Use **Projects** when an agent should work inside a local folder. A project can contain multiple chats, and each chat can use workspace files, Git, terminal, and preview tools.

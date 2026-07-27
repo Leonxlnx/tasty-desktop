@@ -94,6 +94,26 @@ Create `provider-instances.json` inside the Tasty data directory to expose addit
 
 `id` is a stable 1–64 character identifier. `binary`, when present, must be an existing absolute path. Environment values must be absolute paths and are limited to provider-owned home/config variables: `KIMI_CODE_HOME`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `CURSOR_CONFIG_DIR`, and the standard `XDG_*_HOME` variables used by OpenCode. Arbitrary environment variables and secret values are rejected. A thread persists its instance ID, and side chats inherit it.
 
+### WSL instances
+
+Kimi, Cursor, and OpenCode ACP runtimes can run inside an existing WSL user distribution. Tasty keeps workspace authorization on Windows, translates only absolute paths at the ACP boundary, and rejects unhealthy or system-only distributions such as `docker-desktop`.
+
+```json
+[
+  {
+    "id": "ubuntu-opencode",
+    "name": "OpenCode in Ubuntu",
+    "provider": "opencode",
+    "wsl": {
+      "distribution": "Ubuntu",
+      "binary": "/usr/local/bin/opencode"
+    }
+  }
+]
+```
+
+The Linux binary must already exist inside that distribution. Tasty does not install a distribution or CLI. Codex and Claude stay on Windows because their current adapters require Windows-native path and event semantics. Settings → Environments shows detected distributions and health without exposing configured binary or credential paths.
+
 ## Compatibility storage
 
 Packaged Tasty keeps the legacy `com.kimicode.desktop` application identifier and `kimi-code-desktop.preferences.v1` browser key. These are internal compatibility anchors, not product branding. Changing either without migration would strand installed chat history, settings, and updater identity.

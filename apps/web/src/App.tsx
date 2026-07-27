@@ -63,7 +63,8 @@ type ProviderState = {
   event?: AuthState["event"];
   capabilities?: ProviderCapabilitySupport;
 };
-type ProviderInstance = { id: string; name: string; provider: ProviderId; installed: boolean; runtimeReady?: boolean };
+type ProviderInstance = { id: string; name: string; provider: ProviderId; installed: boolean; runtimeReady?: boolean; environment?: string };
+type WslEnvironment = { name: string; system: boolean; healthy: boolean; message?: string };
 type Preferences = {
   density: "comfortable" | "compact";
   sendKey: "enter" | "ctrl-enter";
@@ -101,7 +102,7 @@ type ConfigUpdate = { targetKey: string; configId: string; requestId: number };
 type UpdateStatus = { phase: "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error"; version?: string; currentVersion?: string; percent?: number; message?: string };
 type RailView = "git" | "terminal" | "preview" | "agents";
 type AppMenu = "file" | "edit" | "view" | "help";
-type SettingsCategory = "general" | "appearance" | "layout" | "account" | "usage" | "updates" | "diagnostics" | "about";
+type SettingsCategory = "general" | "appearance" | "layout" | "account" | "environments" | "usage" | "updates" | "diagnostics" | "about";
 type KeybindingAction = "palette" | "newChat" | "openFolder" | "toggleSidebar" | "terminal" | "settings";
 type ProjectScript = { name: string; command: string };
 type TerminalSessionInfo = { sessionId: string; cwd: string; shell: string };
@@ -381,6 +382,7 @@ export function App() {
   const [auth, setAuth] = useState<AuthState>();
   const [providers, setProviders] = useState<ProviderState[]>([]);
   const [providerInstances, setProviderInstances] = useState<ProviderInstance[]>([]);
+  const [wslEnvironments, setWslEnvironments] = useState<WslEnvironment[]>([]);
   const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
   const [images, setImages] = useState<PendingImage[]>([]);
   const [selectedFile, setSelectedFile] = useState<{ path: string; content: string }>();
@@ -763,6 +765,15 @@ export function App() {
     setProviders(result.providers.map((provider) => ({ ...provider, id: normalizeProvider(provider.id ?? provider.provider), provider: normalizeProvider(provider.provider ?? provider.id) })));
     setProviderInstances(result.instances?.map((instance) => ({ ...instance, provider: normalizeProvider(instance.provider) })) ?? []);
   }, [call]);
+  const refreshEnvironments = useCallback(async () => {
+    const result = await call("environments.list") as { environments: WslEnvironment[] };
+    setWslEnvironments(result.environments);
+  }, [call]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsCategory !== "environments") return;
+    void refreshEnvironments().catch((error) => setDiagnostic(`Could not inspect WSL environments: ${error instanceof Error ? error.message : String(error)}`));
+  }, [refreshEnvironments, setDiagnostic, settingsCategory, settingsOpen]);
   const recoverLocalServer = useCallback(async (force = false) => {
     if (serverRestarting.current) return;
     serverRestarting.current = true;
@@ -2479,6 +2490,7 @@ export function App() {
         preferences={preferences}
         auth={auth}
         providers={providers}
+        environments={wslEnvironments}
         selectedProvider={preferences.provider}
         cwd={cwd}
         quota={quota}
@@ -2498,6 +2510,7 @@ export function App() {
         onCheckUpdates={checkForUpdates}
         onInstallUpdate={installUpdate}
         onExportDiagnostics={exportDiagnostics}
+        onRefreshEnvironments={refreshEnvironments}
         onShowOnboarding={() => { setShowOnboarding(true); setSettingsOpen(false); setSettingsQuery(""); }}
       />}
       {manageDialog && <ManageItemDialog dialog={manageDialog} onCancel={() => setManageDialog(undefined)} onConfirm={confirmManageAction} />}
@@ -2700,7 +2713,7 @@ function ProviderPicker({ providers, instances, selected, selectedInstanceId, lo
     value: item.id,
     name: item.name,
     description: !item.installed ? "CLI not installed" : item.authenticated === false ? "Sign in required" : item.account ?? `${item.protocol} runtime`,
-  })).concat(instances.map((instance) => ({ value: `${instance.provider}:${instance.id}` as ProviderId, name: instance.name, description: `${providerName(instance.provider)} · configured instance${instance.installed ? "" : " · CLI missing"}` })));
+  })).concat(instances.map((instance) => ({ value: `${instance.provider}:${instance.id}` as ProviderId, name: instance.name, description: instance.environment ?? `${providerName(instance.provider)} · configured instance${instance.installed ? "" : " · CLI missing"}` })));
   const selectedInstance = instances.find((instance) => instance.id === selectedInstanceId && instance.provider === selected);
   const control: ComposerControl = {
     id: "provider",
@@ -2930,12 +2943,13 @@ export function applyDraftConfig(defaults: ConfigOption[], draft: Record<string,
   return defaults.map((option) => draft[option.id] !== undefined ? { ...option, currentValue: draft[option.id]! } : option);
 }
 
-function SettingsDialog({ category, query, preferences, auth, providers, selectedProvider, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onExportDiagnostics, onShowOnboarding }: {
+function SettingsDialog({ category, query, preferences, auth, providers, environments, selectedProvider, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onExportDiagnostics, onRefreshEnvironments, onShowOnboarding }: {
   category: SettingsCategory;
   query: string;
   preferences: Preferences;
   auth: AuthState | undefined;
   providers: ProviderState[];
+  environments: WslEnvironment[];
   selectedProvider: ProviderId;
   cwd: string;
   quota: KimiQuota | undefined;
@@ -2955,6 +2969,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, selecte
   onCheckUpdates: (manual?: boolean) => Promise<void>;
   onInstallUpdate: () => Promise<void>;
   onExportDiagnostics: () => Promise<void>;
+  onRefreshEnvironments: () => Promise<void>;
   onShowOnboarding: () => void;
 }) {
   const categories: Array<{ id: SettingsCategory; label: string; keywords: string; icon: React.ReactNode }> = [
@@ -2962,6 +2977,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, selecte
     { id: "appearance", label: "Appearance", keywords: "theme light dark colors accent font text zoom", icon: <Palette /> },
     { id: "layout", label: "Layout", keywords: "sidebar side panel rail resize left right", icon: <SidebarSimple /> },
     { id: "account", label: "Providers", keywords: "profile login logout kimi codex openai claude anthropic cursor cli", icon: <UserCircle /> },
+    { id: "environments", label: "Environments", keywords: "windows wsl linux distributions runtime execution", icon: <TerminalWindow /> },
     { id: "usage", label: "Usage & limits", keywords: "quota subscription plan limits", icon: <Gauge /> },
     { id: "updates", label: "Updates", keywords: "version install restart release", icon: <DownloadSimple /> },
     { id: "diagnostics", label: "Diagnostics", keywords: "support bundle logs errors troubleshooting privacy", icon: <Bug /> },
@@ -3005,6 +3021,8 @@ function SettingsDialog({ category, query, preferences, auth, providers, selecte
             </>}
 
             {category === "account" && <section className="settings-group"><h2>Agent providers</h2><div className="settings-provider-list">{providers.map((provider) => <article className={provider.id === selectedProvider ? "active" : ""} key={provider.id}><ProviderMark provider={provider.id} /><div><strong>{provider.name}</strong><small>{!provider.installed ? "CLI not installed" : provider.authenticated === true ? provider.account ?? "Account connected" : provider.authenticated === false ? "Sign in required" : provider.account ?? "CLI ready"}</small></div><button className="provider-default" type="button" disabled={provider.id === selectedProvider} onClick={() => onPreferences({ provider: provider.id })}>{provider.id === selectedProvider ? "Default" : "Use"}</button>{!provider.installed ? <button className="secondary" type="button" onClick={() => void onInstallCli(provider.id)}><DownloadSimple /> Guide</button> : provider.authenticated === true ? <button className="secondary danger-text" type="button" disabled={provider.loginRunning} onClick={() => void onLogout(provider.id)}><SignOut /> Log out</button> : <button className="secondary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin(provider.id)}><SignIn />{provider.loginRunning ? "Waiting…" : "Sign in"}</button>}</article>)}</div>{selectedProvider === "kimi" && auth?.home && <code className="account-home">{auth.home}</code>}<p className="settings-note">Tasty starts official local provider runtimes. Passwords and API credentials stay in each provider's own account store and never enter this repository.</p></section>}
+
+            {category === "environments" && <section className="settings-group"><h2>Execution environments</h2><SettingsRow title="Windows" description="Tasty orchestration and local providers run under this Windows account."><span className="environment-status healthy">Active</span></SettingsRow>{environments.map((environment) => <SettingsRow key={environment.name} title={environment.name} description={environment.system ? "WSL system distribution; intentionally unavailable for agent work." : environment.healthy ? "Healthy WSL agent boundary." : environment.message ?? "WSL distribution is unavailable."}><span className={`environment-status ${environment.healthy && !environment.system ? "healthy" : ""}`}>{environment.system ? "System" : environment.healthy ? "Ready" : "Unavailable"}</span></SettingsRow>)}<button className="secondary" type="button" onClick={() => void onRefreshEnvironments()}><ArrowsClockwise /> Refresh</button><p className="settings-note">WSL provider instances are configured in <code>provider-instances.json</code>. Windows remains the default; only healthy user distributions are offered.</p></section>}
 
             {category === "usage" && <div className="settings-usage"><UsagePanel quota={quota} error={quotaError} loading={quotaLoading} onRefresh={onRefreshQuota} /><p className="settings-note">Subscription limits come from the official local Kimi CLI <code>/usage</code> panel and refresh on focus and every minute. New official limit windows appear automatically.</p></div>}
 
@@ -3050,6 +3068,7 @@ function settingsDescription(category: SettingsCategory): string {
     appearance: "Theme, typography, color, and interface scale.",
     layout: "Place and resize every part of the workspace.",
     account: "Local provider runtimes, accounts, and defaults.",
+    environments: "Windows and WSL execution boundaries for local agents.",
     usage: "Kimi subscription quota reported by the local CLI.",
     updates: "Signed releases and update installation.",
     diagnostics: "Local, redacted troubleshooting information.",
