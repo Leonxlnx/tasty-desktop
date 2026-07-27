@@ -77,6 +77,8 @@ Agent profiles, permissions, models, reasoning levels, subagents, skills, MCP se
 - Add configurable agent profiles with runtime-supported model, limits, prompt, and permissions.
 - Make linked subagents navigable and individually steerable or stoppable only when the provider supports it.
 
+Status: complete. Profiles preserve provider-supported prompt/model/reasoning/permission state; no current adapter exposes an enforceable profile limit. Codex exposes linked inspection and stop, while unsupported steering remains absent.
+
 ### 7. Providers and instances
 
 - Add OpenCode through its supported local server or ACP boundary.

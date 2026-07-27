@@ -36,6 +36,7 @@ describe("Codex App Server runtime", () => {
       role: "explore",
       turns: [{ items: [{ kind: "reasoning" }, { title: "pnpm test", text: "57 tests passed" }, { kind: "message", text: "The tests are green." }] }],
     });
+    await expect(runtime.stopSubagent("child-thread")).resolves.toBeUndefined();
     await runtime.close();
   });
 });

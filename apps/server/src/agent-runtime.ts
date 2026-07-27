@@ -20,5 +20,6 @@ export interface AgentRuntime {
   respondToPermission(requestId: string, optionId?: string): void;
   cancel(sessionId: string): Promise<void>;
   inspectSubagent?(threadId: string): Promise<SubagentInspection>;
+  stopSubagent?(threadId: string): Promise<void>;
   close(): Promise<void>;
 }

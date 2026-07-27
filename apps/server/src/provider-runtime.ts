@@ -11,6 +11,13 @@ export type ProviderDescriptor = {
   installed: boolean;
   binary?: string;
   installUrl: string;
+  capabilities: ProviderCapabilities;
+};
+
+export type ProviderCapabilities = {
+  models: boolean; reasoning: boolean; permissions: boolean; commands: boolean; images: boolean; quota: boolean;
+  skills: "native" | "none"; mcp: "native" | "runtime" | "none"; plugins: "native" | "none";
+  subagents: { activity: boolean; inspect: boolean; stop: boolean; steer: boolean };
 };
 
 const providerNames: Record<ProviderId, string> = {
@@ -27,6 +34,13 @@ const installUrls: Record<ProviderId, string> = {
   cursor: "https://cursor.com/cli",
 };
 
+const capabilities: Record<ProviderId, ProviderCapabilities> = {
+  kimi: { models: true, reasoning: true, permissions: true, commands: true, images: true, quota: true, skills: "native", mcp: "native", plugins: "native", subagents: { activity: true, inspect: false, stop: false, steer: false } },
+  codex: { models: true, reasoning: true, permissions: true, commands: false, images: true, quota: false, skills: "none", mcp: "runtime", plugins: "none", subagents: { activity: true, inspect: true, stop: true, steer: false } },
+  claude: { models: true, reasoning: true, permissions: true, commands: false, images: false, quota: false, skills: "none", mcp: "runtime", plugins: "none", subagents: { activity: true, inspect: false, stop: false, steer: false } },
+  cursor: { models: true, reasoning: true, permissions: true, commands: false, images: true, quota: false, skills: "none", mcp: "runtime", plugins: "none", subagents: { activity: true, inspect: false, stop: false, steer: false } },
+};
+
 export function providerDescriptors(): ProviderDescriptor[] {
   return (["kimi", "codex", "claude", "cursor"] as const).map((id) => {
     const binary = resolveProviderBinary(id);
@@ -37,6 +51,7 @@ export function providerDescriptors(): ProviderDescriptor[] {
       installed: Boolean(binary),
       ...(binary ? { binary } : {}),
       installUrl: installUrls[id],
+      capabilities: capabilities[id],
     };
   });
 }

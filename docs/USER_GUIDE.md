@@ -72,9 +72,13 @@ Open the global command palette with `Ctrl+K`. It searches app actions, projects
 
 General settings can record a different modifier shortcut for the palette, new chat, open folder, sidebar, terminal, and settings actions. A shortcut conflict is shown immediately and both conflicting actions remain disabled until one binding changes. Actions that need a provider or project are unavailable outside that context.
 
-## Commands, skills, plugins, and subagents
+## Agent profiles, commands, extensions, and subagents
 
-The capability center currently combines the live Kimi command catalog with local Kimi configuration. Other providers keep their native models, reasoning, permissions, and tool activity, but do not show a fabricated Kimi-style capability inventory.
+Open **Agents & extensions** to see the selected provider's actual runtime support. Capability chips distinguish supported models, reasoning, permissions, images, commands, and quota. Unsupported skills, MCP, plugins, and subagent actions use honest empty states instead of a fabricated Kimi inventory.
+
+The **Profiles** tab saves a reusable prompt together with the current model, reasoning, and permission values when the provider exposes those controls. Profiles belong to one provider. Selecting **Use** applies only choices still advertised by the active runtime, skips stale choices safely, and places the saved instructions in the composer for review before sending. Tasty does not currently store a fake agent limit because none of the supported adapters exposes an enforceable per-agent limit.
+
+For Kimi, the remaining tabs combine the live command catalog with local Kimi-owned configuration:
 
 - User skills from `%KIMI_CODE_HOME%\skills` (default `%USERPROFILE%\.kimi-code\skills`) and `%USERPROFILE%\.agents\skills`
 - Project skills from `.kimi-code\skills` and `.agents\skills`
@@ -89,6 +93,8 @@ To install a local skill, open a project, choose a skill file or folder from tha
 Use Kimi's own commands, such as `/mcp-config` and `/update-config`, when the current runtime advertises them. Plugin management is shown only when Kimi exposes a matching command; the desktop app does not invent `/plugins`. Only user MCP definitions from `%KIMI_CODE_HOME%\mcp.json` are attached. Repository-controlled MCP files are shown as **Review only** and never execute just because a project was opened. Sensitive MCP headers, environment values, arguments, and credentials stay in the server process and are never sent to the renderer.
 
 The `coder`, `explore`, and `plan` entries are convenient Kimi delegation prompts, not a fabricated running-agent inventory. Real Kimi `Agent` calls and their persisted background tasks appear in the **Agents** work-panel tab with their type, foreground or background mode, state, and agent ID when Kimi supplies one.
+
+Codex collaboration calls also appear in **Agents**. A linked child transcript can be inspected, and an active child can be stopped individually. Tasty verifies that the child thread was linked by the parent before either action. The installed Codex app-server does not currently expose child steering, so no steering button is shown. Other providers retain activity-only projection until their adapters expose stronger controls.
 
 ## Work panel
 

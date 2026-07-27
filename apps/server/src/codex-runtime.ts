@@ -137,6 +137,13 @@ export class CodexRuntime implements AgentRuntime {
     };
   }
 
+  async stopSubagent(threadId: string): Promise<void> {
+    const inspection = await this.inspectSubagent(threadId);
+    const active = [...inspection.turns].reverse().find((turn) => /in.?progress|running|active/i.test(turn.status));
+    if (!active) throw new Error("This subagent has no active turn to stop");
+    await this.#request("turn/interrupt", { threadId, turnId: active.turnId });
+  }
+
   async resumeSession(sessionId: string, cwd: string): Promise<RuntimeSession> {
     const root = await canonicalWorkspace(cwd);
     const response = asObject(await this.#request("thread/resume", { threadId: sessionId, cwd: root, excludeTurns: true }));

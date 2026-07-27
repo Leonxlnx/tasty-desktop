@@ -8,6 +8,12 @@ Every provider can create project or standalone chats, stream messages and tool 
 
 The provider is fixed after a thread starts. A new draft can select another provider before its first prompt.
 
+## Capability contract
+
+Every provider descriptor declares whether its installed adapter supports models, reasoning, permissions, commands, images, quota, skills, MCP, plugins, and subagent activity, inspection, stop, or steering. The capability center renders that contract instead of projecting Kimi configuration onto another runtime. An unavailable capability remains visibly unavailable; Tasty does not synthesize a control that the adapter cannot execute.
+
+Agent profiles are provider-bound reusable prompts with only the model, reasoning, and permission choices offered by that runtime at save time. On reuse, stale or removed choices are ignored and the provider default remains active. No current adapter exposes an enforceable per-agent turn or token limit, so profiles do not pretend to store one.
+
 ## Kimi
 
 - Binary: `~/.kimi-code/bin/kimi` or `kimi.exe`
@@ -24,9 +30,9 @@ Kimi is the only provider for which Tasty currently renders subscription quota b
 - Transport: official `codex app-server` JSON-RPC over standard input and output
 - Authentication: `codex login --device-auth`, `codex login status`, and `codex logout`
 - Runtime-owned features: threads, turns, models, reasoning effort, approvals, messages, commands, file changes, collaboration events, token usage, and interruptions
-- Subagents: collaboration tool calls are projected into the Agents panel. Linked receiver thread IDs can be opened and inspected through `thread/read` with turns included.
+- Subagents: collaboration tool calls are projected into the Agents panel. Linked receiver thread IDs can be opened and inspected through `thread/read` with turns included. An active linked receiver can be stopped through the official `turn/interrupt` request.
 
-Tasty rejects attempts to inspect a subagent thread unless that thread ID was linked by a collaboration event in the parent thread.
+Tasty rejects attempts to inspect or stop a subagent thread unless that thread ID was linked by a collaboration event in the parent thread. The current app-server contract does not expose child-thread steering, so Tasty does not show that action.
 
 ## Anthropic Claude
 

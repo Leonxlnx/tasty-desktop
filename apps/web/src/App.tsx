@@ -22,8 +22,10 @@ type KimiPlugin = { name: string; version: string; description: string; toolCoun
 type KimiMcpServer = { name: string; transport: "http" | "stdio" | "unknown"; target: string; needsAuthorization: boolean; connectable: boolean; projectScoped?: true };
 type KimiSkill = { name: string; description: string; scope: "user" | "project"; source: "kimi" | "agents"; path: string; modelInvocable: boolean; hasSubSkills: boolean };
 type KimiAgent = { name: "coder" | "explore" | "plan"; description: string; access: string; supportsBackground: boolean };
-type KimiCapabilities = { plugins: KimiPlugin[]; mcpServers: KimiMcpServer[]; skills: KimiSkill[]; agents: KimiAgent[]; roots: { plugins: string; mcp: string; skills: string }; warnings: string[]; updatedAt: string };
-type CapabilityTab = "skills" | "plugins" | "mcp" | "agents";
+type ProviderCapabilitySupport = { models: boolean; reasoning: boolean; permissions: boolean; commands: boolean; images: boolean; quota: boolean; skills: "native" | "none"; mcp: "native" | "runtime" | "none"; plugins: "native" | "none"; subagents: { activity: boolean; inspect: boolean; stop: boolean; steer: boolean } };
+type KimiCapabilities = { provider: ProviderId; support: ProviderCapabilitySupport; plugins: KimiPlugin[]; mcpServers: KimiMcpServer[]; skills: KimiSkill[]; agents: KimiAgent[]; roots: Partial<{ plugins: string; mcp: string; skills: string }>; warnings: string[]; updatedAt: string };
+type CapabilityTab = "profiles" | "skills" | "plugins" | "mcp" | "agents";
+type AgentProfile = { id: string; name: string; provider: ProviderId; prompt: string; model?: string; reasoning?: string; permission?: string };
 type SubagentRun = { id: string; type: string; description: string; status: "running" | "completed" | "failed"; background: boolean; agentId?: string; detail?: string; threadIds?: string[]; output?: string };
 type SubagentInspection = { threadId: string; title: string; role?: string; status: string; turns: Array<{ turnId: string; status: string; durationMs?: number; items: Array<{ id: string; kind: "message" | "reasoning" | "action"; title: string; text?: string; status?: string }> }> };
 type BackgroundTask = {
@@ -59,6 +61,7 @@ type ProviderState = {
   id: ProviderId; provider: ProviderId; name: string; protocol: "acp" | "app-server" | "stream-json"; installed: boolean;
   authenticated: boolean | null; loginRunning: boolean; runtimeReady: boolean; installUrl: string; account?: string; message?: string;
   event?: AuthState["event"];
+  capabilities?: ProviderCapabilitySupport;
 };
 type Preferences = {
   density: "comfortable" | "compact";
@@ -85,6 +88,7 @@ type Preferences = {
   provider: ProviderId;
   editor: "system" | "vscode" | "cursor";
   keybindings: Record<KeybindingAction, string>;
+  agentProfiles: AgentProfile[];
 };
 type ProjectGroup = { cwd: string; name: string; threads: Thread[]; runtimeSessions: RuntimeSession[] };
 type DraftChat = { kind: "project" | "chat"; cwd?: string; isolate?: boolean };
@@ -117,7 +121,7 @@ const defaultPreferences: Preferences = {
   density: "comfortable", sendKey: "enter", workspace: "", onboardingDone: false, sidebarCollapsed: false, projects: [], zoom: 1,
   theme: "system", font: "system", fontSize: 15, accent: "neutral", paletteVersion: 4, sidebarSide: "left", railSide: "right", sidebarWidth: 272, railWidth: 420,
   projectAliases: {}, hiddenProjects: [], hiddenSessions: [], composerConfig: {}, yoloAcknowledged: false, provider: "kimi", editor: "system",
-  keybindings: { palette: "Ctrl+K", newChat: "Ctrl+N", openFolder: "Ctrl+O", toggleSidebar: "Ctrl+B", terminal: "Ctrl+J", settings: "Ctrl+," },
+  keybindings: { palette: "Ctrl+K", newChat: "Ctrl+N", openFolder: "Ctrl+O", toggleSidebar: "Ctrl+B", terminal: "Ctrl+J", settings: "Ctrl+," }, agentProfiles: [],
 };
 const keybindingActions: Array<{ id: KeybindingAction; label: string }> = [
   { id: "palette", label: "Command palette" }, { id: "newChat", label: "New chat" }, { id: "openFolder", label: "Open folder" },
@@ -380,9 +384,10 @@ export function App() {
   const [threadFilter, setThreadFilter] = useState("");
   const [navView, setNavView] = useState<"projects" | "chats">("projects");
   const [capabilityCenterOpen, setCapabilityCenterOpen] = useState(false);
-  const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>("skills");
+  const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>("profiles");
   const [capabilities, setCapabilities] = useState<KimiCapabilities>();
   const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
+  const [profileDraft, setProfileDraft] = useState({ name: "", prompt: "" });
   const [searchOpen, setSearchOpen] = useState(false);
   const [railView, setRailView] = useState<RailView>();
   const [openMenu, setOpenMenu] = useState<AppMenu>();
@@ -829,13 +834,13 @@ export function App() {
   const refreshCapabilities = useCallback(async () => {
     setCapabilitiesLoading(true);
     try {
-      setCapabilities(await call("capabilities.list", capabilityCwd ? { cwd: capabilityCwd } : {}) as KimiCapabilities);
+      setCapabilities(await call("capabilities.list", { provider: providerId, ...(capabilityCwd ? { cwd: capabilityCwd } : {}) }) as KimiCapabilities);
     } catch (error) {
       setDiagnostic(error instanceof Error ? error.message : String(error));
     } finally {
       setCapabilitiesLoading(false);
     }
-  }, [call, capabilityCwd, setDiagnostic]);
+  }, [call, capabilityCwd, providerId, setDiagnostic]);
 
   useEffect(() => {
     if (connection === "connected") void refreshCapabilities();
@@ -1549,6 +1554,37 @@ export function App() {
     }
   }
 
+  function saveAgentProfile() {
+    const name = profileDraft.name.trim();
+    const profilePrompt = profileDraft.prompt.trim();
+    if (!name || !profilePrompt) return;
+    const model = composerOptions.find(isModelOption);
+    const reasoning = composerOptions.find(isThinkingOption);
+    const permission = composerOptions.find(isModeOption);
+    const profile: AgentProfile = {
+      id: globalThis.crypto?.randomUUID?.() ?? `profile-${Date.now()}`,
+      name, provider: providerId, prompt: profilePrompt,
+      ...(model ? { model: String(model.currentValue) } : {}),
+      ...(reasoning ? { reasoning: String(reasoning.currentValue) } : {}),
+      ...(permission ? { permission: String(permission.currentValue) } : {}),
+    };
+    setPreferences((current) => ({ ...current, agentProfiles: [...current.agentProfiles, profile].slice(-30) }));
+    setProfileDraft({ name: "", prompt: "" });
+  }
+
+  async function useAgentProfile(profile: AgentProfile) {
+    if (profile.provider !== providerId) {
+      setDiagnostic(`This profile belongs to ${providerName(profile.provider)}. Select that provider in a new draft first.`);
+      return;
+    }
+    for (const update of profileConfigUpdates(composerOptions, profile)) await setConfig(update.id, update.value);
+    useCapabilityPrompt(profile.prompt.endsWith(" ") ? profile.prompt : `${profile.prompt} `);
+  }
+
+  function deleteAgentProfile(id: string) {
+    setPreferences((current) => ({ ...current, agentProfiles: current.agentProfiles.filter((profile) => profile.id !== id) }));
+  }
+
   async function chooseSkillToInstall(kind: "folder" | "file" = "folder") {
     if (!capabilityProjectCwd) {
       setDiagnostic("Open a project before installing a local skill.");
@@ -2215,7 +2251,7 @@ export function App() {
           <button className="toolbar-icon" type="button" aria-label="Open command palette" title={`Command palette (${preferences.keybindings.palette})`} onClick={() => setSearchOpen(true)}><MagnifyingGlass /></button>
         </div>
 
-        {providerId === "kimi" && <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title="Kimi skills, MCP, plugins, and agents" onClick={() => { setRailView(undefined); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Kimi capabilities</strong><small>{capabilities ? `${capabilities.skills.length} skills · ${capabilities.mcpServers.length} MCP` : "Skills, MCP, agents"}</small></span><CaretRight /></button>}
+        <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title={`${providerName(providerId)} profiles and runtime capabilities`} onClick={() => { setRailView(undefined); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Agents & extensions</strong><small>{capabilities?.provider === providerId ? `${preferences.agentProfiles.filter((profile) => profile.provider === providerId).length} profiles · ${capabilities.skills.length} skills` : `${providerName(providerId)} capabilities`}</small></span><CaretRight /></button>
 
         <div className="sidebar-body">
           <div className="sidebar-heading"><span>{navView === "projects" ? "Projects" : "Chats"}</span><button type="button" title={navView === "projects" ? "Open folder" : "New chat"} aria-label={navView === "projects" ? "Open folder" : "New chat"} disabled={navView === "chats" && !runtimeReady} onClick={() => navView === "projects" ? void chooseWorkspace() : createStandaloneChat()}>{navView === "projects" ? <FolderOpen /> : <Plus />}</button></div>
@@ -2288,7 +2324,7 @@ export function App() {
             timelinePinned.current = pinned;
             setShowJumpToLatest(!pinned && Boolean(activeThread && turnViews.length));
           }}>
-            {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} canInstallSkill={Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding ? <Onboarding providers={providers} selected={preferences.provider} cwd={cwd} onProvider={selectProvider} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={(provider) => void call("auth.cancel", { provider })} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !runtimeReady && (!activeThread || !turnViews.length) ? <ProviderGate provider={providerState} onInstall={() => installCli(providerId)} onLogin={() => beginLogin(providerId)} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel", { provider: providerId })} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} agentName={providerName(providerId)} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
+            {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter provider={providerId} data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} profiles={preferences.agentProfiles.filter((profile) => profile.provider === providerId)} profileDraft={profileDraft} nativePlugins={providerId === "kimi" && nativeCapabilityCommands.has("plugins")} nativeMcp={providerId === "kimi" && (nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp"))} canInstallSkill={providerId === "kimi" && Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onProfileDraft={setProfileDraft} onSaveProfile={saveAgentProfile} onUseProfile={useAgentProfile} onDeleteProfile={deleteAgentProfile} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding ? <Onboarding providers={providers} selected={preferences.provider} cwd={cwd} onProvider={selectProvider} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={(provider) => void call("auth.cancel", { provider })} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !runtimeReady && (!activeThread || !turnViews.length) ? <ProviderGate provider={providerState} onInstall={() => installCli(providerId)} onLogin={() => beginLogin(providerId)} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel", { provider: providerId })} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} agentName={providerName(providerId)} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
             {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{hiddenTurnCount > 0 && <button className="conversation-history-more" type="button" onClick={() => setVisibleTurnLimit((current) => current + initialTurnWindow)}><CaretDown /> Show {Math.min(initialTurnWindow, hiddenTurnCount)} earlier turns</button>}{visibleTurnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={() => { setRailView("git"); void refreshGit(); }} />)}</div>}
           </div>
           {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}><CaretDown /> Jump to latest</button>}
@@ -2406,12 +2442,12 @@ export function App() {
             </div>
           </>}
 
-          {railView === "agents" && <SubagentsRail provider={activeThread?.provider ?? providerId} runs={agentRuns} onInspect={async (run) => {
+          {railView === "agents" && <SubagentsRail provider={activeThread?.provider ?? providerId} runs={agentRuns} canStop={Boolean(providerState?.capabilities?.subagents.stop)} onInspect={async (run) => {
             const agentThreadId = run.threadIds?.[0];
             if (!activeThread || !agentThreadId) return undefined;
             const result = await call("subagents.inspect", { threadId: activeThread.threadId, agentThreadId }) as { inspection: SubagentInspection };
             return result.inspection;
-          }} onUseAgent={(agent) => useCapabilityPrompt(`Use the ${agent} subagent for this task: `)} onOpenCenter={() => { setCapabilityTab("agents"); setCapabilityCenterOpen(true); setRailView(undefined); }} />}
+          }} onStop={async (run) => { const agentThreadId = run.threadIds?.[0]; if (!activeThread || !agentThreadId) return; await call("subagents.stop", { threadId: activeThread.threadId, agentThreadId }); }} onUseAgent={(agent) => useCapabilityPrompt(`Use the ${agent} subagent for this task: `)} onOpenCenter={() => { setCapabilityTab("agents"); setCapabilityCenterOpen(true); setRailView(undefined); }} />}
         </div>
       </aside>}
 
@@ -2983,6 +3019,12 @@ function ChoiceButtons({ value, options, onChange }: { value: string; options: A
   return <div className="settings-choices">{options.map((option) => <button className={value === option.value ? "active" : ""} type="button" aria-pressed={value === option.value} key={option.value} onClick={() => onChange(option.value)}>{option.label}</button>)}</div>;
 }
 
+export function profileConfigUpdates(options: ConfigOption[], profile: Pick<AgentProfile, "model" | "reasoning" | "permission">): Array<{ id: string; value: string }> {
+  const values: Array<[ConfigOption | undefined, string | undefined]> = [[options.find(isModelOption), profile.model], [options.find(isThinkingOption), profile.reasoning], [options.find(isModeOption), profile.permission]];
+  return values
+    .flatMap(([option, value]) => option && value && String(option.currentValue) !== value && flattenOptions(option).some((choice) => choice.value === value) ? [{ id: option.id, value }] : []);
+}
+
 function KeybindingInput({ value, conflict, onChange }: { value: string; conflict: boolean; onChange: (value: string) => void }) {
   return <button className={`keybinding-input ${conflict ? "conflict" : ""}`} type="button" aria-invalid={conflict} title="Press a modifier and key" onKeyDown={(event) => {
     const shortcut = shortcutFromEvent(event);
@@ -3018,10 +3060,13 @@ function RailTabs({ current, workspace, activeAgents, onSelect, onClose }: { cur
   </nav>;
 }
 
-function CapabilitiesCenter({ data, loading, tab, nativePlugins, nativeMcp, canInstallSkill, onTab, onRefresh, onInstallSkill, onUseSkill, onUsePrompt, onCopyPath }: {
+function CapabilitiesCenter({ provider, data, loading, tab, profiles, profileDraft, nativePlugins, nativeMcp, canInstallSkill, onTab, onRefresh, onInstallSkill, onUseSkill, onUsePrompt, onProfileDraft, onSaveProfile, onUseProfile, onDeleteProfile, onCopyPath }: {
+  provider: ProviderId;
   data: KimiCapabilities | undefined;
   loading: boolean;
   tab: CapabilityTab;
+  profiles: AgentProfile[];
+  profileDraft: { name: string; prompt: string };
   nativePlugins: boolean;
   nativeMcp: boolean;
   canInstallSkill: boolean;
@@ -3030,38 +3075,46 @@ function CapabilitiesCenter({ data, loading, tab, nativePlugins, nativeMcp, canI
   onInstallSkill: (kind?: "folder" | "file") => Promise<void>;
   onUseSkill: (name: string) => void;
   onUsePrompt: (text: string) => void;
+  onProfileDraft: (draft: { name: string; prompt: string }) => void;
+  onSaveProfile: () => void;
+  onUseProfile: (profile: AgentProfile) => Promise<void>;
+  onDeleteProfile: (id: string) => void;
   onCopyPath: (path: string) => void;
 }) {
-  const count = tab === "skills" ? data?.skills.length : tab === "plugins" ? data?.plugins.length : tab === "mcp" ? data?.mcpServers.length : data?.agents.length;
+  const count = tab === "profiles" ? profiles.length : tab === "skills" ? data?.skills.length : tab === "plugins" ? data?.plugins.length : tab === "mcp" ? data?.mcpServers.length : data?.agents.length;
   const path = tab === "skills" ? data?.roots.skills : tab === "mcp" ? data?.roots.mcp : tab === "plugins" ? data?.roots.plugins : undefined;
-  return <section className="capabilities-center" aria-label="Kimi capabilities">
+  const providerLabel = providerName(provider);
+  return <section className="capabilities-center" aria-label={`${providerLabel} capabilities`}>
     <header className="capabilities-hero">
       <div className="capabilities-mark"><PlugsConnected /></div>
-      <div><span>Extend Kimi</span><h1>Skills, tools, and focused agents.</h1><p>Everything here is read from your local Kimi installation and active project. The desktop app never copies credentials or invents a second capability runtime.</p></div>
+      <div><span>{providerLabel}</span><h1>Profiles, extensions, and focused agents.</h1><p>Tasty shows only what this provider adapter and local runtime actually support. Credentials and provider-owned configuration stay with the provider CLI.</p></div>
       <button className="capabilities-refresh" type="button" disabled={loading} onClick={() => void onRefresh()}><ArrowsClockwise className={loading ? "rotating" : ""} /><span>{loading ? "Refreshing" : "Refresh"}</span></button>
     </header>
+    {data?.support && <div className="capability-support" aria-label="Runtime support">{[["Models", data.support.models], ["Reasoning", data.support.reasoning], ["Permissions", data.support.permissions], ["Images", data.support.images], ["Commands", data.support.commands], ["Quota", data.support.quota]].map(([label, supported]) => <span className={supported ? "supported" : "unavailable"} key={String(label)}>{supported ? <Check /> : <Minus />}{String(label)}</span>)}</div>}
     <nav className="capabilities-tabs" aria-label="Capability categories">
+      <button className={tab === "profiles" ? "active" : ""} type="button" onClick={() => onTab("profiles")}><UserCircle /><span>Profiles</span><small>{profiles.length}</small></button>
       <button className={tab === "skills" ? "active" : ""} type="button" onClick={() => onTab("skills")}><SlidersHorizontal /><span>Skills</span><small>{data?.skills.length ?? 0}</small></button>
       <button className={tab === "mcp" ? "active" : ""} type="button" onClick={() => onTab("mcp")}><Cpu /><span>MCP servers</span><small>{data?.mcpServers.length ?? 0}</small></button>
       <button className={tab === "agents" ? "active" : ""} type="button" onClick={() => onTab("agents")}><Robot /><span>Subagents</span><small>{data?.agents.length ?? 3}</small></button>
       <button className={tab === "plugins" ? "active" : ""} type="button" onClick={() => onTab("plugins")}><PlugsConnected /><span>Plugins</span><small>{data?.plugins.length ?? 0}</small></button>
     </nav>
     <div className="capabilities-content" key={tab}>
-      <div className="capabilities-section-title"><div><strong>{tab === "skills" ? "Available skills" : tab === "plugins" ? "Detected plugins" : tab === "mcp" ? "Configured tool servers" : "Kimi-native agent shortcuts"}</strong><span>{count ?? 0} {tab === "agents" ? "shortcuts" : tab === "skills" ? "available" : "configured"}</span></div>{tab === "skills" ? <span className="capabilities-title-actions"><button type="button" disabled={!canInstallSkill} title={canInstallSkill ? "Install a skill bundle from this project" : "Open a project to install a skill"} onClick={() => void onInstallSkill("folder")}><Plus /> Skill folder</button><button type="button" disabled={!canInstallSkill} title={canInstallSkill ? "Install a flat Markdown skill from this project" : "Open a project to install a skill"} onClick={() => void onInstallSkill("file")}><FileText /> Skill file</button></span> : tab === "plugins" && nativePlugins ? <button type="button" onClick={() => onUsePrompt("/plugins ")}><Plus /> Open plugin manager</button> : tab === "mcp" ? <button type="button" onClick={() => onUsePrompt(nativeMcp ? "/mcp-config " : "Help me configure an MCP server for Kimi Code using the capabilities available in this Kimi version. ")}><Plus /> Configure MCP</button> : null}</div>
-      {loading && !data ? <CapabilitySkeleton /> : tab === "skills" ? <div className="capability-grid">
+      <div className="capabilities-section-title"><div><strong>{tab === "profiles" ? "Reusable agent profiles" : tab === "skills" ? "Available skills" : tab === "plugins" ? "Detected plugins" : tab === "mcp" ? "Configured tool servers" : "Runtime subagents"}</strong><span>{count ?? 0} {tab === "profiles" ? "saved" : tab === "agents" ? "available" : tab === "skills" ? "available" : "configured"}</span></div>{tab === "skills" && provider === "kimi" ? <span className="capabilities-title-actions"><button type="button" disabled={!canInstallSkill} title={canInstallSkill ? "Install a skill bundle from this project" : "Open a project to install a skill"} onClick={() => void onInstallSkill("folder")}><Plus /> Skill folder</button><button type="button" disabled={!canInstallSkill} title={canInstallSkill ? "Install a flat Markdown skill from this project" : "Open a project to install a skill"} onClick={() => void onInstallSkill("file")}><FileText /> Skill file</button></span> : tab === "plugins" && nativePlugins ? <button type="button" onClick={() => onUsePrompt("/plugins ")}><Plus /> Open plugin manager</button> : tab === "mcp" && nativeMcp ? <button type="button" onClick={() => onUsePrompt("/mcp-config ")}><Plus /> Configure MCP</button> : null}</div>
+      {loading && !data ? <CapabilitySkeleton /> : tab === "profiles" ? <div className="profile-workspace"><form onSubmit={(event) => { event.preventDefault(); onSaveProfile(); }}><input value={profileDraft.name} onChange={(event) => onProfileDraft({ ...profileDraft, name: event.target.value })} placeholder="Profile name" maxLength={80} /><textarea value={profileDraft.prompt} onChange={(event) => onProfileDraft({ ...profileDraft, prompt: event.target.value })} placeholder="Reusable instructions for this agent" maxLength={20_000} /><button type="submit" disabled={!profileDraft.name.trim() || !profileDraft.prompt.trim()}><Plus /> Save current runtime setup</button><small>The current model, reasoning, and permission values are saved only when this runtime offers them.</small></form><div>{profiles.map((profile) => <article key={profile.id}><ProviderMark provider={profile.provider} /><div><strong>{profile.name}</strong><p>{profile.prompt}</p><small>{[profile.model, profile.reasoning, profile.permission].filter(Boolean).join(" · ") || "Provider defaults"}</small></div><span><button type="button" onClick={() => void onUseProfile(profile)}>Use</button><button type="button" aria-label={`Delete ${profile.name}`} onClick={() => onDeleteProfile(profile.id)}><Trash /></button></span></article>)}{!profiles.length && <CapabilityEmpty icon={<UserCircle />} title="No profiles yet" text={`Save a reusable ${providerLabel} prompt with the runtime-supported model, reasoning, and permission choices currently selected in the composer.`} />}</div></div> : tab === "skills" ? <div className="capability-grid">
         {data?.skills.map((skill) => <article className="capability-card" key={`${skill.scope}-${skill.source}-${skill.name}`}><span className="capability-icon"><SlidersHorizontal /></span><div><strong>{skill.name}</strong><small>{skill.scope} · {skill.source === "kimi" ? "Kimi" : "Agents"}{skill.hasSubSkills ? " · sub-skills" : ""}</small><p>{skill.description || "Local Kimi skill"}</p></div><button type="button" onClick={() => onUseSkill(skill.name)}>Use</button></article>)}
-        {!data?.skills.length && <CapabilityEmpty icon={<SlidersHorizontal />} title="No skills found" text="Kimi discovers skills from your user folders and the active project's .kimi-code or .agents directory." {...(canInstallSkill ? { action: "Install skill folder", onAction: () => onInstallSkill("folder") } : {})} />}
+        {!data?.skills.length && <CapabilityEmpty icon={<SlidersHorizontal />} title={data?.support.skills === "native" ? "No skills found" : "Skills are not exposed"} text={data?.support.skills === "native" ? "Kimi discovers skills from your user folders and the active project's .kimi-code or .agents directory." : `${providerLabel} does not expose a compatible skill inventory through Tasty's current runtime adapter.`} {...(canInstallSkill ? { action: "Install skill folder", onAction: () => onInstallSkill("folder") } : {})} />}
       </div> : tab === "plugins" ? <div className="capability-grid">
         {data?.plugins.map((plugin) => <article className="capability-card" key={plugin.name}><span className="capability-icon"><PlugsConnected /></span><div><strong>{plugin.name}</strong><small>v{plugin.version} · {plugin.toolCount} {plugin.toolCount === 1 ? "tool" : "tools"}</small><p>{plugin.description || "Local Kimi plugin"}</p></div>{nativePlugins ? <button type="button" onClick={() => onUsePrompt(`/plugins ${plugin.name} `)}>Manage</button> : <span className="capability-badge">Detected locally</span>}</article>)}
-        {!data?.plugins.length && <CapabilityEmpty icon={<PlugsConnected />} title="No plugins detected" text={nativePlugins ? "This Kimi runtime exposes its plugin manager, but no local plugin manifests were found." : "Your current Kimi runtime does not advertise a plugin command. The desktop app will not create a fake plugin flow."} {...(nativePlugins ? { action: "Open plugin manager", onAction: () => onUsePrompt("/plugins ") } : {})} />}
+        {!data?.plugins.length && <CapabilityEmpty icon={<PlugsConnected />} title={data?.support.plugins === "native" ? "No plugins detected" : "Plugins are not exposed"} text={nativePlugins ? "This Kimi runtime exposes its plugin manager, but no local plugin manifests were found." : `${providerLabel} does not advertise a compatible plugin manager. Tasty does not create a fake one.`} {...(nativePlugins ? { action: "Open plugin manager", onAction: () => onUsePrompt("/plugins ") } : {})} />}
       </div> : tab === "mcp" ? <div className="capability-list">
         {data?.mcpServers.map((server) => <article className="mcp-row" key={server.name}><span className={`mcp-status ${server.connectable ? "ready" : "attention"}`} /><div><strong>{server.name}</strong><small>{server.transport.toUpperCase()} · {server.target}</small></div>{!server.connectable && <span className="capability-badge">{server.projectScoped ? "Review only" : server.needsAuthorization ? "OAuth" : "Unsupported"}</span>}{!server.projectScoped && <button type="button" onClick={() => onUsePrompt(nativeMcp ? "/mcp " : `Check the configured MCP server ${server.name} and report its available tools. `)}>Check</button>}</article>)}
-        {!data?.mcpServers.length && <CapabilityEmpty icon={<Cpu />} title="No MCP servers configured" text={nativeMcp ? "Connect Kimi to APIs, databases, and local tools using its standard MCP configuration." : "This Kimi runtime has not exposed MCP configuration commands in the current session. Ask Kimi to use the configuration supported by your installed version."} action={nativeMcp ? "Configure MCP" : "Ask Kimi"} onAction={() => onUsePrompt(nativeMcp ? "/mcp-config " : "Check my installed Kimi Code version and help me configure a compatible MCP server. ")} />}
+        {!data?.mcpServers.length && <CapabilityEmpty icon={<Cpu />} title={data?.support.mcp === "none" ? "MCP is not exposed" : "Runtime-managed MCP"} text={nativeMcp ? "Connect Kimi to APIs, databases, and local tools using its standard MCP configuration." : `${providerLabel} owns its MCP configuration. Tasty does not read or rewrite its credential-bearing configuration.`} {...(nativeMcp ? { action: "Configure MCP", onAction: () => onUsePrompt("/mcp-config ") } : {})} />}
       </div> : <div className="agent-grid">
-        {(data?.agents ?? defaultAgentCapabilities()).map((agent) => <article className={`agent-card agent-${agent.name}`} key={agent.name}><div className="agent-card-top"><span><Robot /></span><small>{agent.supportsBackground ? "Foreground or background" : "Foreground"}</small></div><h2>{agent.name}</h2><p>{agent.description}</p><footer><span>{agent.access}</span><button type="button" onClick={() => onUsePrompt(`Use the ${agent.name} subagent for this task: `)}>Use agent <CaretRight /></button></footer></article>)}
+        {(data?.agents.length ? data.agents : provider === "kimi" ? defaultAgentCapabilities() : []).map((agent) => <article className={`agent-card agent-${agent.name}`} key={agent.name}><div className="agent-card-top"><span><Robot /></span><small>{agent.supportsBackground ? "Foreground or background" : "Foreground"}</small></div><h2>{agent.name}</h2><p>{agent.description}</p><footer><span>{agent.access}</span><button type="button" onClick={() => onUsePrompt(`Use the ${agent.name} subagent for this task: `)}>Use agent <CaretRight /></button></footer></article>)}
+        {!data?.agents.length && provider !== "kimi" && <CapabilityEmpty icon={<Robot />} title="Runtime-directed subagents" text={data?.support.subagents.activity ? `${providerLabel} subagent activity appears in the Agents panel when the runtime creates it. Tasty does not invent named shortcuts.` : `${providerLabel} does not expose subagent activity through this adapter.`} />}
       </div>}
       {data?.warnings.length ? <div className="capability-warning"><WarningCircle /><span>{data.warnings.join(" ")}</span></div> : null}
-      {path && <footer className="capabilities-paths"><span>Local Kimi data</span><button type="button" title={path} onClick={() => onCopyPath(path)}><Copy /> Copy {tab === "mcp" ? "config" : `${tab.slice(0, -1)} folder`} path</button></footer>}
+      {path && <footer className="capabilities-paths"><span>Local {providerLabel} data</span><button type="button" title={path} onClick={() => onCopyPath(path)}><Copy /> Copy {tab === "mcp" ? "config" : `${tab.slice(0, -1)} folder`} path</button></footer>}
     </div>
   </section>;
 }
@@ -3074,12 +3127,13 @@ function CapabilityEmpty({ icon, title, text, action, onAction }: { icon: React.
   return <div className="capability-empty"><span>{icon}</span><strong>{title}</strong><p>{text}</p>{action && onAction && <button type="button" onClick={() => void onAction()}>{action}</button>}</div>;
 }
 
-function SubagentsRail({ provider, runs, onInspect, onUseAgent, onOpenCenter }: { provider: ProviderId; runs: SubagentRun[]; onInspect: (run: SubagentRun) => Promise<SubagentInspection | undefined>; onUseAgent: (agent: string) => void; onOpenCenter: () => void }) {
+function SubagentsRail({ provider, runs, canStop, onInspect, onStop, onUseAgent, onOpenCenter }: { provider: ProviderId; runs: SubagentRun[]; canStop: boolean; onInspect: (run: SubagentRun) => Promise<SubagentInspection | undefined>; onStop: (run: SubagentRun) => Promise<void>; onUseAgent: (agent: string) => void; onOpenCenter: () => void }) {
   const active = runs.filter((run) => run.status === "running").length;
   const [selectedId, setSelectedId] = useState<string>();
   const [inspection, setInspection] = useState<SubagentInspection>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const [stopping, setStopping] = useState(false);
   const selected = runs.find((run) => run.id === selectedId);
   useEffect(() => {
     if (selectedId && !runs.some((run) => run.id === selectedId)) { setSelectedId(undefined); setInspection(undefined); }
@@ -3097,7 +3151,7 @@ function SubagentsRail({ provider, runs, onInspect, onUseAgent, onOpenCenter }: 
   }
 
   if (selected) return <section className="agents-rail-content agent-inspection">
-    <header><button className="agent-back" type="button" onClick={() => { setSelectedId(undefined); setInspection(undefined); setError(undefined); }}><CaretRight /> All agents</button><span className={`agent-status ${selected.status}`}>{selected.status}</span></header>
+    <header><button className="agent-back" type="button" onClick={() => { setSelectedId(undefined); setInspection(undefined); setError(undefined); }}><CaretRight /> All agents</button><span>{canStop && selected.status === "running" && selected.threadIds?.length ? <button className="agent-stop" type="button" disabled={stopping} onClick={() => { setStopping(true); setError(undefined); void onStop(selected).then(() => inspect(selected)).catch((failure) => setError(failure instanceof Error ? failure.message : String(failure))).finally(() => setStopping(false)); }}><Stop />{stopping ? "Stopping" : "Stop"}</button> : null}<i className={`agent-status ${selected.status}`}>{selected.status}</i></span></header>
     <div className="agent-inspection-body">
       <div className="agent-inspection-title"><ProviderMark provider={provider} /><div><small>{selected.type}{selected.background ? " · background" : ""}</small><h2>{inspection?.title ?? selected.description}</h2><p>{selected.agentId ?? inspection?.role ?? selected.detail}</p></div></div>
       {loading && <div className="agent-inspection-loading"><i /><span>Loading subagent transcript…</span></div>}
@@ -3261,6 +3315,12 @@ function loadPreferences(): Preferences {
       : {};
     const savedKeybindings: Partial<Record<KeybindingAction, string>> = value.keybindings && typeof value.keybindings === "object" && !Array.isArray(value.keybindings) ? value.keybindings : {};
     const keybindings = Object.fromEntries(keybindingActions.map(({ id }) => [id, typeof savedKeybindings[id] === "string" && savedKeybindings[id] ? savedKeybindings[id] : defaultPreferences.keybindings[id]])) as Record<KeybindingAction, string>;
+    const agentProfiles = Array.isArray(value.agentProfiles) ? value.agentProfiles.flatMap((profile) => {
+      if (!profile || typeof profile !== "object") return [];
+      const candidate = profile as Partial<AgentProfile>;
+      if (typeof candidate.id !== "string" || typeof candidate.name !== "string" || typeof candidate.prompt !== "string") return [];
+      return [{ id: candidate.id, name: candidate.name.slice(0, 80), prompt: candidate.prompt.slice(0, 20_000), provider: normalizeProvider(candidate.provider), ...(typeof candidate.model === "string" ? { model: candidate.model } : {}), ...(typeof candidate.reasoning === "string" ? { reasoning: candidate.reasoning } : {}), ...(typeof candidate.permission === "string" ? { permission: candidate.permission } : {}) }];
+    }).slice(0, 30) : [];
     const savedPaletteVersion = Number(value.paletteVersion);
     const fontSize = savedPaletteVersion === 4 && typeof value.fontSize === "number" ? Math.min(18, Math.max(13, Math.round(value.fontSize))) : defaultPreferences.fontSize;
     return {
@@ -3288,6 +3348,7 @@ function loadPreferences(): Preferences {
       provider: normalizeProvider(value.provider),
       editor: value.editor === "vscode" || value.editor === "cursor" ? value.editor : "system",
       keybindings,
+      agentProfiles,
     };
   } catch {
     return { ...defaultPreferences };

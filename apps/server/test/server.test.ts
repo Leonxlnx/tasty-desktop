@@ -1216,6 +1216,9 @@ describe("orchestration server", () => {
     const rejected = waitFor(socket, messages, (message) => message.id === 4);
     socket.send(JSON.stringify({ id: 4, method: "skills.install", params: { cwd: workspace, source: external } }));
     expect((await rejected).error).toMatchObject({ message: expect.stringMatching(/inside the active workspace/i) });
+    const codexListed = waitFor(socket, messages, (message) => message.id === 5);
+    socket.send(JSON.stringify({ id: 5, method: "capabilities.list", params: { provider: "codex", cwd: workspace } }));
+    expect((await codexListed).result).toMatchObject({ provider: "codex", skills: [], plugins: [], support: { quota: false, subagents: { inspect: true, stop: true, steer: false } } });
     socket.close();
   });
 });

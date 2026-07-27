@@ -57,6 +57,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("threads.setGoal"), params: z.object({ threadId: z.string().min(1), objective: z.string().trim().min(1).max(20_000) }) }),
   z.object({ id, method: z.literal("threads.clearGoal"), params: z.object({ threadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("subagents.inspect"), params: z.object({ threadId: z.string().min(1), agentThreadId: z.string().min(1) }) }),
+  z.object({ id, method: z.literal("subagents.stop"), params: z.object({ threadId: z.string().min(1), agentThreadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("threads.delete"), params: z.object({ threadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("threads.archive"), params: z.object({ threadId: z.string().min(1), archived: z.boolean() }) }),
   z.object({ id, method: z.literal("threads.sendTurn"), params: z.object({
@@ -110,7 +111,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("usage.quota"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("diagnostics.snapshot"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("diagnostics.export"), params: z.object({}).default({}) }),
-  z.object({ id, method: z.literal("capabilities.list"), params: z.object({ cwd: z.string().min(1).optional() }).default({}) }),
+  z.object({ id, method: z.literal("capabilities.list"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor"]).default("kimi"), cwd: z.string().min(1).optional() }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("skills.install"), params: z.object({ cwd: z.string().min(1), source: z.string().min(1) }) }),
 ]);
 const persistedQueueSchema = z.record(z.string(), z.array(z.object({
@@ -518,14 +519,18 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "capabilities.list") {
-      const capabilities = await readKimiCapabilities(kimiHome, request.params.cwd);
-      reply(socket, request.id, { ...capabilities, mcpServers: [{
+      const descriptor = providerDescriptors().find((provider) => provider.id === request.params.provider)!;
+      const capabilities = request.params.provider === "kimi" ? await readKimiCapabilities(kimiHome, request.params.cwd) : {
+        plugins: [], mcpServers: [], skills: [], agents: [], roots: {}, warnings: [], updatedAt: new Date().toISOString(),
+      };
+      const mcpServers = request.params.provider === "kimi" ? [{
         name: desktopPreviewMcpName,
         transport: "stdio" as const,
         target: "Built into Tasty",
         needsAuthorization: false,
         connectable: true,
-      }, ...capabilities.mcpServers.filter((server) => server.name !== desktopPreviewMcpName)] });
+      }, ...capabilities.mcpServers.filter((server) => server.name !== desktopPreviewMcpName)] : capabilities.mcpServers;
+      reply(socket, request.id, { provider: request.params.provider, support: descriptor.capabilities, ...capabilities, mcpServers });
       return;
     }
     if (request.method === "providers.list") {
@@ -822,14 +827,18 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "subagents.inspect") {
-      const linked = thread.tools.some((tool) => {
-        const input = tool.rawInput && typeof tool.rawInput === "object" && !Array.isArray(tool.rawInput) ? tool.rawInput as Record<string, unknown> : {};
-        return Array.isArray(input.receiverThreadIds) && input.receiverThreadIds.includes(request.params.agentThreadId);
-      });
-      if (!linked) throw new Error("Subagent thread is not linked to this Tasty chat");
+      if (!isLinkedSubagent(thread, request.params.agentThreadId)) throw new Error("Subagent thread is not linked to this Tasty chat");
       const runtime = await ensureRuntime(thread.provider);
       if (!runtime.inspectSubagent) throw new Error(`${providerName(thread.provider)} does not expose inspectable subagent transcripts`);
       reply(socket, request.id, { inspection: await runtime.inspectSubagent(request.params.agentThreadId) });
+      return;
+    }
+    if (request.method === "subagents.stop") {
+      if (!isLinkedSubagent(thread, request.params.agentThreadId)) throw new Error("Subagent thread is not linked to this Tasty chat");
+      const runtime = await ensureRuntime(thread.provider);
+      if (!runtime.stopSubagent) throw new Error(`${providerName(thread.provider)} does not support stopping an individual subagent`);
+      await runtime.stopSubagent(request.params.agentThreadId);
+      reply(socket, request.id, {});
       return;
     }
     if (request.method === "threads.clearQueue") {
@@ -1498,6 +1507,13 @@ function classifyRuntimeSession(session: unknown): unknown {
   if (!session || typeof session !== "object") return session;
   const cwd = (session as { cwd?: unknown }).cwd;
   return typeof cwd === "string" ? { ...session, kind: isStandaloneChatPath(cwd) ? "chat" : "project" } : session;
+}
+
+function isLinkedSubagent(thread: ThreadProjection, agentThreadId: string): boolean {
+  return thread.tools.some((tool) => {
+    const input = tool.rawInput && typeof tool.rawInput === "object" && !Array.isArray(tool.rawInput) ? tool.rawInput as Record<string, unknown> : {};
+    return Array.isArray(input.receiverThreadIds) && input.receiverThreadIds.includes(agentThreadId);
+  });
 }
 
 async function captureCheckpoint(threadId: string, turnId: string, phase: Checkpoint["phase"], cwd: string, before?: Checkpoint): Promise<Checkpoint | undefined> {
