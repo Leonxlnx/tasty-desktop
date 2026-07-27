@@ -23,21 +23,22 @@ This note records the locally inspected T3 Code architecture and the parts that 
 
 ## What Tasty intentionally keeps simpler
 
-- Windows-first Tauri packaging instead of a broader remote environment system
-- A single local loopback server rather than LAN, hosted, or tunnel endpoints
+- Windows-first Tauri packaging instead of native packages for every desktop platform
+- Direct user-owned LAN or private-network access instead of a hosted relay
 - Existing React state and event-store patterns instead of introducing Effect or a shared contract package
 - Provider adapters built from already installed dependencies
 
-These omissions keep the current trust boundary small. Remote environments, shared contract generation, and richer multi-device orchestration should be added only when a concrete workflow needs them.
+These omissions keep the current trust boundary small. Shared contract generation and richer provider-specific child APIs should be added only when a concrete workflow needs them.
+
+## Roadmap follow-through
+
+Tasty now implements the high-value boundaries identified during this research: provider conformance fixtures, a provider-neutral capability center, named local and WSL environments, authenticated direct remote access, and a private mobile companion. Remote clients still cannot access arbitrary files, credentials, Git, terminals, or host administration.
 
 ## Gaps still worth considering
 
-1. Provider conformance fixtures for real version snapshots beyond Kimi
-2. A capability matrix generated from adapter tests so documentation cannot drift
-3. Stable provider event schemas shared between server and renderer
-4. Remote environments with explicit pairing and transport security
-5. Rich Claude subagent transcript inspection when its runtime exposes a stable child-session API
-6. Cursor-specific session inspection when ACP exposes linked child sessions
-7. A provider-neutral skills and MCP center instead of the current honest Kimi-only capability view
+1. Broader real-version conformance snapshots as provider CLIs evolve
+2. Stable provider event schemas shared between server and renderer
+3. Rich Claude subagent transcript inspection when its runtime exposes a stable child-session API
+4. Cursor-specific session inspection when ACP exposes linked child sessions
 
-The first two items have the highest value for an open-source release because they improve compatibility without expanding the security boundary.
+The first two items have the highest value because they improve compatibility without expanding the security boundary.

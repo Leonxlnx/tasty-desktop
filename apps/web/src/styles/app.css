@@ -354,6 +354,7 @@ button:active:not(:disabled) { transform: scale(.975); }
 .activity-detail > .markdown p { margin: 0; font-size: var(--text-xs); line-height: 1.55; }
 .activity-detail .tool-card { margin: 0; border: 0; border-radius: 0; background: transparent; }
 .assistant-message.markdown { margin: var(--space-3) 0 var(--space-5); color: var(--color-text-secondary); white-space: normal; }
+.markdown-fallback { white-space: pre-wrap; }
 .markdown > :first-child, .markdown > div > :first-child, .user-message > :first-child { margin-top: 0; }
 .markdown > :last-child, .markdown > div > :last-child, .user-message > :last-child { margin-bottom: 0; }
 .markdown p { max-width: 70ch; margin: 0 0 1em; line-height: 1.7; text-wrap: pretty; }

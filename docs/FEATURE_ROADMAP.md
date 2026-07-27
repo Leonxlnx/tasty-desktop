@@ -124,6 +124,8 @@ Status: complete. The local headless CLI pairs as a normal revocable remote devi
 - Improve hierarchy, empty/loading/error states, responsive panels, focus, reduced motion, and long-session rendering.
 - Keep the workspace visually continuous; avoid card soup, decorative gradients, and continuous GPU effects.
 
+Status: complete. The final graphite pass removes the full-sidebar backdrop filter and decorative gradient, adds a keyboard skip link and clearer completion/error notices, keeps schedules responsive and refreshed from server events, and lazy-loads Markdown rendering. The main production JavaScript chunk fell from 686 kB to 532 kB (192 kB to 147 kB gzip) without adding a dependency.
+
 ## Final release gate
 
 - All package typechecks and tests pass.

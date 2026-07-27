@@ -1,8 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Archive, ArrowCounterClockwise, ArrowSquareOut, ArrowsClockwise, ArrowUp, Brain, Browser, Broom, Bug, CaretDown, CaretRight, ChatCircleDots, Check, Circle, Clock, Copy, CornersIn, CornersOut, Cpu, DeviceMobile, DotsThree, DownloadSimple, FileText, FolderOpen, FolderSimple, Gauge, GearSix, GitBranch, GitCommit, Hammer, ImageSquare, Info, MagnifyingGlass, Minus, Palette, PaperPlaneRight, Paperclip, PencilSimple, PlugsConnected, Plus, Robot, ShieldCheck, SidebarSimple, SignIn, SignOut, SlidersHorizontal, Square, Stop, TerminalWindow, Trash, UserCircle, WarningCircle, X } from "@phosphor-icons/react";
 import { createPortal } from "react-dom";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { ConnectionSupervisor, type ConnectionState, type ServerMessage } from "./connection";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { Update } from "@tauri-apps/plugin-updater";
@@ -23,6 +21,7 @@ type KimiMcpServer = { name: string; transport: "http" | "stdio" | "unknown"; ta
 type KimiSkill = { name: string; description: string; scope: "user" | "project"; source: "kimi" | "agents"; path: string; modelInvocable: boolean; hasSubSkills: boolean };
 type KimiAgent = { name: "coder" | "explore" | "plan"; description: string; access: string; supportsBackground: boolean };
 type ProviderCapabilitySupport = { models: boolean; reasoning: boolean; permissions: boolean; commands: boolean; images: boolean; quota: boolean; skills: "native" | "none"; mcp: "native" | "runtime" | "none"; plugins: "native" | "none"; subagents: { activity: boolean; inspect: boolean; stop: boolean; steer: boolean } };
+const MarkdownTextContent = lazy(() => import("./MarkdownText"));
 type KimiCapabilities = { provider: ProviderId; support: ProviderCapabilitySupport; plugins: KimiPlugin[]; mcpServers: KimiMcpServer[]; skills: KimiSkill[]; agents: KimiAgent[]; roots: Partial<{ plugins: string; mcp: string; skills: string }>; warnings: string[]; updatedAt: string };
 type CapabilityTab = "profiles" | "skills" | "plugins" | "mcp" | "agents";
 type AgentProfile = { id: string; name: string; provider: ProviderId; prompt: string; model?: string; reasoning?: string; permission?: string };
@@ -3167,7 +3166,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
 
             {category === "diagnostics" && <><section className="settings-group"><h2>Private support bundle</h2><SettingsRow title="Export diagnostics" description="Save a redacted JSON report with runtime versions, active-work counts, and recent errors. Prompts, credentials, session IDs, and workspace paths are excluded."><button className="secondary" type="button" onClick={() => void onExportDiagnostics()}><Bug /> Export support bundle</button></SettingsRow><p className="settings-note">Review the file before sharing it. Tasty never uploads support bundles automatically.</p></section><section className="settings-group"><h2>Private chat archive</h2><SettingsRow title="Export current chat" description="Save this chat as a redacted local JSON archive."><button className="secondary" type="button" disabled={!activeThread} onClick={() => activeThread && void onExportSessions([activeThread.threadId])}><DownloadSimple /> Export chat</button></SettingsRow><SettingsRow title="Export all chats" description="Save every local Tasty chat. Credentials, session IDs, raw tool payloads, and home paths are removed."><button className="secondary" type="button" onClick={() => void onExportSessions()}><Archive /> Export all</button></SettingsRow></section></>}
 
-            {category === "about" && <section className="settings-group about-settings"><img src="/tasty-logo.png" alt="" aria-hidden="true" /><h2>Tasty</h2><p>An open-source local control panel for Kimi, OpenAI Codex, Anthropic Claude, and Cursor. Authentication stays with each provider; workspaces and Tasty's event projection remain local.</p><dl><div><dt>Runtimes</dt><dd>ACP, Codex App Server, and stream-json</dd></div><div><dt>Storage</dt><dd>Local compact event log</dd></div><div><dt>Source</dt><dd>github.com/Leonxlnx/tasty-desktop</dd></div></dl></section>}
+            {category === "about" && <section className="settings-group about-settings"><img src="/tasty-logo.png" alt="" aria-hidden="true" /><h2>Tasty</h2><p>An open-source local control panel for Kimi, OpenAI Codex, Anthropic Claude, Cursor, and OpenCode. Authentication stays with each provider; workspaces and Tasty's event projection remain local.</p><dl><div><dt>Runtimes</dt><dd>ACP, Codex App Server, and stream-json</dd></div><div><dt>Storage</dt><dd>Local compact event log</dd></div><div><dt>Source</dt><dd>github.com/Leonxlnx/tasty-desktop</dd></div></dl></section>}
           </div>
         </main>
       </div>
@@ -4018,9 +4017,9 @@ function useElapsedDuration(start: string, end: string | undefined, running: boo
 }
 
 function MarkdownText({ text, onOpenUrl }: { text: string; onOpenUrl: (url: string) => Promise<void> }) {
-  return <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
-    a: ({ href, children }) => <a href={href} onClick={(event) => { event.preventDefault(); if (href) void onOpenUrl(href); }}>{children}</a>,
-  }}>{text}</ReactMarkdown>;
+  return <Suspense fallback={<div className="markdown-fallback">{text}</div>}>
+    <MarkdownTextContent text={text} onOpenUrl={onOpenUrl} />
+  </Suspense>;
 }
 
 export function extractLocalPaths(text: string): string[] {

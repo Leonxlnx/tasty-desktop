@@ -27,6 +27,7 @@ The installer includes the local Node.js runtime used by Tasty. End users do not
 | OpenAI Codex | Codex CLI | Codex app server | Codex CLI |
 | Anthropic Claude | Claude Code CLI | Streaming JSON | Claude Code CLI |
 | Cursor | Cursor Agent CLI | Agent Client Protocol | Cursor Agent CLI |
+| OpenCode | OpenCode CLI | Agent Client Protocol | OpenCode CLI |
 
 Tasty detects installed CLIs, opens each provider's official installation guide when one is missing, and delegates sign-in and sign-out to that CLI. Passwords, API keys, OAuth tokens, and provider session stores never enter Tasty preferences.
 
