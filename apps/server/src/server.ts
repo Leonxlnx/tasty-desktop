@@ -30,6 +30,8 @@ import { ProviderAuthService, type ProviderAuthEvent } from "./provider-auth.js"
 import { DiagnosticJournal, redactDiagnosticText, type DiagnosticLevel } from "./diagnostics.js";
 import { WslEnvironments } from "./wsl-environments.js";
 import { RemoteAccess, remoteMethodAllowed, remoteProtocolToken, type RemoteConfig, type RemoteDevice } from "./remote-access.js";
+import { ScheduleStore, scheduleTarget, type Schedule } from "./schedule-store.js";
+import { exportSessionArchive } from "./session-export.js";
 import {
   BackgroundTaskMonitor,
   MAX_ACTIVE_BACKGROUND_TASKS,
@@ -52,6 +54,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("auth.logout"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi") }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("providers.list"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("threads.list"), params: z.object({ cwd: z.string().optional(), provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).optional(), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional() }).default({}) }),
+  z.object({ id, method: z.literal("threads.export"), params: z.object({ threadIds: z.array(z.string().min(1)).max(100).optional() }).default({}) }),
   z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), isolate: z.boolean().default(false), provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional(), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
   z.object({ id, method: z.literal("threads.createSide"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120).optional() }) }),
   z.object({ id, method: z.literal("threads.resume"), params: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), cwd: z.string().min(1), provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional(), replay: z.boolean().default(false) }) }),
@@ -113,6 +116,11 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("usage.quota"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("diagnostics.snapshot"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("diagnostics.export"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("schedules.list"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("schedules.create"), params: z.object({ threadId: z.string().min(1), name: z.string().trim().min(1).max(120), text: z.string().trim().min(1).max(100_000), recurrence: z.enum(["once", "daily", "weekly"]), nextRunAt: z.string().datetime() }) }),
+  z.object({ id, method: z.literal("schedules.update"), params: z.object({ id: z.string().uuid(), name: z.string().trim().min(1).max(120).optional(), text: z.string().trim().min(1).max(100_000).optional(), recurrence: z.enum(["once", "daily", "weekly"]).optional(), nextRunAt: z.string().datetime().optional(), enabled: z.boolean().optional() }) }),
+  z.object({ id, method: z.literal("schedules.delete"), params: z.object({ id: z.string().uuid() }) }),
+  z.object({ id, method: z.literal("schedules.run"), params: z.object({ id: z.string().uuid() }) }),
   z.object({ id, method: z.literal("environments.list"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("remote.status"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("remote.configure"), params: z.object({ enabled: z.boolean(), bind: z.enum(["127.0.0.1", "0.0.0.0"]), port: z.number().int().min(1024).max(65_535) }) }),
@@ -165,6 +173,8 @@ const terminal = new TerminalService();
 const wsl = new WslEnvironments();
 const remoteAccess = new RemoteAccess(join(dataHome, "remote-access.json"));
 await remoteAccess.open();
+const schedules = new ScheduleStore(join(dataHome, "schedules.json"));
+await schedules.open();
 const socketTerminals = new WeakMap<WebSocket, Set<string>>();
 const remoteDeviceSockets = new Map<string, Set<WebSocket>>();
 const remoteConnections = new Set<WebSocket>();
@@ -218,6 +228,10 @@ const backgroundTasks = new BackgroundTaskMonitor({
 });
 await queueFinishedBackgroundTaskReports();
 backgroundTasks.start();
+let checkingSchedules = false;
+const scheduleTimer = setInterval(() => void runDueSchedules(), 15_000);
+scheduleTimer.unref();
+void runDueSchedules();
 
 function sendPush(socket: WebSocket, channel: string, payload: unknown): void {
   const seq = (socketSeq.get(socket) ?? 0) + 1;
@@ -565,6 +579,56 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         runtimeProviders: [...runtimes.entries()].filter(([, runtime]) => runtime.isOpen()).map(([provider]) => provider).join(",") || "none",
       });
       reply(socket, request.id, { path });
+      return;
+    }
+    if (request.method === "threads.export") {
+      const requested = request.params.threadIds ? new Set(request.params.threadIds) : undefined;
+      const threads = engine.threads().filter((candidate) => !requested || requested.has(candidate.threadId));
+      if (requested && threads.length !== requested.size) throw new Error("One or more chats no longer exist");
+      const path = await exportSessionArchive(
+        join(dataHome, "exports"),
+        threads.map((candidate) => ({ ...candidate, queue: queueSummary(candidate.threadId) })),
+        [homedir(), dataHome, kimiHome],
+      );
+      reply(socket, request.id, { path, threadCount: threads.length });
+      return;
+    }
+    if (request.method === "schedules.list") {
+      reply(socket, request.id, { schedules: schedules.list() });
+      return;
+    }
+    if (request.method === "schedules.create") {
+      const target = engine.thread(request.params.threadId);
+      if (!target || target.archivedAt) throw new Error("Choose an active chat for this schedule");
+      const permission = target.configOptions.find((option) => option.id.toLowerCase() === "mode" || option.category?.toLowerCase() === "mode")?.currentValue;
+      const schedule = await schedules.create({
+        ...request.params,
+        ...scheduleTarget(target.provider, target.cwd, target.instanceId),
+        ...(permission !== undefined ? { permission: String(permission) } : {}),
+      });
+      reply(socket, request.id, { schedule });
+      return;
+    }
+    if (request.method === "schedules.update") {
+      const { id: scheduleId, name, text, recurrence, nextRunAt, enabled } = request.params;
+      const patch = {
+        ...(name !== undefined ? { name } : {}), ...(text !== undefined ? { text } : {}),
+        ...(recurrence !== undefined ? { recurrence } : {}), ...(nextRunAt !== undefined ? { nextRunAt } : {}),
+        ...(enabled !== undefined ? { enabled } : {}),
+      };
+      reply(socket, request.id, { schedule: await schedules.update(scheduleId, patch) });
+      return;
+    }
+    if (request.method === "schedules.delete") {
+      await schedules.delete(request.params.id);
+      reply(socket, request.id, {});
+      return;
+    }
+    if (request.method === "schedules.run") {
+      const schedule = schedules.get(request.params.id);
+      if (!schedule) throw new Error("Schedule was not found");
+      await enqueueScheduledTurn(schedule);
+      reply(socket, request.id, { accepted: true });
       return;
     }
     if (request.method === "environments.list") {
@@ -1071,6 +1135,48 @@ function publishQueue(threadId: string): void {
   pushAll("thread.queueUpdated", { threadId, queue: queueSummary(threadId) });
 }
 
+async function runDueSchedules(): Promise<void> {
+  if (checkingSchedules) return;
+  checkingSchedules = true;
+  try {
+    for (const schedule of await schedules.takeDue()) {
+      try {
+        await enqueueScheduledTurn(schedule);
+      } catch (error) {
+        const message = redactDiagnosticText(error instanceof Error ? error.message : String(error), [homedir(), dataHome, kimiHome]);
+        await schedules.record(schedule.id, `failed: ${message}`);
+        pushAll("notifications.event", { type: "schedule.failed", scheduleId: schedule.id, threadId: schedule.threadId, title: schedule.name, message });
+        emitDiagnostic("error", message, "schedules");
+      }
+    }
+  } finally {
+    checkingSchedules = false;
+  }
+}
+
+async function enqueueScheduledTurn(schedule: Schedule): Promise<void> {
+  const thread = engine.thread(schedule.threadId);
+  if (!thread || thread.archivedAt) throw new Error("The scheduled chat is unavailable or archived");
+  if (thread.provider !== schedule.provider || thread.instanceId !== schedule.instanceId || thread.cwd !== schedule.cwd) {
+    throw new Error("The scheduled chat target changed; recreate the schedule before running it");
+  }
+  const permission = thread.configOptions.find((option) => option.id.toLowerCase() === "mode" || option.category?.toLowerCase() === "mode")?.currentValue;
+  if (schedule.permission !== undefined && String(permission) !== schedule.permission) {
+    throw new Error("The chat permission mode changed; recreate the schedule to confirm the new boundary");
+  }
+  const queue = turnQueues.get(thread.threadId) ?? [];
+  queue.push({
+    queuedId: crypto.randomUUID(), text: schedule.text, mentions: mentionsFromText(schedule.text), images: [], mode: "queue",
+    createdAt: new Date().toISOString(), origin: "user",
+  });
+  turnQueues.set(thread.threadId, queue);
+  await persistQueues();
+  publishQueue(thread.threadId);
+  await schedules.record(schedule.id, "queued");
+  pushAll("notifications.event", { type: "schedule.queued", scheduleId: schedule.id, threadId: thread.threadId, title: schedule.name, message: `Scheduled task queued in ${thread.title}` });
+  void runNextQueued(thread.threadId);
+}
+
 async function runNextQueued(threadId: string): Promise<void> {
   if (updateLease) return;
   if (queueAdmissions.has(threadId)) return;
@@ -1191,6 +1297,10 @@ async function startQueuedTurn(threadId: string, admission: QueueAdmission): Pro
     await engine.append(thread.threadId, result.stopReason === "cancelled"
       ? { type: "TurnCancelled", payload: { turnId } }
       : { type: "TurnCompleted", payload: { turnId, stopReason: result.stopReason, ...(result.usage ? { usage: result.usage } : localUsage ? { usage: localUsage.tokens } : {}) } });
+    pushAll("notifications.event", {
+      type: result.stopReason === "end_turn" ? "turn.completed" : result.stopReason === "cancelled" ? "turn.cancelled" : "turn.finished",
+      threadId: thread.threadId, title: thread.title, message: result.stopReason === "end_turn" ? "Task completed" : `Task stopped: ${result.stopReason}`,
+    });
     if (queued.origin === "background_task") {
       if (result.stopReason === "end_turn") await markBackgroundTaskReportDelivered(thread.threadId, queued.queuedId);
       else await retryBackgroundTaskReport(thread.threadId, queued.queuedId, `Report stopped with reason: ${result.stopReason}`);
@@ -1203,6 +1313,7 @@ async function startQueuedTurn(threadId: string, admission: QueueAdmission): Pro
     await registerBackgroundTasks(thread.threadId, thread.sessionId, turnId);
     const current = engine.thread(thread.threadId);
     if (current?.activeTurnId === turnId) await engine.append(thread.threadId, { type: "TurnCompleted", payload: { turnId, stopReason: "error", error: error.message.slice(0, 2_000) } });
+    pushAll("notifications.event", { type: "turn.failed", threadId: thread.threadId, title: thread.title, message: redactDiagnosticText(error.message, [homedir(), dataHome, kimiHome]) });
     if (queued.origin === "background_task") {
       await retryBackgroundTaskReport(thread.threadId, queued.queuedId, error.message);
       requestQueueRestart(thread.threadId, admission);
@@ -1312,6 +1423,7 @@ async function finishBackgroundTask(pending: PendingBackgroundTask, result: Back
       ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
     },
   });
+  pushAll("notifications.event", { type: "background.completed", threadId: thread.threadId, title: thread.title, message: `Background task ${result.status}` });
   await queueBackgroundTaskReport(thread.threadId, task.taskId, result);
 }
 

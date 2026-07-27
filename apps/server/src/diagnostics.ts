@@ -12,13 +12,13 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/([?&](?:token|key|secret|password|signature)=)[^&#\s]+/gi, "$1[redacted]"],
 ];
 
-export function redactDiagnosticText(value: unknown, homePaths: string[] = []): string {
+export function redactDiagnosticText(value: unknown, homePaths: string[] = [], maxLength = 2_000): string {
   let text = String(value ?? "").replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
   for (const [pattern, replacement] of SECRET_PATTERNS) text = text.replace(pattern, replacement);
   for (const path of homePaths.filter(Boolean).sort((a, b) => b.length - a.length)) {
     text = text.replace(new RegExp(escapeRegExp(path), "gi"), "[home]");
   }
-  return text.length <= 2_000 ? text : `${text.slice(0, 1_999).trimEnd()}…`;
+  return text.length <= maxLength ? text : `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
 export class DiagnosticJournal {
