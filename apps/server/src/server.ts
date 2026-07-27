@@ -80,6 +80,8 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("runtime.configDefaults"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional() }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("checkpoints.list"), params: z.object({ threadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("checkpoints.revert"), params: z.object({ threadId: z.string().min(1), turnId: z.string().min(1) }) }),
+  z.object({ id, method: z.literal("checkpoints.review"), params: z.object({ threadId: z.string().min(1), turnId: z.string().min(1) }) }),
+  z.object({ id, method: z.literal("checkpoints.revertPart"), params: z.object({ threadId: z.string().min(1), turnId: z.string().min(1), path: z.string().min(1).max(32_768), hunkIndex: z.number().int().min(0).optional() }) }),
   z.object({ id, method: z.literal("files.tree"), params: z.object({ cwd: z.string().min(1), query: z.string().max(200).default("") }) }),
   z.object({ id, method: z.literal("files.read"), params: z.object({ cwd: z.string().min(1), path: z.string().min(1) }) }),
   z.object({ id, method: z.literal("git.status"), params: z.object({ cwd: z.string().min(1) }) }),
@@ -864,6 +866,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "checkpoints.revert") {
+      if (thread.revertedParts.some((part) => part.turnId === request.params.turnId)) throw new Error("This turn was partially reverted; review its remaining hunks instead");
       const before = thread.checkpoints.find((checkpoint) => checkpoint.turnId === request.params.turnId && checkpoint.phase === "before");
       const after = thread.checkpoints.findLast((checkpoint) => checkpoint.turnId === request.params.turnId && checkpoint.phase === "after");
       if (!before || !after) throw new Error("Turn checkpoints are incomplete");
@@ -959,6 +962,27 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       publishQueue(thread.threadId);
       requestQueueRestart(thread.threadId, admission);
       reply(socket, request.id, {});
+      return;
+    }
+    if (request.method === "checkpoints.review") {
+      const before = thread.checkpoints.find((checkpoint) => checkpoint.turnId === request.params.turnId && checkpoint.phase === "before");
+      const after = thread.checkpoints.findLast((checkpoint) => checkpoint.turnId === request.params.turnId && checkpoint.phase === "after");
+      if (!before || !after) throw new Error("Turn checkpoints are incomplete");
+      reply(socket, request.id, { turnId: request.params.turnId, files: await checkpointReactor.review(before, after) });
+      return;
+    }
+    if (request.method === "checkpoints.revertPart") {
+      if (thread.running) throw new Error("Stop the active task before reverting reviewed changes");
+      const before = thread.checkpoints.find((checkpoint) => checkpoint.turnId === request.params.turnId && checkpoint.phase === "before");
+      const after = thread.checkpoints.findLast((checkpoint) => checkpoint.turnId === request.params.turnId && checkpoint.phase === "after");
+      if (!before || !after) throw new Error("Turn checkpoints are incomplete");
+      const duplicate = thread.revertedParts.some((part) => part.turnId === request.params.turnId && part.path === request.params.path
+        && (part.hunkIndex === undefined || request.params.hunkIndex === undefined || part.hunkIndex === request.params.hunkIndex));
+      if (duplicate) throw new Error("This reviewed change was already reverted");
+      const reverted = await checkpointReactor.revertPart(thread.threadId, request.params.turnId, before, after, request.params.path, request.params.hunkIndex);
+      if (reverted) await engine.append(thread.threadId, { type: "CheckpointPartReverted", payload: { checkpoint: reverted, turnId: request.params.turnId, path: request.params.path, ...(request.params.hunkIndex === undefined ? {} : { hunkIndex: request.params.hunkIndex }) } });
+      pushAll("receipt", { type: "checkpoint.partReverted", threadId: thread.threadId, turnId: request.params.turnId, path: request.params.path, ...(request.params.hunkIndex === undefined ? {} : { hunkIndex: request.params.hunkIndex }) });
+      reply(socket, request.id, { checkpoint: reverted });
       return;
     }
     if (request.method === "threads.setGoal") {

@@ -18,6 +18,7 @@ describe("event log replay", () => {
     await first.append("thread-1", { type: "ToolCallCreated", payload: { tool: { toolCallId: "tool-1", title: "Edit file" } } });
     await first.append("thread-1", { type: "UsageUpdated", payload: { usage: { used: 8_192, size: 262_144 } } });
     await first.append("thread-1", { type: "TurnCompleted", payload: { turnId: "turn-1", stopReason: "end_turn", usage: { totalTokens: 200, inputTokens: 140, outputTokens: 60 } } });
+    await first.append("thread-1", { type: "CheckpointPartReverted", payload: { checkpoint: { turnId: "turn-1", phase: "reverted", ref: "refs/reverted", commit: "abc", root: dir }, turnId: "turn-1", path: "src/a.ts", hunkIndex: 0 } });
     await first.drain();
 
     const restarted = new OrchestrationEngine(new EventStore(path));
@@ -25,6 +26,7 @@ describe("event log replay", () => {
     expect(restarted.threads()).toEqual(first.threads());
     expect(restarted.threads()[0]?.tools[0]?.turnId).toBe("turn-1");
     expect(restarted.threads()[0]?.turns[0]).toMatchObject({ turnId: "turn-1", stopReason: "end_turn", usage: { totalTokens: 200 } });
+    expect(restarted.threads()[0]?.revertedParts).toEqual([{ turnId: "turn-1", path: "src/a.ts", hunkIndex: 0, revertedAt: expect.any(String) }]);
   });
 
   it("replays chat renames and deletion tombstones", async () => {

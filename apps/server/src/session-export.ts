@@ -31,6 +31,7 @@ function sanitizeThread(thread: ThreadProjection & { queue?: unknown[] }, privat
     tools: thread.tools.map(({ rawInput: _, rawOutput: __, ...tool }) => redactValue(tool, privatePaths)),
     approvals: redactValue(thread.approvals, privatePaths),
     checkpoints: redactValue(thread.checkpoints, privatePaths),
+    revertedParts: redactValue(thread.revertedParts, privatePaths),
     backgroundTasks: redactValue(thread.backgroundTasks, privatePaths),
     usage: redactValue(thread.usage, privatePaths),
     queue: redactValue(thread.queue ?? [], privatePaths),

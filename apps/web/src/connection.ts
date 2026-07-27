@@ -11,6 +11,7 @@ const boundedRequestMethods = new Set([
   "usage.quota",
   "git.status",
   "git.diff",
+  "checkpoints.review",
 ]);
 
 export class ConnectionSupervisor {

@@ -6,6 +6,7 @@ export type Message = { turnId: string; role: "user" | "assistant" | "thought"; 
 export type ToolCall = { toolCallId: string; turnId?: string; title?: string; kind?: string; status?: string; content?: unknown[]; locations?: unknown[]; rawInput?: unknown; rawOutput?: unknown };
 export type Approval = { requestId: string; turnId?: string; title: string; kind: "permission" | "question" | "plan_review"; options: Array<{ optionId: string; name: string; kind: string }> };
 export type TurnCheckpoint = Checkpoint & { diff?: string };
+export type RevertedCheckpointPart = { turnId: string; path: string; hunkIndex?: number; revertedAt: string };
 export type ThreadUsage = { context?: UsageUpdate; tokens?: Usage };
 export type ProviderId = "kimi" | "codex" | "claude" | "cursor" | "opencode";
 export type ThreadGoal = {
@@ -76,6 +77,7 @@ export type ThreadProjection = {
   commands: unknown[];
   modeId: string | undefined;
   checkpoints: TurnCheckpoint[];
+  revertedParts: RevertedCheckpointPart[];
   backgroundTasks: BackgroundTask[];
   usage: ThreadUsage;
   goal?: ThreadGoal;
@@ -112,7 +114,8 @@ export type DomainEvent =
   | { type: "BackgroundTaskReportDelivered"; payload: { taskId: string } }
   | { type: "BackgroundTaskReportCancelled"; payload: { taskId: string; failure?: string } }
   | { type: "CheckpointCaptured"; payload: { checkpoint: Checkpoint; diff?: string } }
-  | { type: "CheckpointReverted"; payload: { checkpoint: Checkpoint } };
+  | { type: "CheckpointReverted"; payload: { checkpoint: Checkpoint } }
+  | { type: "CheckpointPartReverted"; payload: { checkpoint: Checkpoint; turnId: string; path: string; hunkIndex?: number } };
 
 export class OrchestrationEngine {
   readonly #store: EventStore;
@@ -246,6 +249,7 @@ export class OrchestrationEngine {
         commands: [],
         modeId: undefined,
         checkpoints: [],
+        revertedParts: [],
         backgroundTasks: [],
         usage: {},
       } satisfies ThreadProjection;
@@ -485,6 +489,15 @@ export class OrchestrationEngine {
       case "CheckpointReverted":
         thread.checkpoints.push(payload.checkpoint as Checkpoint);
         break;
+      case "CheckpointPartReverted":
+        thread.checkpoints.push(payload.checkpoint as Checkpoint);
+        thread.revertedParts.push({
+          turnId: String(payload.turnId),
+          path: String(payload.path),
+          ...(typeof payload.hunkIndex === "number" ? { hunkIndex: payload.hunkIndex } : {}),
+          revertedAt: event.createdAt,
+        });
+        break;
     }
   }
 
@@ -650,6 +663,8 @@ function compactThread(thread: ThreadProjection): ThreadProjection {
     ...(compacted.activeTurnId ? { turnId: compacted.activeTurnId } : {}),
   };
   compacted.backgroundTasks ??= [];
+  compacted.revertedParts ??= [];
+  compacted.revertedParts = compacted.revertedParts.slice(-500);
   compacted.messages = compacted.messages.filter((message) => message.role !== "thought");
   compacted.activity = compacted.activity.map((entry) => ({ ...entry, text: boundedText(entry.text, 4_000) }));
   compacted.tools = compacted.tools.map(compactToolCall);

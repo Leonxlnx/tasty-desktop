@@ -920,6 +920,29 @@ button:disabled { opacity: .45; cursor: default; }
 .git-diff strong { overflow: hidden; color: var(--color-text-secondary); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .git-diff button { display: grid; place-items: center; border: 0; background: transparent; color: var(--color-text-tertiary); cursor: pointer; }
 .git-diff pre { max-height: 38dvh; overflow: auto; margin: 0; padding: var(--space-3) var(--space-4) var(--space-6); background: var(--color-canvas); color: var(--color-text-secondary); font: 11px/1.55 var(--font-mono); white-space: pre; }
+.checkpoint-review { display: grid; min-height: 0; gap: var(--space-3); overflow: auto; padding: var(--space-3); }
+.checkpoint-review > header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.checkpoint-review > header > div { display: grid; gap: 2px; }
+.checkpoint-review > header strong { color: var(--color-text); font-size: var(--text-sm); }
+.checkpoint-review > header span { color: var(--color-text-tertiary); font-size: var(--text-xs); }
+.review-file { overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-1); }
+.review-file-heading, .review-hunk > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); }
+.review-file-heading { border-bottom: 1px solid var(--color-border); }
+.review-file-heading strong { overflow: hidden; color: var(--color-text-secondary); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.review-file button, .review-confirm button { border: 0; border-radius: var(--radius-sm); padding: 4px 7px; background: transparent; color: var(--color-text-tertiary); font-size: var(--text-xs); cursor: pointer; }
+.review-file button:hover:not(:disabled), .review-confirm button:hover:not(:disabled) { background: var(--color-hover); color: var(--color-text); }
+.review-file button:disabled { cursor: default; opacity: .55; }
+.review-hunk + .review-hunk { border-top: 1px solid var(--color-border); }
+.review-hunk code { overflow: hidden; color: var(--color-text-tertiary); font: 10px/1.4 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.review-hunk pre { max-height: 34dvh; overflow: auto; margin: 0; border-block: 1px solid var(--color-border); padding: var(--space-2) var(--space-3); background: var(--color-canvas); color: var(--color-text-secondary); font: 11px/1.5 var(--font-mono); }
+.review-hunk pre span { display: block; min-width: max-content; }
+.review-hunk pre .added { background: var(--color-success-muted); color: var(--color-success); }
+.review-hunk pre .removed { background: var(--color-danger-muted); color: var(--color-danger); }
+.review-hunk textarea, .review-binary textarea { width: calc(100% - var(--space-4)); min-height: 58px; resize: vertical; margin: var(--space-2); border: 1px solid transparent; border-radius: var(--radius-sm); padding: var(--space-2); background: var(--color-surface-2); color: var(--color-text); font: inherit; }
+.review-hunk textarea:focus, .review-binary textarea:focus { border-color: var(--color-border-strong); outline: 0; }
+.review-binary { display: grid; gap: var(--space-1); padding: var(--space-2); color: var(--color-text-tertiary); font-size: var(--text-xs); }
+.review-confirm { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-1); border-top: 1px solid var(--color-border); padding: var(--space-2) var(--space-3); color: var(--color-warning); font-size: var(--text-xs); }
+.review-confirm span { flex: 1; }
 
 .capability-timeline { padding: 0; }
 .capabilities-center { width: min(1080px, 100%); min-height: 100%; margin-inline: auto; padding: clamp(30px, 5vw, 64px) clamp(24px, 5vw, 60px) 72px; animation: conversation-in 180ms var(--ease-out); }

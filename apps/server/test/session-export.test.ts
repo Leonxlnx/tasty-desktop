@@ -15,7 +15,7 @@ describe("session export", () => {
       createdAt: now, updatedAt: now, running: false, activeTurnId: undefined, stopReason: "end_turn", lifecycle: { phase: "idle", updatedAt: now },
       turns: [], messages: [{ turnId: "turn-1", role: "user", text: `Read ${privatePath}\\secret.txt` }], activity: [], plan: [],
       tools: [{ toolCallId: "tool-1", title: "Read file", rawInput: { token: "secret-token" }, rawOutput: "secret-token" }],
-      approvals: [], configOptions: [], commands: [], modeId: undefined, checkpoints: [], backgroundTasks: [], usage: {},
+      approvals: [], configOptions: [], commands: [], modeId: undefined, checkpoints: [], revertedParts: [], backgroundTasks: [], usage: {},
     } satisfies ThreadProjection;
 
     const path = await exportSessionArchive(directory, [{ ...thread, queue: [{ text: "token: secret-token" }] }], [privatePath]);

@@ -88,9 +88,9 @@ ACP writes remain workspace-only. Background monitoring has one narrow Kimi-owne
 
 Local skill installation accepts only a regular Markdown file or a directory containing `SKILL.md` inside the active workspace. Each ACP session receives a built-in `skill_install_local` MCP tool bound by the server to that session's canonical workspace. The tool accepts only an absolute local source path; it has no URL, download, overwrite, update, or uninstall mode. It never installs directly: the isolated preview bridge sends a request to normal app windows, the renderer opens the existing confirmation dialog, and only explicit user confirmation calls the installer. That call revalidates symlinks, names, path containment, size, depth, and entry counts before staging the copy in the Kimi skills directory. Existing skills are never overwritten.
 
-Git checkpoints use an alternate `GIT_INDEX_FILE`, `git write-tree`, and `git commit-tree`. They do not modify the user's branch or index. Revert applies the reverse diff for one turn so work that existed before the turn remains intact.
+Git checkpoints use an alternate `GIT_INDEX_FILE`, `git write-tree`, and `git commit-tree`. They do not modify the user's branch or index. Revert applies the reverse diff for one turn so work that existed before the turn remains intact. File and hunk review uses only a server-selected part of that recorded patch, creates a safety checkpoint, asks Git to dry-run the reverse application, and persists the reverted part before updating the UI.
 
-Git manager mutations validate each path against live status before staging or unstaging. Destructive discard and reset operations are not exposed.
+Git manager mutations validate each path against live status before staging or unstaging. General destructive discard and reset operations are not exposed.
 
 ## Preview safety
 

@@ -12,6 +12,10 @@ type ToolContent = { type: string; path?: string; oldText?: string; newText?: st
 type Tool = { toolCallId: string; turnId?: string; title?: string; status?: string; content?: ToolContent[]; locations?: Array<{ path: string; line?: number }>; rawInput?: unknown; rawOutput?: unknown };
 type Approval = { requestId: string; turnId?: string; title: string; kind?: "permission" | "question" | "plan_review"; options: Array<{ optionId: string; name: string; kind: string }> };
 type Checkpoint = { turnId: string; phase: string; ref: string; commit: string; root: string; diff?: string };
+type RevertedCheckpointPart = { turnId: string; path: string; hunkIndex?: number; revertedAt: string };
+type CheckpointReviewHunk = { index: number; header: string; lines: string[] };
+type CheckpointReviewFile = { path: string; binary: boolean; canRevertHunks: boolean; hunks: CheckpointReviewHunk[] };
+type CheckpointReview = { turnId: string; files: CheckpointReviewFile[] };
 type PendingImage = { name: string; mimeType: string; data: string };
 type Usage = { context?: { used: number; size: number; cost?: { amount: number; currency: string } }; tokens?: { totalTokens: number; inputTokens: number; outputTokens: number; thoughtTokens?: number; cachedReadTokens?: number; cachedWriteTokens?: number } };
 type KimiQuotaRow = { label: string; used: number; limit: number; remaining: number; resetTime?: string; resetHint?: string };
@@ -48,7 +52,7 @@ type ThreadGoal = { objective: string; updatedAt: string };
 type Thread = {
   threadId: string; sessionId: string; provider: ProviderId; instanceId?: string; parentThreadId?: string; goal?: ThreadGoal; cwd: string; worktree?: { sourceCwd: string; branch: string }; kind: "project" | "chat"; title: string; createdAt: string; updatedAt: string; archivedAt?: string; running: boolean;
   activeTurnId: string | undefined; stopReason: string | undefined; lifecycle: TurnLifecycle; turns: TurnRecord[]; messages: Message[]; plan: Array<{ content: string; status: string }>;
-  activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; configOptions: ConfigOption[]; commands: AvailableCommand[]; modeId: string | undefined; checkpoints: Checkpoint[]; backgroundTasks: BackgroundTask[]; usage?: Usage; queue: QueuedPrompt[];
+  activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; configOptions: ConfigOption[]; commands: AvailableCommand[]; modeId: string | undefined; checkpoints: Checkpoint[]; revertedParts: RevertedCheckpointPart[]; backgroundTasks: BackgroundTask[]; usage?: Usage; queue: QueuedPrompt[];
 };
 type StoredEvent = { threadId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string };
 type RuntimeSession = { sessionId: string; cwd: string; kind?: "project" | "chat"; title?: string; updatedAt?: string };
@@ -381,6 +385,8 @@ export function App() {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [runtimeSessions, setRuntimeSessions] = useState<RuntimeSession[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string>();
+  const currentActiveThreadId = useRef<string | undefined>(activeThreadId);
+  currentActiveThreadId.current = activeThreadId;
   const [prompt, setPrompt] = useState("");
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
   const [taskNotice, setTaskNotice] = useState<{ title: string; message: string }>();
@@ -412,6 +418,9 @@ export function App() {
   const [gitStatus, setGitStatus] = useState<GitStatus>();
   const [gitStatusCwd, setGitStatusCwd] = useState<string>();
   const [gitDiff, setGitDiff] = useState<{ path: string; diff: string }>();
+  const [checkpointReview, setCheckpointReview] = useState<CheckpointReview>();
+  const [reviewComments, setReviewComments] = useState<Record<string, string>>({});
+  const [pendingReviewRevert, setPendingReviewRevert] = useState<{ path: string; hunkIndex?: number }>();
   const [commitMessage, setCommitMessage] = useState("");
   const [gitBusy, setGitBusy] = useState(false);
   const [gitRepository, setGitRepository] = useState<GitRepository>();
@@ -902,9 +911,18 @@ export function App() {
     setGitRepository(undefined);
     setGitStatusCwd(undefined);
     setGitDiff(undefined);
+    setCheckpointReview(undefined);
+    setReviewComments({});
+    setPendingReviewRevert(undefined);
     setCommitMessage("");
     setGitBusy(false);
   }, [workspaceCwd]);
+
+  useEffect(() => {
+    setCheckpointReview(undefined);
+    setReviewComments({});
+    setPendingReviewRevert(undefined);
+  }, [activeThreadId]);
 
   useEffect(() => {
     if (connection !== "connected" || !workspaceCwd) {
@@ -1952,6 +1970,42 @@ export function App() {
     }
   }
 
+  async function openCheckpointReview(turnId: string) {
+    if (!activeThread) return;
+    const threadId = activeThread.threadId;
+    setRailView("git");
+    setGitBusy(true);
+    try {
+      const review = await call("checkpoints.review", { threadId, turnId }) as CheckpointReview;
+      if (currentActiveThreadId.current !== threadId) return;
+      setCheckpointReview(review);
+      setReviewComments({});
+      setPendingReviewRevert(undefined);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    } finally { setGitBusy(false); }
+  }
+
+  async function revertCheckpointPart(path: string, hunkIndex?: number) {
+    if (!activeThread || !checkpointReview) return;
+    setGitBusy(true);
+    try {
+      await call("checkpoints.revertPart", { threadId: activeThread.threadId, turnId: checkpointReview.turnId, path, ...(hunkIndex === undefined ? {} : { hunkIndex }) });
+      setPendingReviewRevert(undefined);
+      await refreshGit();
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    } finally { setGitBusy(false); }
+  }
+
+  function addReviewFeedbackToPrompt() {
+    if (!checkpointReview) return;
+    const feedback = reviewFeedbackPrompt(checkpointReview, reviewComments);
+    if (!feedback) return;
+    setPrompt((current) => `${current}${current && !/\s$/.test(current) ? "\n\n" : ""}${feedback}`);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
   async function chooseWorkspace() {
     try {
       if (!isTauri()) throw new Error("The native folder picker is available in the desktop app");
@@ -2437,7 +2491,7 @@ export function App() {
             setShowJumpToLatest(!pinned && Boolean(activeThread && turnViews.length));
           }}>
             {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter provider={providerId} data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} profiles={preferences.agentProfiles.filter((profile) => profile.provider === providerId)} profileDraft={profileDraft} nativePlugins={providerId === "kimi" && nativeCapabilityCommands.has("plugins")} nativeMcp={providerId === "kimi" && (nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp"))} canInstallSkill={providerId === "kimi" && Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onProfileDraft={setProfileDraft} onSaveProfile={saveAgentProfile} onUseProfile={useAgentProfile} onDeleteProfile={deleteAgentProfile} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding ? <Onboarding providers={providers} selected={preferences.provider} cwd={cwd} onProvider={selectProvider} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={(provider) => void call("auth.cancel", { provider })} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !runtimeReady && (!activeThread || !turnViews.length) ? <ProviderGate provider={providerState} onInstall={() => installCli(providerId)} onLogin={() => beginLogin(providerId)} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel", { provider: providerId })} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} agentName={providerName(providerId)} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
-            {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{hiddenTurnCount > 0 && <button className="conversation-history-more" type="button" onClick={() => setVisibleTurnLimit((current) => current + initialTurnWindow)}><CaretDown /> Show {Math.min(initialTurnWindow, hiddenTurnCount)} earlier turns</button>}{visibleTurnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={() => { setRailView("git"); void refreshGit(); }} />)}</div>}
+            {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{hiddenTurnCount > 0 && <button className="conversation-history-more" type="button" onClick={() => setVisibleTurnLimit((current) => current + initialTurnWindow)}><CaretDown /> Show {Math.min(initialTurnWindow, hiddenTurnCount)} earlier turns</button>}{visibleTurnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={openCheckpointReview} />)}</div>}
           </div>
           {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}><CaretDown /> Jump to latest</button>}
         </div>
@@ -2496,8 +2550,8 @@ export function App() {
         {railResizeHandle}{railTabs}
         <div className={`rail-view rail-view-${railView}`} key={railView}>
           {railView === "git" && <>
-            <div className="rail-contextbar"><span><GitBranch /> {gitStatus?.branch ?? "Git changes"}</span><button className="rail-icon" type="button" aria-label="Refresh Git status" disabled={gitBusy} onClick={() => void refreshGit()}><ArrowsClockwise /></button></div>
-            {selectedFile && <section className="git-file-preview file-preview"><div><h2>{selectedFile.path}</h2><button type="button" aria-label="Close file preview" onClick={() => setSelectedFile(undefined)}><X /></button></div><pre>{selectedFile.content}</pre></section>}
+            <div className="rail-contextbar"><span><GitBranch /> {checkpointReview ? "Review turn changes" : gitStatus?.branch ?? "Git changes"}</span>{checkpointReview ? <button className="rail-icon" type="button" aria-label="Close turn review" onClick={() => setCheckpointReview(undefined)}><X /></button> : <button className="rail-icon" type="button" aria-label="Refresh Git status" disabled={gitBusy} onClick={() => void refreshGit()}><ArrowsClockwise /></button>}</div>
+            {checkpointReview ? <CheckpointReviewPanel review={checkpointReview} comments={reviewComments} revertedParts={activeThread?.revertedParts ?? []} busy={gitBusy} pending={pendingReviewRevert} onComment={(key, value) => setReviewComments((current) => ({ ...current, [key]: value }))} onRequestRevert={setPendingReviewRevert} onConfirmRevert={revertCheckpointPart} onCancelRevert={() => setPendingReviewRevert(undefined)} onAddFeedback={addReviewFeedbackToPrompt} /> : <>{selectedFile && <section className="git-file-preview file-preview"><div><h2>{selectedFile.path}</h2><button type="button" aria-label="Close file preview" onClick={() => setSelectedFile(undefined)}><X /></button></div><pre>{selectedFile.content}</pre></section>}
             {gitStatus ? <>
               {gitRepository && <section className="git-repository"><div className="git-branch-row"><select aria-label="Current Git branch" value={gitRepository.current} disabled={gitBusy} onChange={(event) => void updateGit("git.switchBranch", { branch: event.target.value })}>{gitRepository.branches.map((branch) => <option value={branch} key={branch}>{branch}</option>)}</select><button className="secondary" type="button" disabled={gitBusy} onClick={() => void updateGit("git.push", {})}><ArrowUp /> Push</button><button className="secondary" type="button" disabled={gitBusy || !gitStatus.upstream} onClick={() => void updateGit("git.pull", {})}><DownloadSimple /> Pull</button></div><div className="git-new-branch"><input value={branchDraft} onChange={(event) => setBranchDraft(event.target.value)} placeholder="new/branch-name" aria-label="New branch name" spellCheck={false} /><button type="button" disabled={gitBusy || !branchDraft.trim()} onClick={() => void updateGit("git.createBranch", { branch: branchDraft.trim() })}><Plus /> Create</button></div></section>}
               <div className="git-summary"><span>{gitStatus.files.length ? `${gitStatus.files.length} changed` : "Working tree clean"}</span>{gitStatus.upstream && <small>{gitStatus.ahead ? `↑${gitStatus.ahead}` : ""}{gitStatus.behind ? ` ↓${gitStatus.behind}` : ""} {gitStatus.upstream}</small>}</div>
@@ -2509,7 +2563,7 @@ export function App() {
               {gitRepository && !gitRepository.remotes.length && <details className="git-network-action"><summary>Publish repository</summary><div><input value={publishName} onChange={(event) => setPublishName(event.target.value)} placeholder="owner/repository" aria-label="GitHub repository name" /><select value={publishVisibility} onChange={(event) => setPublishVisibility(event.target.value as "private" | "public")} aria-label="Repository visibility"><option value="private">Private</option><option value="public">Public</option></select><button type="button" disabled={gitBusy || !publishName.trim()} onClick={() => void publishGit()}>Publish with GitHub CLI</button><small>This creates a remote repository and pushes the current branch. GitHub CLI sign-in is required.</small></div></details>}
               {gitStatus.upstream && <details className="git-network-action"><summary>Create pull request</summary><div><input value={pullRequest.title} onChange={(event) => setPullRequest((current) => ({ ...current, title: event.target.value }))} placeholder="Pull request title" aria-label="Pull request title" /><textarea value={pullRequest.body} onChange={(event) => setPullRequest((current) => ({ ...current, body: event.target.value }))} placeholder="Summary and test plan" aria-label="Pull request description" /><label><input type="checkbox" checked={pullRequest.draft} onChange={(event) => setPullRequest((current) => ({ ...current, draft: event.target.checked }))} /> Create as draft</label><button type="button" disabled={gitBusy || !pullRequest.title.trim()} onClick={() => void createGitPullRequest()}>Create with GitHub CLI</button></div></details>}
               {gitDiff && <section className="git-diff"><div><strong>{gitDiff.path}</strong><button type="button" onClick={() => setGitDiff(undefined)} aria-label="Close diff"><X /></button></div><pre>{gitDiff.diff || "No textual diff available."}</pre></section>}
-            </> : <div className="git-clone"><GitBranch /><strong>{gitBusy ? "Reading repository…" : "No Git repository here"}</strong><span>Clone an HTTPS or SSH repository into a folder you choose.</span><input value={cloneUrl} onChange={(event) => setCloneUrl(event.target.value)} placeholder="https://github.com/owner/repo.git" aria-label="Repository clone URL" spellCheck={false} /><button className="primary" type="button" disabled={gitBusy || !repositoryNameFromUrl(cloneUrl)} onClick={() => void cloneGitRepository()}><DownloadSimple /> Clone repository</button></div>}
+            </> : <div className="git-clone"><GitBranch /><strong>{gitBusy ? "Reading repository…" : "No Git repository here"}</strong><span>Clone an HTTPS or SSH repository into a folder you choose.</span><input value={cloneUrl} onChange={(event) => setCloneUrl(event.target.value)} placeholder="https://github.com/owner/repo.git" aria-label="Repository clone URL" spellCheck={false} /><button className="primary" type="button" disabled={gitBusy || !repositoryNameFromUrl(cloneUrl)} onClick={() => void cloneGitRepository()}><DownloadSimple /> Clone repository</button></div>}</>}
           </>}
 
           {railView === "terminal" && <>
@@ -3859,6 +3913,7 @@ export function projectTurns(thread: Thread): TurnView[] {
     if (turnId) views.get(turnId)?.approvals.push(approval);
   }
   const before = new Set<string>();
+  const partiallyReverted = new Set(thread.revertedParts.map((part) => part.turnId));
   for (const checkpoint of thread.checkpoints) {
     if (checkpoint.phase === "before") before.add(checkpoint.turnId);
     if (checkpoint.phase === "after") {
@@ -3868,9 +3923,59 @@ export function projectTurns(thread: Thread): TurnView[] {
   }
   for (const view of views.values()) {
     view.activity.sort((a, b) => a.seq - b.seq);
-    view.canRevert = Boolean(view.checkpoint && before.has(view.record.turnId));
+    view.canRevert = Boolean(view.checkpoint && before.has(view.record.turnId) && !partiallyReverted.has(view.record.turnId));
   }
   return [...views.values()];
+}
+
+function CheckpointReviewPanel({ review, comments, revertedParts, busy, pending, onComment, onRequestRevert, onConfirmRevert, onCancelRevert, onAddFeedback }: {
+  review: CheckpointReview;
+  comments: Record<string, string>;
+  revertedParts: RevertedCheckpointPart[];
+  busy: boolean;
+  pending: { path: string; hunkIndex?: number } | undefined;
+  onComment: (key: string, value: string) => void;
+  onRequestRevert: (part: { path: string; hunkIndex?: number }) => void;
+  onConfirmRevert: (path: string, hunkIndex?: number) => Promise<void>;
+  onCancelRevert: () => void;
+  onAddFeedback: () => void;
+}) {
+  const hasFeedback = Object.values(comments).some((comment) => comment.trim());
+  const reverted = (path: string, hunkIndex?: number) => revertedParts.some((part) => part.turnId === review.turnId && part.path === path
+    && (part.hunkIndex === undefined || hunkIndex === undefined || part.hunkIndex === hunkIndex));
+  const confirm = (path: string, hunkIndex?: number) => pending?.path === path && pending.hunkIndex === hunkIndex;
+  return <section className="checkpoint-review" aria-label="Turn change review">
+    <header><div><strong>{review.files.length} changed {review.files.length === 1 ? "file" : "files"}</strong><span>Comment on a hunk or reverse only that recorded turn change.</span></div><button className="secondary" type="button" disabled={!hasFeedback} onClick={onAddFeedback}><PencilSimple /> Add feedback to prompt</button></header>
+    {review.files.map((file) => {
+      const fileReverted = reverted(file.path);
+      const wholeFileReverted = revertedParts.some((part) => part.turnId === review.turnId && part.path === file.path && part.hunkIndex === undefined);
+      return <article className="review-file" key={file.path}>
+        <div className="review-file-heading"><strong>{file.path}</strong><button type="button" disabled={busy || fileReverted} onClick={() => onRequestRevert({ path: file.path })}>{wholeFileReverted ? "Reverted" : fileReverted ? "Partially reverted" : "Revert file"}</button></div>
+        {confirm(file.path) && <div className="review-confirm" role="alert"><span>Reverse this file's changes from this turn?</span><button type="button" disabled={busy} onClick={() => void onConfirmRevert(file.path)}>Revert</button><button type="button" onClick={onCancelRevert}>Cancel</button></div>}
+        {file.hunks.length ? file.hunks.map((hunk) => {
+          const key = reviewCommentKey(file.path, hunk.index);
+          const hunkReverted = reverted(file.path, hunk.index);
+          return <section className="review-hunk" key={key}>
+            <div><code>{hunk.header}</code>{file.canRevertHunks && <button type="button" disabled={busy || hunkReverted} onClick={() => onRequestRevert({ path: file.path, hunkIndex: hunk.index })}>{hunkReverted ? "Reverted" : "Revert hunk"}</button>}</div>
+            {confirm(file.path, hunk.index) && <div className="review-confirm" role="alert"><span>Reverse only this hunk?</span><button type="button" disabled={busy} onClick={() => void onConfirmRevert(file.path, hunk.index)}>Revert</button><button type="button" onClick={onCancelRevert}>Cancel</button></div>}
+            <pre>{hunk.lines.map((line, index) => <span className={line.startsWith("+") ? "added" : line.startsWith("-") ? "removed" : undefined} key={index}>{line || " "}{"\n"}</span>)}</pre>
+            <textarea aria-label={`Review comment for ${file.path} ${hunk.header}`} maxLength={4_000} value={comments[key] ?? ""} onChange={(event) => onComment(key, event.target.value)} placeholder="Leave feedback for the agent…" />
+          </section>;
+        }) : <div className="review-binary"><span>{file.binary ? "Binary change" : "Metadata-only change"}</span><textarea aria-label={`Review comment for ${file.path}`} maxLength={4_000} value={comments[reviewCommentKey(file.path)] ?? ""} onChange={(event) => onComment(reviewCommentKey(file.path), event.target.value)} placeholder="Leave feedback for the agent…" /></div>}
+      </article>;
+    })}
+    {!review.files.length && <div className="git-empty"><Check /> No recorded file changes</div>}
+  </section>;
+}
+
+export function reviewCommentKey(path: string, hunkIndex?: number): string {
+  return `${path}\u0000${hunkIndex ?? "file"}`;
+}
+
+export function reviewFeedbackPrompt(review: CheckpointReview, comments: Record<string, string>): string {
+  const items = review.files.flatMap((file) => (file.hunks.length ? file.hunks.map((hunk) => ({ path: file.path, label: hunk.header, comment: comments[reviewCommentKey(file.path, hunk.index)]?.trim() })) : [{ path: file.path, label: file.binary ? "binary change" : "metadata change", comment: comments[reviewCommentKey(file.path)]?.trim() }]))
+    .filter((item): item is { path: string; label: string; comment: string } => Boolean(item.comment));
+  return items.length ? `Review the following feedback for turn ${review.turnId}:\n\n${items.map((item) => `- ${item.path} (${item.label})\n  ${item.comment.slice(0, 4_000)}`).join("\n")}` : "";
 }
 
 function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPath, onEdit, onRespond, onRevert, onReview }: {
@@ -3882,7 +3987,7 @@ function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPat
   onEdit: (text: string) => Promise<void>;
   onRespond: (approval: Approval, optionId?: string) => void;
   onRevert: (turnId: string) => Promise<void>;
-  onReview: () => void;
+  onReview: (turnId: string) => void;
 }) {
   const user = turn.messages.filter((message) => message.role === "user" && message.origin !== "background_task");
   const { commentary, final } = turnAssistantMessages(turn);
@@ -3913,7 +4018,7 @@ function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPat
         <div className="turn-report-actions">{report && <button type="button" onClick={() => void navigator.clipboard.writeText(report)}><Copy /> Copy summary</button>}{turn.canRevert && <button type="button" onClick={() => void onRevert(turn.record.turnId)}><ArrowCounterClockwise /> Undo changes</button>}</div>
       </footer>}
       {turn.record.completedAt && previewLink && <div className="turn-preview-link"><span><i />{previewLink}</span><div><button type="button" onClick={() => onOpenPreview(previewLink)}><Browser /> Preview</button><button type="button" onClick={() => void onOpenUrl(previewLink)}><ArrowSquareOut /> Browser</button></div></div>}
-      {turn.record.completedAt && turn.checkpoint?.diff && <ChangesCard diff={turn.checkpoint.diff} onReview={onReview} />}
+      {turn.record.completedAt && turn.checkpoint?.diff && <ChangesCard diff={turn.checkpoint.diff} onReview={() => onReview(turn.record.turnId)} />}
     </div>
   </section>;
 }
@@ -4167,7 +4272,7 @@ export function applyEvents(threads: Thread[], events: StoredEvent[]): Thread[] 
   for (const event of events) {
     if (event.type === "ThreadCreated") {
       const payload = event.payload as { sessionId: string; provider?: ProviderId; instanceId?: string; parentThreadId?: string; cwd: string; worktree?: { sourceCwd: string; branch: string }; kind?: "project" | "chat"; title: string; configOptions: ConfigOption[] };
-      const created: Thread = { threadId: event.threadId, ...payload, provider: normalizeProvider(payload.provider), kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, lifecycle: { phase: "idle", updatedAt: event.createdAt }, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], backgroundTasks: [], usage: {}, queue: [] };
+      const created: Thread = { threadId: event.threadId, ...payload, provider: normalizeProvider(payload.provider), kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, lifecycle: { phase: "idle", updatedAt: event.createdAt }, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], revertedParts: [], backgroundTasks: [], usage: {}, queue: [] };
       mutable.set(event.threadId, created);
       nextThreads = [created, ...nextThreads.filter((thread) => thread.threadId !== event.threadId)];
       continue;
@@ -4289,6 +4394,7 @@ function mutateThread(next: Thread, event: StoredEvent): void {
   else if (event.type === "TurnCancelled") { const turn = next.turns.findLast((item) => item.turnId === payload.turnId); if (turn) Object.assign(turn, { completedAt: event.createdAt, stopReason: "cancelled" }); finishRendererActivity(next, String(payload.turnId), event.createdAt, true); if (next.activeTurnId === payload.turnId) { next.running = false; next.stopReason = "cancelled"; next.activeTurnId = undefined; next.lifecycle = { phase: "idle", updatedAt: event.createdAt }; } }
   else if (event.type === "CheckpointCaptured") { const checkpoint = { ...(payload.checkpoint as Checkpoint) }; if (typeof payload.diff === "string") checkpoint.diff = payload.diff; next.checkpoints.push(checkpoint); }
   else if (event.type === "CheckpointReverted") next.checkpoints.push(payload.checkpoint as Checkpoint);
+  else if (event.type === "CheckpointPartReverted") { next.checkpoints.push(payload.checkpoint as Checkpoint); next.revertedParts.push({ turnId: String(payload.turnId), path: String(payload.path), ...(typeof payload.hunkIndex === "number" ? { hunkIndex: payload.hunkIndex } : {}), revertedAt: event.createdAt }); }
 }
 
 function appendRendererThought(thread: Thread, message: Message, event: StoredEvent): void {
@@ -4396,6 +4502,7 @@ export function normalizeThread(value: Thread): Thread {
     commands: normalizeAvailableCommands(thread.commands),
     modeId: typeof thread.modeId === "string" ? thread.modeId : undefined,
     checkpoints: Array.isArray(thread.checkpoints) ? thread.checkpoints : [],
+    revertedParts: Array.isArray(thread.revertedParts) ? thread.revertedParts : [],
     backgroundTasks: Array.isArray(thread.backgroundTasks) ? thread.backgroundTasks : [],
     usage: thread.usage && typeof thread.usage === "object" ? thread.usage : {},
     queue: visibleQueuedPrompts(Array.isArray(thread.queue) ? thread.queue : []),

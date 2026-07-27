@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, joinLocalPath, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, parseProjectScripts, presentDiagnostic, profileConfigUpdates, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, repositoryNameFromUrl, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, terminalContext, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, joinLocalPath, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, parseProjectScripts, presentDiagnostic, profileConfigUpdates, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, repositoryNameFromUrl, reviewCommentKey, reviewFeedbackPrompt, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, terminalContext, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
 
 describe("global commands", () => {
   it("captures configurable shortcuts and disables conflicts", () => {
@@ -171,6 +171,16 @@ describe("turn activity", () => {
       ],
     } as never);
     expect(projectTurns(thread).map((turn) => turn.activity.map((entry) => entry.text))).toEqual([["First"], ["Second"]]);
+  });
+
+  it("disables whole-turn undo after a partial hunk revert", () => {
+    const thread = normalizeThread({
+      threadId: "thread", sessionId: "session", cwd: "E:/work", title: "Work", createdAt: "2026-07-18T10:00:00.000Z",
+      turns: [{ turnId: "turn-1", startedAt: "2026-07-18T10:00:00.000Z", completedAt: "2026-07-18T10:00:10.000Z" }],
+      checkpoints: [{ turnId: "turn-1", phase: "before", ref: "before", commit: "a", root: "E:/work" }, { turnId: "turn-1", phase: "after", ref: "after", commit: "b", root: "E:/work", diff: "patch" }],
+      revertedParts: [{ turnId: "turn-1", path: "src/a.ts", hunkIndex: 0, revertedAt: "2026-07-18T10:00:11.000Z" }],
+    } as never);
+    expect(projectTurns(thread)[0]).toMatchObject({ canRevert: false });
   });
 
   it("renders a bounded recent window while preserving access to older turns", () => {
@@ -655,6 +665,12 @@ describe("turn change summaries", () => {
       additions: 2,
       deletions: 2,
     });
+  });
+
+  it("turns only non-empty hunk comments into a follow-up prompt", () => {
+    const review = { turnId: "turn-1", files: [{ path: "src/a.ts", binary: false, canRevertHunks: true, hunks: [{ index: 0, header: "@@ -1 +1 @@", lines: ["-old", "+new"] }] }] };
+    expect(reviewFeedbackPrompt(review, { [reviewCommentKey("src/a.ts", 0)]: "Keep the old fallback." })).toBe("Review the following feedback for turn turn-1:\n\n- src/a.ts (@@ -1 +1 @@)\n  Keep the old fallback.");
+    expect(reviewFeedbackPrompt(review, {})).toBe("");
   });
 });
 

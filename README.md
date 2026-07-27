@@ -45,7 +45,7 @@ See [Provider runtimes](docs/PROVIDERS.md) for supported behavior and current li
 - Supports stop, edit and retry, copy, revert, rename, archive, restore, remove, and delete workflows
 - Shows runtime-provided models, reasoning effort, permissions, context, and Kimi quota without inventing unavailable controls
 - Projects subagent activity into an Agents panel, opens linked Codex transcripts, and stops an individual Codex subagent when its runtime turn is active
-- Includes Git branches, changes, commits, push/pull, clone, GitHub publish/PR handoff, persistent terminal tabs and splits, file inspection, and an agent-controlled localhost preview panel
+- Includes Git branches, changes, commits, push/pull, clone, GitHub publish/PR handoff, turn-level file/hunk review with feedback and safe partial revert, persistent terminal tabs and splits, file inspection, and an agent-controlled localhost preview panel
 - Includes a global command palette for actions, chats, projects, safe package scripts, and editor handoff
 - Shows a truthful provider capability matrix, stores provider-bound agent profiles, and discovers Kimi-owned skills, plugins, MCP servers, and agent shortcuts
 - Persists a compact local event projection for crash recovery and long sessions

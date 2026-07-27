@@ -71,6 +71,8 @@ Agent profiles, permissions, models, reasoning levels, subagents, skills, MCP se
 - Present per-turn file trees and hunks with file/hunk revert and review comments.
 - Preserve the user's pre-existing index and dirty work.
 
+Status: complete. The Git workspace covers status, staged and unstaged diffs, stage/unstage, commits, branches, push, fast-forward pull, clone, private-first publish, and draft pull requests. Each completed agent turn exposes its checkpoint diff as files and hunks. Review comments can be collected into a follow-up prompt, while file or hunk reversal is selected only from the server-owned turn patch, dry-run checked by Git, preceded by a safety checkpoint, confirmed inline, and persisted in the thread projection. General reset and discard controls remain intentionally absent.
+
 ### 6. Extensions and agents
 
 - Normalize skills, MCP servers, plugins, and commands across supported providers while preserving provider ownership.
