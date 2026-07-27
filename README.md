@@ -48,6 +48,7 @@ See [Provider runtimes](docs/PROVIDERS.md) for supported behavior and current li
 - Includes a global command palette for actions, chats, projects, safe package scripts, and editor handoff
 - Shows a truthful provider capability matrix, stores provider-bound agent profiles, and discovers Kimi-owned skills, plugins, MCP servers, and agent shortcuts
 - Persists a compact local event projection for crash recovery and long sessions
+- Schedules explicit tasks in existing chats, provides a paired headless CLI, and exports redacted private chat archives
 - Supports configurable theme, typography, density, panel placement, and panel sizing
 - Uses signed in-app updates with an explicit install and restart action
 
@@ -143,6 +144,7 @@ Documentation:
 - [User guide](docs/USER_GUIDE.md)
 - [Provider runtimes](docs/PROVIDERS.md)
 - [Private remote access](docs/REMOTE_ACCESS.md)
+- [Automation, headless control, and private exports](docs/AUTOMATION.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Design system](docs/DESIGN.md)
 - [T3 Code research notes](docs/T3_CODE_RESEARCH.md)

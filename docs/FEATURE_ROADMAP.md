@@ -116,6 +116,8 @@ Status: complete. A separate private `tasty-remote` repository contains an insta
 - Add persisted schedules with explicit workspace, provider, permissions, and next-run state.
 - Export redacted private session archives and local notification events.
 
+Status: complete. The local headless CLI pairs as a normal revocable remote device and exposes list, queue, steer, stop, and watch without a privileged bypass. Persisted schedules retain the target workspace, provider instance, permission mode, recurrence, and next-run state, skip missed-run backlogs, and refuse changed boundaries. The desktop UI manages schedules and writes explicit redacted chat archives locally. Completion, failure, background-task, and schedule events use one bounded notification channel.
+
 ### 12. UI, accessibility, and performance
 
 - Refine the existing graphite design system instead of replacing it.

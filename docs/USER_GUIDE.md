@@ -136,6 +136,14 @@ Screenshot capture launches an isolated temporary Microsoft Edge profile. It doe
 
 Remote control is off by default. **Settings → Remote access** can start a separate loopback or LAN listener, create a ten-minute one-time pairing code, and revoke paired devices. Prefer a user-owned private network such as Tailscale or a TLS reverse proxy. Tasty never opens a firewall or router port and does not expose a public relay. See [Remote access](REMOTE_ACCESS.md) for the protocol and security boundary.
 
+## Schedules, headless control, and exports
+
+Open the target chat, then select **Scheduled** in the sidebar. Once, Daily, and Weekly tasks retain that chat's workspace, provider instance, and permission mode. Tasty refuses a run when those boundaries changed. Missed recurring slots advance without replaying a backlog. The desktop service must be running and the computer awake when a task is due.
+
+The paired headless CLI can list chats, queue or steer work, stop a turn, and watch events through the same restricted remote contract as a companion device. It has no terminal, filesystem, Git, schedule, export, or diagnostic access. See [Automation](AUTOMATION.md) for pairing and command examples.
+
+Use **Settings → Diagnostics** to export one chat or all chats as a local, redacted JSON archive. The archive excludes session IDs, raw tool payloads, known private paths, and recognizable credentials, but it still contains conversation text. Review it before sharing. Nothing is uploaded automatically.
+
 ## Usage and context
 
 Context usage comes from Kimi ACP events or local Kimi session records. Subscription quota comes from the official Kimi CLI `/usage` panel. The desktop app parses only the percentage and reset rows rendered by that panel.
@@ -150,7 +158,7 @@ Published update packages are verified with Tauri updater signatures. Windows Sm
 
 ## Troubleshooting
 
-Settings includes **Diagnostics > Export support bundle**. The JSON file is saved locally and contains bounded, redacted runtime errors plus version and active-work counts. It is never uploaded automatically. Review it before sharing.
+Settings includes **Diagnostics > Export support bundle**. The JSON file is saved locally and contains bounded, redacted runtime errors plus version and active-work counts. It is never uploaded automatically. Review it before sharing. Private chat exports are separate and deliberately include redacted conversation history.
 
 ### No model is available
 
