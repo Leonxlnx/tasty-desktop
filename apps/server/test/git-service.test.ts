@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -88,7 +88,7 @@ describe("GitService", () => {
 
     const service = new GitService(git);
     const worktree = await service.createWorktree(root, join(storage, "chat-1"), "chat-1");
-    expect(worktree).toMatchObject({ sourceCwd: root, branch: "tasty/chat-1" });
+    expect(worktree).toMatchObject({ sourceCwd: await realpath(root), branch: "tasty/chat-1" });
     expect((await readFile(join(worktree.cwd, "tracked.txt"), "utf8")).replaceAll("\r\n", "\n")).toBe("base\n");
     expect((await exec(git, ["-C", worktree.cwd, "branch", "--show-current"])).stdout.trim()).toBe(worktree.branch);
 
