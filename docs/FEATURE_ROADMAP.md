@@ -108,6 +108,8 @@ Status: complete. A disabled-by-default secondary listener supports loopback or 
 - Support projects, chats, streaming activity, queue/steer/stop, approvals, notifications, and connection recovery.
 - Keep an APK wrapper optional until the PWA protocol and UX are stable.
 
+Status: complete. A separate private `tasty-remote` repository contains an installable, mobile-first PWA with direct pairing, authenticated reconnect, project and standalone chats, streaming activity refresh, queue/steer/stop, approvals, background notifications, offline shell caching, restrictive CSP, protocol tests, and passing CI. No APK wrapper or app-store dependency was added; the PWA is the stable protocol client first.
+
 ### 11. Headless automation and export
 
 - Add a local headless CLI over the same authenticated contracts.

@@ -44,3 +44,7 @@ Remote devices cannot manage provider login, application updates, remote configu
 ## Recovery
 
 The device token survives desktop restarts. A companion reconnects with bounded backoff, calls `env.bootstrap`, and resumes from the durable thread projection. If a device is revoked or the remote endpoint is disabled, it must pair again from the desktop app.
+
+## Companion client
+
+The reference Tasty Remote companion is a private, dependency-free mobile PWA. It implements pairing, authenticated reconnect, projects and standalone chats, live agent activity, queue and steer, stop, approvals, notifications, and offline app-shell caching. It has no analytics, third-party runtime scripts, or public relay. The repository remains private while the protocol and distribution model are validated; an APK wrapper is intentionally deferred because the installable PWA already exercises the complete remote contract.
