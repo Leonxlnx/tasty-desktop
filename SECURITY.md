@@ -28,7 +28,7 @@ Include the app version, Windows version, reproduction steps, impact, and whethe
 Tasty delegates authentication, model access, and sessions to installed official provider CLIs. Kimi also remains authoritative for its commands, skills, subagents, MCP configuration, and subscription quota. Tasty must never read or copy credential contents.
 If a CLI is missing, onboarding opens that provider's official installation guide only after a user click. It never downloads or executes a remote installation script.
 
-The local orchestration service:
+The primary local orchestration service:
 
 - Binds only to `127.0.0.1`
 - Validates the Tauri or configured development origin
@@ -39,6 +39,8 @@ The local orchestration service:
 - Treats `skill_install_local` as a request only: the preview bridge cannot invoke installation RPCs, and a normal app window must show and receive explicit confirmation before the existing installer runs
 - Attaches MCP definitions only from the user's Kimi home; repository MCP files are redacted for review and never auto-executed
 - Keeps sensitive MCP configuration out of the renderer
+
+Optional remote access uses a separate listener that is disabled by default. Enabling it requires a local desktop action. Pairing codes are single-use and expire after ten minutes; device tokens are random, stored only as hashes, rate-limited, and individually revocable. Remote devices receive a restricted chat-control method set and cannot invoke login, update, terminal, Git, filesystem, skill-installation, diagnostics-export, or remote-administration methods. Tasty does not open firewall or router ports and does not provide a public relay. Users must provide a trusted private network or TLS termination before using remote access outside a trusted LAN.
 
 Background-task records must resolve beneath the matching Kimi session and contain a validated finite task identifier. Monitoring expires after 24 hours and excludes tools that explicitly disable their timeout. A recovered completion can be queued at least once after a crash; callers must not treat the follow-up as exactly-once external delivery.
 

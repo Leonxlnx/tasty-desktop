@@ -784,6 +784,23 @@ button:disabled { opacity: .45; cursor: default; }
 .settings-note { color: var(--color-text-tertiary); font-size: var(--text-xs); line-height: 1.55; }
 .environment-status { display: inline-flex; min-height: 26px; align-items: center; border: 1px solid var(--color-border); border-radius: var(--radius-pill); padding: 0 9px; color: var(--color-text-tertiary); font-size: var(--text-xs); }
 .environment-status.healthy { border-color: color-mix(in srgb, var(--color-success) 35%, var(--color-border)); color: var(--color-success); }
+.remote-port { width: 108px; }
+.remote-addresses { display: flex; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-4) var(--space-4) 0; }
+.remote-addresses code { border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 5px 8px; color: var(--color-text-secondary); font-size: var(--text-xs); }
+.remote-pairing { display: grid; gap: 4px; margin: var(--space-4); border: 1px solid color-mix(in srgb, var(--color-focus) 38%, var(--color-border)); border-radius: var(--radius-md); padding: var(--space-4); background: color-mix(in srgb, var(--color-focus) 5%, var(--color-surface-1)); }
+.remote-pairing small { color: var(--color-text-tertiary); font-size: var(--text-xs); }
+.remote-pairing strong { font-family: var(--font-mono); font-size: var(--text-xl); letter-spacing: .12em; }
+.remote-device-list { display: grid; }
+.remote-device-list > div { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-height: 62px; padding: 9px var(--space-4); border-bottom: 1px solid var(--color-border); }
+.remote-device-list > div > svg { width: 18px; height: 18px; color: var(--color-text-tertiary); }
+.remote-device-list span { display: grid; gap: 2px; }
+.remote-device-list small, .remote-device-list > p { color: var(--color-text-tertiary); font-size: var(--text-xs); }
+.remote-device-list > p { margin: var(--space-4); }
+.remote-actions { display: flex; justify-content: flex-end; gap: var(--space-2); padding: var(--space-4); }
+.remote-audit-list { display: grid; }
+.remote-audit-list > div { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: var(--space-4); padding: 8px var(--space-4); border-bottom: 1px solid var(--color-border); }
+.remote-audit-list span { color: var(--color-text-secondary); font-size: var(--text-sm); text-transform: capitalize; }
+.remote-audit-list small { overflow: hidden; color: var(--color-text-tertiary); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .settings-usage .quota-panel { border-radius: var(--radius-lg); }
 .settings-usage > .settings-note { margin: var(--space-3) 2px 0; }
 .about-settings { padding: var(--space-6); text-align: center; }

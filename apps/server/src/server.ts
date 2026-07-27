@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { mkdir, realpath } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, networkInterfaces } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ContentBlock, SessionConfigOption } from "@agentclientprotocol/sdk";
@@ -29,6 +29,7 @@ import { providerDescriptors, providerName, readProviderInstances, requireProvid
 import { ProviderAuthService, type ProviderAuthEvent } from "./provider-auth.js";
 import { DiagnosticJournal, redactDiagnosticText, type DiagnosticLevel } from "./diagnostics.js";
 import { WslEnvironments } from "./wsl-environments.js";
+import { RemoteAccess, remoteMethodAllowed, remoteProtocolToken, type RemoteConfig, type RemoteDevice } from "./remote-access.js";
 import {
   BackgroundTaskMonitor,
   MAX_ACTIVE_BACKGROUND_TASKS,
@@ -113,6 +114,10 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("diagnostics.snapshot"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("diagnostics.export"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("environments.list"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("remote.status"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("remote.configure"), params: z.object({ enabled: z.boolean(), bind: z.enum(["127.0.0.1", "0.0.0.0"]), port: z.number().int().min(1024).max(65_535) }) }),
+  z.object({ id, method: z.literal("remote.createPairing"), params: z.object({}).default({}) }),
+  z.object({ id, method: z.literal("remote.revokeDevice"), params: z.object({ deviceId: z.string().uuid() }) }),
   z.object({ id, method: z.literal("capabilities.list"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), cwd: z.string().min(1).optional() }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("skills.install"), params: z.object({ cwd: z.string().min(1), source: z.string().min(1) }) }),
 ]);
@@ -158,7 +163,12 @@ const configDefaults = new ConfigDefaults(join(dataHome, "runtime-defaults.json"
 const git = new GitService(findGitBinary());
 const terminal = new TerminalService();
 const wsl = new WslEnvironments();
+const remoteAccess = new RemoteAccess(join(dataHome, "remote-access.json"));
+await remoteAccess.open();
 const socketTerminals = new WeakMap<WebSocket, Set<string>>();
+const remoteDeviceSockets = new Map<string, Set<WebSocket>>();
+const remoteConnections = new Set<WebSocket>();
+let remoteServer: WebSocketServer | undefined;
 type QueuedTurn = {
   queuedId: string;
   text: string;
@@ -559,6 +569,30 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     }
     if (request.method === "environments.list") {
       reply(socket, request.id, { environments: await wsl.list() });
+      return;
+    }
+    if (request.method === "remote.status") {
+      reply(socket, request.id, remoteStatus());
+      return;
+    }
+    if (request.method === "remote.configure") {
+      const config = request.params as RemoteConfig;
+      const previous = remoteAccess.status().config;
+      await replaceRemoteServer(config);
+      try { await remoteAccess.configure(config); }
+      catch (error) { await replaceRemoteServer(previous); throw error; }
+      reply(socket, request.id, remoteStatus());
+      return;
+    }
+    if (request.method === "remote.createPairing") {
+      if (!remoteServer) throw new Error("Remote access must be enabled before pairing a device");
+      reply(socket, request.id, { ...remoteAccess.createPairing(), status: remoteStatus() });
+      return;
+    }
+    if (request.method === "remote.revokeDevice") {
+      await remoteAccess.revoke(request.params.deviceId);
+      for (const remote of remoteDeviceSockets.get(request.params.deviceId) ?? []) remote.close(4003, "Device revoked");
+      reply(socket, request.id, remoteStatus());
       return;
     }
     if (request.method === "capabilities.list") {
@@ -1488,6 +1522,150 @@ function rememberLiveConfigOptions(options: SessionConfigOption[]): Promise<void
   return configDefaults.update(options);
 }
 
+const pairClaimSchema = z.object({ id, method: z.literal("remote.claim"), params: z.object({ code: z.string().min(8).max(12), name: z.string().trim().min(1).max(80) }) });
+
+function remoteStatus(): ReturnType<RemoteAccess["status"]> & { listening: boolean; addresses: string[] } {
+  const status = remoteAccess.status();
+  const hosts = status.config.bind === "0.0.0.0"
+    ? Object.values(networkInterfaces()).flat().filter((address) => address?.family === "IPv4" && !address.internal).map((address) => address!.address)
+    : ["127.0.0.1"];
+  return { ...status, listening: Boolean(remoteServer), addresses: status.config.enabled ? [...new Set(hosts)].map((host) => `ws://${host}:${status.config.port}`) : [] };
+}
+
+async function replaceRemoteServer(config: RemoteConfig): Promise<void> {
+  const previous = remoteAccess.status().config;
+  await stopRemoteServer();
+  try {
+    if (config.enabled) await startRemoteServer(config);
+  } catch (error) {
+    if (previous.enabled) await startRemoteServer(previous).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function stopRemoteServer(): Promise<void> {
+  const current = remoteServer;
+  remoteServer = undefined;
+  if (!current) return;
+  for (const socket of remoteConnections) socket.terminate();
+  await new Promise<void>((resolveClose) => current.close(() => resolveClose()));
+}
+
+async function startRemoteServer(config: RemoteConfig): Promise<void> {
+  if (remoteServer) throw new Error("Remote access is already listening");
+  const verifyRemote: VerifyClientCallbackSync = ({ req }) => {
+    const path = new URL(req.url ?? "/", "ws://localhost").pathname;
+    const address = req.socket.remoteAddress ?? "unknown";
+    if (path === "/pair") return remoteAccess.allow(`pair-open:${address}`, 30);
+    const protocols = req.headers["sec-websocket-protocol"];
+    const offered = typeof protocols === "string" && protocols.split(",").some((protocol) => protocol.trim() === "tasty.remote.v1");
+    return path === "/remote" && offered && Boolean(remoteAccess.authenticate(remoteProtocolToken(protocols)));
+  };
+  const candidate = new WebSocketServer({
+    host: config.bind,
+    port: config.port,
+    maxPayload: 8 * 1024 * 1024,
+    handleProtocols: (protocols) => protocols.has("tasty.remote.v1") ? "tasty.remote.v1" : false,
+    verifyClient: verifyRemote,
+  });
+  await new Promise<void>((resolveListen, reject) => {
+    const failed = (error: Error) => reject(error);
+    candidate.once("error", failed);
+    candidate.once("listening", () => { candidate.off("error", failed); resolveListen(); });
+  }).catch(async (error) => {
+    await new Promise<void>((resolveClose) => candidate.close(() => resolveClose())).catch(() => undefined);
+    throw error;
+  });
+  remoteServer = candidate;
+  candidate.on("error", (error) => emitDiagnostic("error", error, "remote-access"));
+  candidate.on("connection", (socket, request) => handleRemoteConnection(socket, request.url, request.headers["sec-websocket-protocol"], request.socket.remoteAddress ?? "unknown"));
+}
+
+function handleRemoteConnection(socket: WebSocket, requestUrl: string | undefined, protocols: string | string[] | undefined, address: string): void {
+  remoteConnections.add(socket);
+  const pairing = new URL(requestUrl ?? "/", "ws://localhost").pathname === "/pair";
+  let device = pairing ? undefined : remoteAccess.authenticate(remoteProtocolToken(protocols));
+  if (device) attachRemoteSocket(socket, device);
+  else socket.send(JSON.stringify({ channel: "remote.pairRequired", seq: 1, payload: { protocolVersion: 1 } }));
+
+  socket.on("message", (data) => {
+    let requestId: string | number | undefined;
+    void (async () => {
+      const input = JSON.parse(data.toString()) as unknown;
+      if (input && typeof input === "object" && "id" in input && (typeof input.id === "string" || typeof input.id === "number")) requestId = input.id;
+      if (!device) {
+        if (!remoteAccess.allow(`pair-claim:${address}`, 8)) throw new Error("Too many pairing attempts; wait one minute");
+        const claim = pairClaimSchema.parse(input);
+        const paired = await remoteAccess.claimPairing(claim.params.code, claim.params.name);
+        device = paired.device;
+        reply(socket, claim.id, { device: paired.device, token: paired.token });
+        attachRemoteSocket(socket, device);
+        return;
+      }
+      if (!remoteAccess.allow(`device:${device.id}`, 240)) {
+        await remoteAccess.audit("device.rate_limited", device.id);
+        socket.close(4008, "Rate limit exceeded");
+        return;
+      }
+      if (!remoteMethodAllowed(input)) {
+        const requestId = input && typeof input === "object" && "id" in input && (typeof input.id === "string" || typeof input.id === "number") ? input.id : "remote";
+        const method = input && typeof input === "object" && "method" in input && typeof input.method === "string" ? input.method : "unknown";
+        await remoteAccess.audit("method.denied", device.id, method);
+        reply(socket, requestId, undefined, { code: -32601, message: "This method is not available to remote devices" });
+        return;
+      }
+      assertRemoteScope(input);
+      await handle(socket, input);
+    })().catch(async (error) => {
+      await remoteAccess.audit("request.rejected", device?.id, error instanceof Error ? error.message : String(error));
+      socket.send(JSON.stringify({ ...(requestId !== undefined ? { id: requestId } : {}), error: { code: -32600, message: error instanceof Error ? error.message : String(error) } }));
+    });
+  });
+  socket.on("close", () => {
+    remoteConnections.delete(socket);
+    sockets.delete(socket);
+    if (!device) return;
+    const connected = remoteDeviceSockets.get(device.id);
+    connected?.delete(socket);
+    if (!connected?.size) remoteDeviceSockets.delete(device.id);
+    void remoteAccess.audit("device.disconnected", device.id);
+  });
+}
+
+function assertRemoteScope(input: unknown): void {
+  const request = input as { method?: unknown; params?: Record<string, unknown> };
+  const params = request.params && typeof request.params === "object" ? request.params : {};
+  if (request.method === "threads.create") {
+    if (params.standalone === true) return;
+    if (typeof params.cwd !== "string" || !knownRemoteWorkspace(params.cwd)) throw new Error("Remote devices can create project chats only in an existing Tasty workspace");
+  }
+  if (request.method === "threads.list" && typeof params.cwd === "string" && !knownRemoteWorkspace(params.cwd)) {
+    throw new Error("Remote thread filtering is limited to existing Tasty workspaces");
+  }
+  if (request.method === "threads.resume") {
+    const thread = typeof params.threadId === "string" ? engine.thread(params.threadId) : undefined;
+    if (!thread || params.sessionId !== thread.sessionId || typeof params.cwd !== "string" || comparablePath(params.cwd) !== comparablePath(thread.cwd)) throw new Error("Remote devices can resume only an existing matching Tasty thread");
+  }
+  if (request.method === "capabilities.list" && typeof params.cwd === "string" && !knownRemoteWorkspace(params.cwd)) {
+    throw new Error("Remote capability inspection is limited to existing Tasty workspaces");
+  }
+}
+
+function knownRemoteWorkspace(cwd: string): boolean {
+  const candidate = comparablePath(cwd);
+  return engine.threads().some((thread) => comparablePath(thread.cwd) === candidate || (thread.worktree && comparablePath(thread.worktree.sourceCwd) === candidate));
+}
+
+function attachRemoteSocket(socket: WebSocket, device: RemoteDevice): void {
+  const connected = remoteDeviceSockets.get(device.id) ?? new Set<WebSocket>();
+  connected.add(socket);
+  remoteDeviceSockets.set(device.id, connected);
+  sockets.add(socket);
+  socketSeq.set(socket, 0);
+  sendPush(socket, "server.welcome", { defaultCwd, protocolVersion: 1, remote: true, device: { id: device.id, name: device.name } });
+  void remoteAccess.seen(device.id);
+}
+
 const verifyClient: VerifyClientCallbackSync = ({ origin, req }) => isAuthorizedSocketRequest(origin, req.url, serverToken)
   || isPreviewBridgeRequest(req.url, previewBridgeToken);
 const server = new WebSocketServer({ host: "127.0.0.1", port, verifyClient });
@@ -1514,6 +1692,9 @@ server.on("connection", (socket, request) => {
   });
 });
 server.on("listening", () => console.log(`Tasty orchestration server listening on ws://127.0.0.1:${port}`));
+if (remoteAccess.status().config.enabled) {
+  await startRemoteServer(remoteAccess.status().config).catch((error) => emitDiagnostic("error", `Remote access could not start: ${error instanceof Error ? error.message : String(error)}`, "remote-access"));
+}
 
 function resolveKimiBinary(): string {
   if (process.env.KIMI_BINARY) {

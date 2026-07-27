@@ -78,7 +78,7 @@ Global shortcuts, the idle send shortcut, and the external editor can be changed
 
 ## Privacy and security
 
-- The orchestration service binds only to `127.0.0.1`.
+- The primary orchestration service binds only to `127.0.0.1`. Optional remote access uses a separate, disabled-by-default listener with one-time pairing and revocable device tokens.
 - Packaged renderer connections require a random per-launch token.
 - Provider credentials stay in each official CLI's own account store.
 - File access is workspace-bound, text-only, and size-limited.
@@ -142,6 +142,7 @@ Documentation:
 
 - [User guide](docs/USER_GUIDE.md)
 - [Provider runtimes](docs/PROVIDERS.md)
+- [Private remote access](docs/REMOTE_ACCESS.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Design system](docs/DESIGN.md)
 - [T3 Code research notes](docs/T3_CODE_RESEARCH.md)

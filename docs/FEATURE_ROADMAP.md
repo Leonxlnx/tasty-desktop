@@ -100,6 +100,8 @@ Status: complete. Named ACP instances can execute Kimi, Cursor, or OpenCode insi
 - Add expiring one-time pairing, revocable device sessions, authenticated WebSocket reconnect, rate limits, and audit events.
 - Support LAN or private-network access; recommend a user-owned TLS/private-network layer instead of shipping a public relay prematurely.
 
+Status: complete. A disabled-by-default secondary listener supports loopback or private LAN binding, ten-minute single-use pairing, hashed and revocable device sessions, authenticated reconnect, per-source and per-device rate limits, bounded audit records, and a restricted remote method surface. Tasty does not change firewall/router state or ship a public relay; the UI and documentation recommend a user-owned private network or TLS termination.
+
 ### 10. Mobile companion
 
 - Create a private mobile-first PWA repository that pairs with a Tasty environment.

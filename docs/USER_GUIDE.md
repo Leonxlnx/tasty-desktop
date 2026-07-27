@@ -132,6 +132,10 @@ App preview accepts only local URLs whose hostname is exactly `localhost` or `12
 
 Screenshot capture launches an isolated temporary Microsoft Edge profile. It does not reuse personal cookies, extensions, tabs, or logged-in sessions.
 
+## Remote control
+
+Remote control is off by default. **Settings → Remote access** can start a separate loopback or LAN listener, create a ten-minute one-time pairing code, and revoke paired devices. Prefer a user-owned private network such as Tailscale or a TLS reverse proxy. Tasty never opens a firewall or router port and does not expose a public relay. See [Remote access](REMOTE_ACCESS.md) for the protocol and security boundary.
+
 ## Usage and context
 
 Context usage comes from Kimi ACP events or local Kimi session records. Subscription quota comes from the official Kimi CLI `/usage` panel. The desktop app parses only the percentage and reset rows rendered by that panel.

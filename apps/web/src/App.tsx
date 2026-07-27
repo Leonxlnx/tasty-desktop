@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { Archive, ArrowCounterClockwise, ArrowSquareOut, ArrowsClockwise, ArrowUp, Brain, Browser, Broom, Bug, CaretDown, CaretRight, ChatCircleDots, Check, Circle, Copy, CornersIn, CornersOut, Cpu, DotsThree, DownloadSimple, FileText, FolderOpen, FolderSimple, Gauge, GearSix, GitBranch, GitCommit, Hammer, ImageSquare, Info, MagnifyingGlass, Minus, Palette, PaperPlaneRight, Paperclip, PencilSimple, PlugsConnected, Plus, Robot, ShieldCheck, SidebarSimple, SignIn, SignOut, SlidersHorizontal, Square, Stop, TerminalWindow, Trash, UserCircle, WarningCircle, X } from "@phosphor-icons/react";
+import { Archive, ArrowCounterClockwise, ArrowSquareOut, ArrowsClockwise, ArrowUp, Brain, Browser, Broom, Bug, CaretDown, CaretRight, ChatCircleDots, Check, Circle, Copy, CornersIn, CornersOut, Cpu, DeviceMobile, DotsThree, DownloadSimple, FileText, FolderOpen, FolderSimple, Gauge, GearSix, GitBranch, GitCommit, Hammer, ImageSquare, Info, MagnifyingGlass, Minus, Palette, PaperPlaneRight, Paperclip, PencilSimple, PlugsConnected, Plus, Robot, ShieldCheck, SidebarSimple, SignIn, SignOut, SlidersHorizontal, Square, Stop, TerminalWindow, Trash, UserCircle, WarningCircle, X } from "@phosphor-icons/react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -65,6 +65,10 @@ type ProviderState = {
 };
 type ProviderInstance = { id: string; name: string; provider: ProviderId; installed: boolean; runtimeReady?: boolean; environment?: string };
 type WslEnvironment = { name: string; system: boolean; healthy: boolean; message?: string };
+type RemoteConfig = { enabled: boolean; bind: "127.0.0.1" | "0.0.0.0"; port: number };
+type RemoteDevice = { id: string; name: string; createdAt: string; lastSeenAt?: string; revokedAt?: string };
+type RemoteStatus = { config: RemoteConfig; devices: RemoteDevice[]; audit: Array<{ id: string; at: string; action: string; deviceId?: string; detail?: string }>; listening: boolean; addresses: string[] };
+type RemotePairing = { code: string; expiresAt: string };
 type Preferences = {
   density: "comfortable" | "compact";
   sendKey: "enter" | "ctrl-enter";
@@ -102,7 +106,7 @@ type ConfigUpdate = { targetKey: string; configId: string; requestId: number };
 type UpdateStatus = { phase: "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error"; version?: string; currentVersion?: string; percent?: number; message?: string };
 type RailView = "git" | "terminal" | "preview" | "agents";
 type AppMenu = "file" | "edit" | "view" | "help";
-type SettingsCategory = "general" | "appearance" | "layout" | "account" | "environments" | "usage" | "updates" | "diagnostics" | "about";
+type SettingsCategory = "general" | "appearance" | "layout" | "account" | "environments" | "remote" | "usage" | "updates" | "diagnostics" | "about";
 type KeybindingAction = "palette" | "newChat" | "openFolder" | "toggleSidebar" | "terminal" | "settings";
 type ProjectScript = { name: string; command: string };
 type TerminalSessionInfo = { sessionId: string; cwd: string; shell: string };
@@ -383,6 +387,9 @@ export function App() {
   const [providers, setProviders] = useState<ProviderState[]>([]);
   const [providerInstances, setProviderInstances] = useState<ProviderInstance[]>([]);
   const [wslEnvironments, setWslEnvironments] = useState<WslEnvironment[]>([]);
+  const [remoteStatus, setRemoteStatus] = useState<RemoteStatus>();
+  const [remotePairing, setRemotePairing] = useState<RemotePairing>();
+  const [remoteBusy, setRemoteBusy] = useState(false);
   const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
   const [images, setImages] = useState<PendingImage[]>([]);
   const [selectedFile, setSelectedFile] = useState<{ path: string; content: string }>();
@@ -769,11 +776,43 @@ export function App() {
     const result = await call("environments.list") as { environments: WslEnvironment[] };
     setWslEnvironments(result.environments);
   }, [call]);
+  const refreshRemote = useCallback(async () => {
+    try { setRemoteStatus(await call("remote.status") as RemoteStatus); }
+    catch (error) { setDiagnostic(`Could not inspect remote access: ${error instanceof Error ? error.message : String(error)}`); }
+  }, [call, setDiagnostic]);
+  const configureRemote = useCallback(async (config: RemoteConfig) => {
+    setRemoteBusy(true);
+    try {
+      setRemoteStatus(await call("remote.configure", config) as RemoteStatus);
+      setRemotePairing(undefined);
+    } catch (error) { setDiagnostic(`Remote access could not be configured: ${error instanceof Error ? error.message : String(error)}`); }
+    finally { setRemoteBusy(false); }
+  }, [call, setDiagnostic]);
+  const createRemotePairing = useCallback(async () => {
+    setRemoteBusy(true);
+    try {
+      const result = await call("remote.createPairing") as RemotePairing & { status: RemoteStatus };
+      setRemotePairing({ code: result.code, expiresAt: result.expiresAt });
+      setRemoteStatus(result.status);
+    } catch (error) { setDiagnostic(`Could not create a pairing code: ${error instanceof Error ? error.message : String(error)}`); }
+    finally { setRemoteBusy(false); }
+  }, [call, setDiagnostic]);
+  const revokeRemoteDevice = useCallback(async (deviceId: string) => {
+    setRemoteBusy(true);
+    try { setRemoteStatus(await call("remote.revokeDevice", { deviceId }) as RemoteStatus); }
+    catch (error) { setDiagnostic(`Could not revoke the remote device: ${error instanceof Error ? error.message : String(error)}`); }
+    finally { setRemoteBusy(false); }
+  }, [call, setDiagnostic]);
 
   useEffect(() => {
     if (!settingsOpen || settingsCategory !== "environments") return;
     void refreshEnvironments().catch((error) => setDiagnostic(`Could not inspect WSL environments: ${error instanceof Error ? error.message : String(error)}`));
   }, [refreshEnvironments, setDiagnostic, settingsCategory, settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsCategory !== "remote") return;
+    void refreshRemote();
+  }, [refreshRemote, settingsCategory, settingsOpen]);
   const recoverLocalServer = useCallback(async (force = false) => {
     if (serverRestarting.current) return;
     serverRestarting.current = true;
@@ -2491,6 +2530,9 @@ export function App() {
         auth={auth}
         providers={providers}
         environments={wslEnvironments}
+        remote={remoteStatus}
+        remotePairing={remotePairing}
+        remoteBusy={remoteBusy}
         selectedProvider={preferences.provider}
         cwd={cwd}
         quota={quota}
@@ -2511,6 +2553,10 @@ export function App() {
         onInstallUpdate={installUpdate}
         onExportDiagnostics={exportDiagnostics}
         onRefreshEnvironments={refreshEnvironments}
+        onRefreshRemote={refreshRemote}
+        onConfigureRemote={configureRemote}
+        onCreateRemotePairing={createRemotePairing}
+        onRevokeRemoteDevice={revokeRemoteDevice}
         onShowOnboarding={() => { setShowOnboarding(true); setSettingsOpen(false); setSettingsQuery(""); }}
       />}
       {manageDialog && <ManageItemDialog dialog={manageDialog} onCancel={() => setManageDialog(undefined)} onConfirm={confirmManageAction} />}
@@ -2943,13 +2989,16 @@ export function applyDraftConfig(defaults: ConfigOption[], draft: Record<string,
   return defaults.map((option) => draft[option.id] !== undefined ? { ...option, currentValue: draft[option.id]! } : option);
 }
 
-function SettingsDialog({ category, query, preferences, auth, providers, environments, selectedProvider, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onExportDiagnostics, onRefreshEnvironments, onShowOnboarding }: {
+function SettingsDialog({ category, query, preferences, auth, providers, environments, remote, remotePairing, remoteBusy, selectedProvider, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onExportDiagnostics, onRefreshEnvironments, onRefreshRemote, onConfigureRemote, onCreateRemotePairing, onRevokeRemoteDevice, onShowOnboarding }: {
   category: SettingsCategory;
   query: string;
   preferences: Preferences;
   auth: AuthState | undefined;
   providers: ProviderState[];
   environments: WslEnvironment[];
+  remote: RemoteStatus | undefined;
+  remotePairing: RemotePairing | undefined;
+  remoteBusy: boolean;
   selectedProvider: ProviderId;
   cwd: string;
   quota: KimiQuota | undefined;
@@ -2970,6 +3019,10 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
   onInstallUpdate: () => Promise<void>;
   onExportDiagnostics: () => Promise<void>;
   onRefreshEnvironments: () => Promise<void>;
+  onRefreshRemote: () => Promise<void>;
+  onConfigureRemote: (config: RemoteConfig) => Promise<void>;
+  onCreateRemotePairing: () => Promise<void>;
+  onRevokeRemoteDevice: (deviceId: string) => Promise<void>;
   onShowOnboarding: () => void;
 }) {
   const categories: Array<{ id: SettingsCategory; label: string; keywords: string; icon: React.ReactNode }> = [
@@ -2978,6 +3031,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
     { id: "layout", label: "Layout", keywords: "sidebar side panel rail resize left right", icon: <SidebarSimple /> },
     { id: "account", label: "Providers", keywords: "profile login logout kimi codex openai claude anthropic cursor cli", icon: <UserCircle /> },
     { id: "environments", label: "Environments", keywords: "windows wsl linux distributions runtime execution", icon: <TerminalWindow /> },
+    { id: "remote", label: "Remote access", keywords: "phone mobile pairing device lan private network tailscale", icon: <DeviceMobile /> },
     { id: "usage", label: "Usage & limits", keywords: "quota subscription plan limits", icon: <Gauge /> },
     { id: "updates", label: "Updates", keywords: "version install restart release", icon: <DownloadSimple /> },
     { id: "diagnostics", label: "Diagnostics", keywords: "support bundle logs errors troubleshooting privacy", icon: <Bug /> },
@@ -2989,6 +3043,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
   const shortcutConflicts = keybindingConflicts(preferences.keybindings);
   const updateTitle = updateStatus.phase === "available" ? `Version ${updateStatus.version} is available` : updateStatus.phase === "downloading" ? `Downloading ${updateStatus.version}` : updateStatus.phase === "installing" ? `Installing ${updateStatus.version}` : updateStatus.phase === "checking" ? "Checking for updates" : updateStatus.phase === "current" ? "Tasty is up to date" : updateStatus.phase === "error" ? "Update check failed" : "Automatic updates";
   const updateMessage = updateStatus.phase === "downloading" ? `${updateStatus.percent ?? 0}% complete` : updateStatus.phase === "installing" ? "The app will restart when installation finishes." : updateStatus.phase === "error" ? updateStatus.message : updateStatus.currentVersion ? `Installed version ${updateStatus.currentVersion}` : updateStatus.version ? `Installed version ${updateStatus.version}` : "Updates are checked automatically when the app starts.";
+  const remoteMode = !remote?.config.enabled ? "off" : remote.config.bind === "0.0.0.0" ? "lan" : "loopback";
 
   return <div className="settings-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onKeyDown={trapDialogFocus}>
@@ -3023,6 +3078,12 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
             {category === "account" && <section className="settings-group"><h2>Agent providers</h2><div className="settings-provider-list">{providers.map((provider) => <article className={provider.id === selectedProvider ? "active" : ""} key={provider.id}><ProviderMark provider={provider.id} /><div><strong>{provider.name}</strong><small>{!provider.installed ? "CLI not installed" : provider.authenticated === true ? provider.account ?? "Account connected" : provider.authenticated === false ? "Sign in required" : provider.account ?? "CLI ready"}</small></div><button className="provider-default" type="button" disabled={provider.id === selectedProvider} onClick={() => onPreferences({ provider: provider.id })}>{provider.id === selectedProvider ? "Default" : "Use"}</button>{!provider.installed ? <button className="secondary" type="button" onClick={() => void onInstallCli(provider.id)}><DownloadSimple /> Guide</button> : provider.authenticated === true ? <button className="secondary danger-text" type="button" disabled={provider.loginRunning} onClick={() => void onLogout(provider.id)}><SignOut /> Log out</button> : <button className="secondary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin(provider.id)}><SignIn />{provider.loginRunning ? "Waiting…" : "Sign in"}</button>}</article>)}</div>{selectedProvider === "kimi" && auth?.home && <code className="account-home">{auth.home}</code>}<p className="settings-note">Tasty starts official local provider runtimes. Passwords and API credentials stay in each provider's own account store and never enter this repository.</p></section>}
 
             {category === "environments" && <section className="settings-group"><h2>Execution environments</h2><SettingsRow title="Windows" description="Tasty orchestration and local providers run under this Windows account."><span className="environment-status healthy">Active</span></SettingsRow>{environments.map((environment) => <SettingsRow key={environment.name} title={environment.name} description={environment.system ? "WSL system distribution; intentionally unavailable for agent work." : environment.healthy ? "Healthy WSL agent boundary." : environment.message ?? "WSL distribution is unavailable."}><span className={`environment-status ${environment.healthy && !environment.system ? "healthy" : ""}`}>{environment.system ? "System" : environment.healthy ? "Ready" : "Unavailable"}</span></SettingsRow>)}<button className="secondary" type="button" onClick={() => void onRefreshEnvironments()}><ArrowsClockwise /> Refresh</button><p className="settings-note">WSL provider instances are configured in <code>provider-instances.json</code>. Windows remains the default; only healthy user distributions are offered.</p></section>}
+
+            {category === "remote" && <>
+              <section className="settings-group"><h2>Private remote control</h2><SettingsRow title="Access" description="Off by default. Loopback is for a private-network proxy; LAN listens on this computer's private interfaces."><ChoiceButtons value={remoteMode} options={[{ value: "off", label: "Off" }, { value: "loopback", label: "Loopback" }, { value: "lan", label: "LAN" }]} onChange={(mode) => { if (remoteBusy) return; const port = remote?.config.port ?? 4318; void onConfigureRemote({ enabled: mode !== "off", bind: mode === "lan" ? "0.0.0.0" : "127.0.0.1", port }); }} /></SettingsRow><SettingsRow title="Port" description="Use a stable high port in your private-network or TLS proxy configuration."><input className="settings-select remote-port" type="number" min="1024" max="65535" key={remote?.config.port ?? 4318} defaultValue={remote?.config.port ?? 4318} disabled={remoteBusy} onBlur={(event) => { const port = Number(event.currentTarget.value); if (remote && Number.isInteger(port) && port >= 1024 && port <= 65535 && port !== remote.config.port) void onConfigureRemote({ ...remote.config, port }); }} /></SettingsRow>{remote?.addresses.length ? <div className="remote-addresses">{remote.addresses.map((address) => <code key={address}>{address}</code>)}</div> : null}<p className="settings-note"><ShieldCheck /> Prefer Tailscale, WireGuard, or your own TLS reverse proxy. Tasty does not ship a public relay and never opens a router port.</p></section>
+              <section className="settings-group"><h2>Paired devices</h2>{remotePairing && Date.parse(remotePairing.expiresAt) > Date.now() && <div className="remote-pairing"><small>One-time code · expires {relativeTime(remotePairing.expiresAt)}</small><strong>{remotePairing.code}</strong></div>}<div className="remote-device-list">{remote?.devices.filter((device) => !device.revokedAt).map((device) => <div key={device.id}><DeviceMobile /><span><strong>{device.name}</strong><small>{device.lastSeenAt ? `Seen ${relativeTime(device.lastSeenAt)}` : "Not connected yet"}</small></span><button className="secondary danger-text" type="button" disabled={remoteBusy} onClick={() => void onRevokeRemoteDevice(device.id)}>Revoke</button></div>)}{remote && !remote.devices.some((device) => !device.revokedAt) && <p>No paired devices</p>}</div><div className="remote-actions"><button className="secondary" type="button" disabled={remoteBusy} onClick={() => void onRefreshRemote()}><ArrowsClockwise /> Refresh</button><button className="primary" type="button" disabled={remoteBusy || !remote?.listening} onClick={() => void onCreateRemotePairing()}><Plus /> Pair device</button></div><p className="settings-note">Pairing codes work once for ten minutes. Device tokens are stored only as hashes and can be revoked here at any time.</p></section>
+              {remote?.audit.length ? <section className="settings-group"><h2>Recent security activity</h2><div className="remote-audit-list">{remote.audit.slice(0, 8).map((event) => <div key={event.id}><span>{event.action.replaceAll(".", " ")}</span><small>{relativeTime(event.at)}{event.detail ? ` · ${event.detail}` : ""}</small></div>)}</div></section> : null}
+            </>}
 
             {category === "usage" && <div className="settings-usage"><UsagePanel quota={quota} error={quotaError} loading={quotaLoading} onRefresh={onRefreshQuota} /><p className="settings-note">Subscription limits come from the official local Kimi CLI <code>/usage</code> panel and refresh on focus and every minute. New official limit windows appear automatically.</p></div>}
 
@@ -3069,11 +3130,19 @@ function settingsDescription(category: SettingsCategory): string {
     layout: "Place and resize every part of the workspace.",
     account: "Local provider runtimes, accounts, and defaults.",
     environments: "Windows and WSL execution boundaries for local agents.",
+    remote: "Pair and revoke private-network companion devices.",
     usage: "Kimi subscription quota reported by the local CLI.",
     updates: "Signed releases and update installation.",
     diagnostics: "Local, redacted troubleshooting information.",
     about: "Runtime architecture and open-source information.",
   }[category];
+}
+
+function relativeTime(value: string): string {
+  const seconds = Math.round((Date.parse(value) - Date.now()) / 1_000);
+  const absolute = Math.abs(seconds);
+  const [amount, unit] = absolute >= 86_400 ? [Math.round(seconds / 86_400), "day"] : absolute >= 3_600 ? [Math.round(seconds / 3_600), "hour"] : absolute >= 60 ? [Math.round(seconds / 60), "minute"] : [seconds, "second"];
+  return new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(amount, unit as Intl.RelativeTimeFormatUnit);
 }
 
 function RailTabs({ current, workspace, activeAgents, onSelect, onClose }: { current: RailView; workspace: boolean; activeAgents: number; onSelect: (view: RailView) => void; onClose: () => void }) {
