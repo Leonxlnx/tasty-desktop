@@ -384,6 +384,7 @@ export function App() {
   const [activeThreadId, setActiveThreadId] = useState<string>();
   const [prompt, setPrompt] = useState("");
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
+  const [taskNotice, setTaskNotice] = useState<{ title: string; message: string }>();
   const [auth, setAuth] = useState<AuthState>();
   const [providers, setProviders] = useState<ProviderState[]>([]);
   const [providerInstances, setProviderInstances] = useState<ProviderInstance[]>([]);
@@ -855,6 +856,10 @@ export function App() {
     if (!settingsOpen || settingsCategory !== "automations") return;
     void refreshSchedules();
   }, [refreshSchedules, settingsCategory, settingsOpen]);
+
+  useEffect(() => {
+    if (connection === "connected") void refreshSchedules();
+  }, [connection, refreshSchedules]);
   const recoverLocalServer = useCallback(async (force = false) => {
     if (serverRestarting.current) return;
     serverRestarting.current = true;
@@ -1097,7 +1102,8 @@ export function App() {
       } else if (message.channel === "notifications.event") {
         const notice = message.payload as { title?: string; message?: string };
         const text = notice.message ?? notice.title ?? "Tasty task update";
-        setDiagnostic(text);
+        setTaskNotice({ title: notice.title ?? "Task update", message: text });
+        if (String((message.payload as { type?: string }).type).startsWith("schedule.")) void refreshSchedules();
         if (document.hidden && "Notification" in window && Notification.permission === "granted") new Notification(notice.title ?? "Tasty", { body: text });
       } else if (message.channel === "auth.status") {
         const status = message.payload as AuthState;
@@ -1130,7 +1136,7 @@ export function App() {
         }));
       }
     }
-  }, [refreshProviders, serverLookupAttempt]);
+  }, [refreshProviders, refreshSchedules, serverLookupAttempt]);
 
   useEffect(() => {
     if (connection === "connected") {
@@ -2286,6 +2292,7 @@ export function App() {
 
   return (
     <main style={shellStyle} className={`shell ${railView ? "rail-open" : ""} ${preferences.sidebarCollapsed ? "sidebar-collapsed" : ""} ${sidebarIconOnly ? "sidebar-icon-only" : ""} sidebar-${preferences.sidebarSide} rail-${preferences.railSide} density-${preferences.density}`}>
+      <a className="skip-link" href="#conversation-content">Skip to conversation</a>
       <header className="app-titlebar">
         <div className="titlebar-logo" title="Tasty"><img src="/tasty-logo.png" alt="" aria-hidden="true" /></div>
         <nav ref={menuBar} className="menu-bar" aria-label="Application menu">
@@ -2406,7 +2413,7 @@ export function App() {
         </footer>
       </aside>
 
-      <section className="conversation">
+      <section id="conversation-content" className="conversation" tabIndex={-1}>
         <header className="topbar">
           <div className="topbar-title"><strong>{capabilityCenterOpen ? "Capabilities" : activeThread?.title ?? (draftChat ? "New chat" : navView === "chats" ? "Chats" : cwd ? workspaceName(cwd) : "Tasty")}</strong>{!capabilityCenterOpen && <span className="topbar-provider"><ProviderMark provider={providerId} />{providerName(providerId)}</span>}{!capabilityCenterOpen && (activeThread?.worktree || draftChat?.isolate) && <span className="worktree-badge" title={activeThread?.worktree ? `${activeThread.worktree.branch} · ${activeThread.cwd}` : "A new isolated Git worktree will be created when you send the first task"}><GitBranch />{activeThread?.worktree?.branch ?? "Isolated worktree"}</span>}</div>
           <div className="topbar-actions">
@@ -2630,7 +2637,7 @@ export function App() {
         }
         setYoloConfirm(undefined);
       }} />}
-      {diagnostics.length > 0 && <div className="app-notice" role="status" aria-live="polite"><WarningCircle /><span>{diagnostics[diagnostics.length - 1]}</span><button type="button" aria-label="Reveal runtime log" title="Reveal runtime log" onClick={() => void openRuntimeLog()}><Bug /></button><button type="button" aria-label="Copy error details" title="Copy error details" onClick={() => void navigator.clipboard.writeText(diagnostics.join("\n"))}><Copy /></button><button type="button" aria-label="Dismiss notification" onClick={() => setDiagnostics([])}><X /></button></div>}
+      {(taskNotice || diagnostics.length > 0) && <div className="notice-stack">{taskNotice && <div className="app-notice task-notice" role="status" aria-live="polite"><Check /><span><strong>{taskNotice.title}</strong><small>{taskNotice.message}</small></span><button type="button" aria-label="Dismiss task update" onClick={() => setTaskNotice(undefined)}><X /></button></div>}{diagnostics.length > 0 && <div className="app-notice" role="alert"><WarningCircle /><span>{diagnostics[diagnostics.length - 1]}</span><button type="button" aria-label="Reveal runtime log" title="Reveal runtime log" onClick={() => void openRuntimeLog()}><Bug /></button><button type="button" aria-label="Copy error details" title="Copy error details" onClick={() => void navigator.clipboard.writeText(diagnostics.join("\n"))}><Copy /></button><button type="button" aria-label="Dismiss notification" onClick={() => setDiagnostics([])}><X /></button></div>}</div>}
     </main>
   );
 }
@@ -3193,7 +3200,7 @@ function ScheduleSettings({ schedules, threads, activeThread, busy, onCreate, on
       <div><label><span>Run</span><input required type="datetime-local" value={draft.nextRunAt} onChange={(event) => setDraft({ ...draft, nextRunAt: event.target.value })} /></label><label><span>Repeat</span><select value={draft.recurrence} onChange={(event) => setDraft({ ...draft, recurrence: event.target.value as Schedule["recurrence"] })}><option value="once">Once</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label></div>
       {error && <p className="schedule-error" role="alert">{error}</p>}<button className="primary" type="submit" disabled={busy || !activeThread || !draft.name.trim() || !draft.text.trim()}><Clock /> Schedule task</button>
     </form></section>
-    <section className="settings-group"><h2>Schedules</h2><div className="schedule-list">{schedules.map((schedule) => { const thread = threads.find((candidate) => candidate.threadId === schedule.threadId); return <article key={schedule.id}><Clock /><span><strong>{schedule.name}</strong><small>{schedule.enabled ? `${schedule.recurrence} · ${relativeTime(schedule.nextRunAt)}` : "Paused"} · {thread?.title ?? "Unavailable chat"}</small>{schedule.lastResult && <small>{schedule.lastResult}</small>}</span><div><button className="secondary" type="button" disabled={busy} onClick={() => void onRun(schedule.id)}>Run now</button><button className="secondary" type="button" disabled={busy} onClick={() => void onUpdate(schedule.id, { enabled: !schedule.enabled })}>{schedule.enabled ? "Pause" : "Resume"}</button><button className="secondary danger-text" type="button" disabled={busy} aria-label={`Delete ${schedule.name}`} onClick={() => void onDelete(schedule.id)}><Trash /></button></div></article>; })}{!schedules.length && <p>No scheduled tasks yet.</p>}</div><p className="settings-note">Missed recurring times advance to the next calendar slot instead of replaying a backlog. Failed runs stay visible here and never change permissions automatically.</p></section>
+    <section className="settings-group"><h2>Schedules</h2><div className="schedule-list">{schedules.map((schedule) => { const thread = threads.find((candidate) => candidate.threadId === schedule.threadId); const run = (operation: Promise<void>) => void operation.catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))); return <article key={schedule.id}><Clock /><span><strong>{schedule.name}</strong><small>{schedule.enabled ? `${schedule.recurrence} · ${relativeTime(schedule.nextRunAt)}` : "Paused"} · {thread?.title ?? "Unavailable chat"}</small>{schedule.lastResult && <small>{schedule.lastResult}</small>}</span><div><button className="secondary" type="button" disabled={busy} onClick={() => run(onRun(schedule.id))}>Run now</button><button className="secondary" type="button" disabled={busy} onClick={() => run(onUpdate(schedule.id, { enabled: !schedule.enabled }))}>{schedule.enabled ? "Pause" : "Resume"}</button><button className="secondary danger-text" type="button" disabled={busy} aria-label={`Delete ${schedule.name}`} onClick={() => run(onDelete(schedule.id))}><Trash /></button></div></article>; })}{!schedules.length && <p>No scheduled tasks yet.</p>}</div>{error && <p className="schedule-error settings-note" role="alert">{error}</p>}<p className="settings-note">Missed recurring times advance to the next calendar slot instead of replaying a backlog. Failed runs stay visible here and never change permissions automatically.</p></section>
   </>;
 }
 
