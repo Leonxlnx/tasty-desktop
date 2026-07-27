@@ -133,3 +133,5 @@ Status: complete. The final graphite pass removes the full-sidebar backdrop filt
 - Security, provider, remote, user, and release documentation match the implementation.
 - Public source and dependency checks pass.
 - Installation or restart occurs only after explicit user approval.
+
+Status: qualified locally. Final checks pass with 133/133 server tests, 81/81 web tests, 2/2 Rust tests, server/web TypeScript checks, Rust check, production server/web builds, zero known full or production dependency vulnerabilities, the public-source guard for 186 tracked files, and a clean diff. The unsigned Windows artifact is `Tasty_0.11.1_x64-setup.exe` (25,764,871 bytes; SHA-256 `F25538927C192F7FAB121E72984B07B1AAFE15A76969554A9C7A523F10569A93`). It has not been installed or launched.
