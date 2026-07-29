@@ -51,13 +51,13 @@ export class CheckpointReactor {
     try {
       await this.#run(root, ["add", "-A", "--", "."], env);
       const tree = await this.#run(root, ["write-tree"], env);
-      const args = ["commit-tree", tree, "-m", `Tasty checkpoint ${turnId} ${phase}`];
+      const args = ["commit-tree", tree, "-m", `Kimi Code checkpoint ${turnId} ${phase}`];
       if (head) args.push("-p", head);
       const commit = await this.#run(root, args, {
         ...env,
-        GIT_AUTHOR_NAME: "Tasty",
+        GIT_AUTHOR_NAME: "Kimi Code",
         GIT_AUTHOR_EMAIL: "checkpoint@local",
-        GIT_COMMITTER_NAME: "Tasty",
+        GIT_COMMITTER_NAME: "Kimi Code",
         GIT_COMMITTER_EMAIL: "checkpoint@local",
       });
       await this.#run(root, ["update-ref", ref, commit]);

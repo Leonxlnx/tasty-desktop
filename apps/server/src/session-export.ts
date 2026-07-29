@@ -6,7 +6,7 @@ import type { ThreadProjection } from "./orchestration.js";
 export async function exportSessionArchive(directory: string, threads: Array<ThreadProjection & { queue?: unknown[] }>, privatePaths: string[]): Promise<string> {
   await mkdir(directory, { recursive: true });
   const exportedAt = new Date().toISOString();
-  const path = join(directory, `tasty-sessions-${exportedAt.replace(/[:.]/g, "-")}.json`);
+  const path = join(directory, `kimi-code-sessions-${exportedAt.replace(/[:.]/g, "-")}.json`);
   const archive = { version: 1, exportedAt, threads: threads.map((thread) => sanitizeThread(thread, privatePaths)) };
   await writeFile(path, `${JSON.stringify(archive, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
   return path;

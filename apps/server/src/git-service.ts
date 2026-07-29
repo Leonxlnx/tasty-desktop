@@ -140,7 +140,7 @@ export class GitService {
 
   async createPullRequest(cwd: string, title: string, body: string, draft: boolean): Promise<{ url: string }> {
     const status = await this.status(cwd);
-    const args = ["pr", "create", "--title", title.trim(), "--body", body.trim() || "Created with Tasty"];
+    const args = ["pr", "create", "--title", title.trim(), "--body", body.trim() || "Created with Kimi Code Desktop"];
     if (draft) args.push("--draft");
     const url = await this.#runGh(status.root, args);
     if (!/^https:\/\//.test(url)) throw new Error("GitHub CLI did not return a pull request URL");
@@ -150,7 +150,7 @@ export class GitService {
   async createWorktree(cwd: string, destination: string, id: string): Promise<{ cwd: string; sourceCwd: string; branch: string }> {
     const sourceCwd = await this.#root(cwd);
     const target = resolve(destination);
-    const branch = `tasty/${id.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 40)}`;
+    const branch = `kimi/${id.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 40)}`;
     await mkdir(dirname(target), { recursive: true });
     await this.#run(sourceCwd, ["worktree", "add", "-b", branch, target, "HEAD"]);
     return { cwd: await realpath(target), sourceCwd, branch };

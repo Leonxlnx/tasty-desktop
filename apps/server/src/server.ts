@@ -672,7 +672,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       const mcpServers = request.params.provider === "kimi" ? [{
         name: desktopPreviewMcpName,
         transport: "stdio" as const,
-        target: "Built into Tasty",
+        target: "Built into Kimi Code",
         needsAuthorization: false,
         connectable: true,
       }, ...capabilities.mcpServers.filter((server) => server.name !== desktopPreviewMcpName)] : capabilities.mcpServers;
@@ -781,7 +781,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
           if (applied.configOptions) configOptions = applied.configOptions;
         }
         if (provider === "kimi") void rememberLiveConfigOptions(configOptions);
-        await engine.append(threadId, { type: "ThreadCreated", payload: { sessionId: session.sessionId, provider, ...(instanceId ? { instanceId } : {}), cwd: targetCwd, ...(createdWorktree ? { worktree: { sourceCwd: createdWorktree.sourceCwd, branch: createdWorktree.branch } } : {}), kind: request.params.standalone ? "chat" : "project", title: request.params.standalone ? "New chat" : "New Tasty session", configOptions } });
+        await engine.append(threadId, { type: "ThreadCreated", payload: { sessionId: session.sessionId, provider, ...(instanceId ? { instanceId } : {}), cwd: targetCwd, ...(createdWorktree ? { worktree: { sourceCwd: createdWorktree.sourceCwd, branch: createdWorktree.branch } } : {}), kind: request.params.standalone ? "chat" : "project", title: request.params.standalone ? "New chat" : "New Kimi session", configOptions } });
         reply(socket, request.id, { thread: engine.thread(threadId) });
       } catch (error) {
         if (createdWorktree) await git.discardNewWorktree(createdWorktree).catch((cleanupError) => emitDiagnostic("error", cleanupError, "worktree-cleanup"));
@@ -802,7 +802,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
           : await resumeRuntimeSession(acp, request.params.sessionId, resolve(request.params.cwd))).configOptions ?? [];
       if (!hasConfiguredModel(configOptions)) throw new Error(`${providerName(provider)} has no configured model. Complete provider sign-in, then retry.`);
       if (provider === "kimi") void rememberLiveConfigOptions(configOptions);
-      if (!existing) await engine.append(request.params.threadId, { type: "ThreadCreated", payload: { sessionId: request.params.sessionId, provider, ...(instanceId ? { instanceId } : {}), cwd: resolve(request.params.cwd), kind: isStandaloneChatPath(request.params.cwd) ? "chat" : "project", title: "Resumed Tasty session", configOptions } });
+      if (!existing) await engine.append(request.params.threadId, { type: "ThreadCreated", payload: { sessionId: request.params.sessionId, provider, ...(instanceId ? { instanceId } : {}), cwd: resolve(request.params.cwd), kind: isStandaloneChatPath(request.params.cwd) ? "chat" : "project", title: "Resumed Kimi session", configOptions } });
       else if (request.params.replay) await engine.append(existing.threadId, { type: "ConfigOptionsReplaced", payload: { options: configOptions } });
       reply(socket, request.id, { thread: engine.thread(request.params.threadId) });
       return;
@@ -999,14 +999,14 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "subagents.inspect") {
-      if (!isLinkedSubagent(thread, request.params.agentThreadId)) throw new Error("Subagent thread is not linked to this Tasty chat");
+      if (!isLinkedSubagent(thread, request.params.agentThreadId)) throw new Error("Subagent thread is not linked to this Kimi Code chat");
       const runtime = await ensureRuntime(thread.provider, thread.instanceId);
       if (!runtime.inspectSubagent) throw new Error(`${providerName(thread.provider)} does not expose inspectable subagent transcripts`);
       reply(socket, request.id, { inspection: await runtime.inspectSubagent(request.params.agentThreadId) });
       return;
     }
     if (request.method === "subagents.stop") {
-      if (!isLinkedSubagent(thread, request.params.agentThreadId)) throw new Error("Subagent thread is not linked to this Tasty chat");
+      if (!isLinkedSubagent(thread, request.params.agentThreadId)) throw new Error("Subagent thread is not linked to this Kimi Code chat");
       const runtime = await ensureRuntime(thread.provider, thread.instanceId);
       if (!runtime.stopSubagent) throw new Error(`${providerName(thread.provider)} does not support stopping an individual subagent`);
       await runtime.stopSubagent(request.params.agentThreadId);
@@ -1776,17 +1776,17 @@ function assertRemoteScope(input: unknown): void {
   const params = request.params && typeof request.params === "object" ? request.params : {};
   if (request.method === "threads.create") {
     if (params.standalone === true) return;
-    if (typeof params.cwd !== "string" || !knownRemoteWorkspace(params.cwd)) throw new Error("Remote devices can create project chats only in an existing Tasty workspace");
+    if (typeof params.cwd !== "string" || !knownRemoteWorkspace(params.cwd)) throw new Error("Remote devices can create project chats only in an existing Kimi Code workspace");
   }
   if (request.method === "threads.list" && typeof params.cwd === "string" && !knownRemoteWorkspace(params.cwd)) {
-    throw new Error("Remote thread filtering is limited to existing Tasty workspaces");
+    throw new Error("Remote thread filtering is limited to existing Kimi Code workspaces");
   }
   if (request.method === "threads.resume") {
     const thread = typeof params.threadId === "string" ? engine.thread(params.threadId) : undefined;
-    if (!thread || params.sessionId !== thread.sessionId || typeof params.cwd !== "string" || comparablePath(params.cwd) !== comparablePath(thread.cwd)) throw new Error("Remote devices can resume only an existing matching Tasty thread");
+    if (!thread || params.sessionId !== thread.sessionId || typeof params.cwd !== "string" || comparablePath(params.cwd) !== comparablePath(thread.cwd)) throw new Error("Remote devices can resume only an existing matching Kimi Code thread");
   }
   if (request.method === "capabilities.list" && typeof params.cwd === "string" && !knownRemoteWorkspace(params.cwd)) {
-    throw new Error("Remote capability inspection is limited to existing Tasty workspaces");
+    throw new Error("Remote capability inspection is limited to existing Kimi Code workspaces");
   }
 }
 
@@ -1830,7 +1830,7 @@ server.on("connection", (socket, request) => {
       .finally(() => releaseUpdateLease(socket));
   });
 });
-server.on("listening", () => console.log(`Tasty orchestration server listening on ws://127.0.0.1:${port}`));
+server.on("listening", () => console.log(`Kimi Code orchestration server listening on ws://127.0.0.1:${port}`));
 if (remoteAccess.status().config.enabled) {
   await startRemoteServer(remoteAccess.status().config).catch((error) => emitDiagnostic("error", `Remote access could not start: ${error instanceof Error ? error.message : String(error)}`, "remote-access"));
 }

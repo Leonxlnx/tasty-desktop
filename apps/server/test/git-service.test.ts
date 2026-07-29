@@ -88,7 +88,7 @@ describe("GitService", () => {
 
     const service = new GitService(git);
     const worktree = await service.createWorktree(root, join(storage, "chat-1"), "chat-1");
-    expect(worktree).toMatchObject({ sourceCwd: await realpath(root), branch: "tasty/chat-1" });
+    expect(worktree).toMatchObject({ sourceCwd: await realpath(root), branch: "kimi/chat-1" });
     expect((await readFile(join(worktree.cwd, "tracked.txt"), "utf8")).replaceAll("\r\n", "\n")).toBe("base\n");
     expect((await exec(git, ["-C", worktree.cwd, "branch", "--show-current"])).stdout.trim()).toBe(worktree.branch);
 

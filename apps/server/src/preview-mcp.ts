@@ -20,7 +20,7 @@ type ToolResult = { content: Array<{ type: "text"; text: string } | { type: "ima
 const tools = [
   {
     name: "preview_open",
-    description: "Open a localhost app inside Tasty's Preview panel and choose its panel and screenshot viewport sizes.",
+    description: "Open a localhost app inside Kimi Code's Preview panel and choose its panel and screenshot viewport sizes.",
     inputSchema: { type: "object", properties: {
       url: { type: "string", description: "A localhost or 127.0.0.1 HTTP(S) URL." },
       panelWidth: { type: "number", minimum: 320, maximum: 1200, description: "Preview panel width in pixels." },
@@ -30,7 +30,7 @@ const tools = [
   },
   {
     name: "preview_resize",
-    description: "Resize Tasty's Preview panel and the viewport used by the next screenshot.",
+    description: "Resize Kimi Code's Preview panel and the viewport used by the next screenshot.",
     inputSchema: { type: "object", properties: {
       panelWidth: { type: "number", minimum: 320, maximum: 1200 },
       viewportWidth: { type: "number", minimum: 320, maximum: 1920 },
@@ -95,7 +95,7 @@ async function handleLine(line: string, state: { url?: string; panelWidth: numbe
       write({ jsonrpc: "2.0", id: request.id, result: {
         protocolVersion: typeof requested === "string" ? requested : "2025-03-26",
         capabilities: { tools: {} },
-        serverInfo: { name: "Tasty Preview", version: "0.11.2" },
+        serverInfo: { name: "Kimi Code Preview", version: "0.11.2" },
       } });
       return;
     }
@@ -183,7 +183,7 @@ async function installLocalSkill(args: Record<string, unknown>): Promise<ToolRes
     const sourceName = basename(canonicalSource);
     const name = sourceEntry.isFile() ? sourceName.slice(0, -extname(sourceName).length) : sourceName;
     await sendBridge({ action: "request_skill_install", cwd: canonicalWorkspace, source: canonicalSource, name });
-    return textResult(`Confirmation requested for local skill '${name}'. It has not been installed; the user must confirm in Tasty.`);
+    return textResult(`Confirmation requested for local skill '${name}'. It has not been installed; the user must confirm in Kimi Code.`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (/^(?:Skill|SKILL\.md)\b/.test(message)) throw new Error(message);
@@ -193,7 +193,7 @@ async function installLocalSkill(args: Record<string, unknown>): Promise<ToolRes
 
 async function sendBridge(command: PreviewBridgeCommand): Promise<void> {
   const url = process.env.KIMI_DESKTOP_PREVIEW_BRIDGE;
-  if (!url) throw new Error("Tasty preview bridge is unavailable.");
+  if (!url) throw new Error("Kimi Code preview bridge is unavailable.");
   await new Promise<void>((resolvePromise, reject) => {
     const requestId = randomUUID();
     const socket = new WebSocket(url, { origin: "http://tauri.localhost" });
@@ -207,14 +207,14 @@ async function sendBridge(command: PreviewBridgeCommand): Promise<void> {
       if (error) reject(error);
       else resolvePromise();
     };
-    timer = setTimeout(() => finish(new Error("Tasty preview bridge timed out.")), 5_000);
+    timer = setTimeout(() => finish(new Error("Kimi Code preview bridge timed out.")), 5_000);
     socket.on("open", () => socket.send(JSON.stringify({ id: requestId, method: "preview.agentCommand", params: command })));
     socket.on("message", (data) => {
       const message = JSON.parse(data.toString()) as { id?: string; error?: { message?: string } };
       if (message.id !== requestId) return;
       finish(message.error ? new Error(message.error.message ?? "Preview command failed.") : undefined);
     });
-    socket.on("error", () => finish(new Error("Tasty preview bridge is unavailable.")));
+    socket.on("error", () => finish(new Error("Kimi Code preview bridge is unavailable.")));
   });
 }
 

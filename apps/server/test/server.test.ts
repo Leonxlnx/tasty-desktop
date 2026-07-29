@@ -425,7 +425,7 @@ describe("orchestration server", () => {
     socket.send(JSON.stringify({ id: 1, method: "threads.create", params: { cwd: workspace, isolate: true } }));
     const created = ((await createdReply).result as { thread: { threadId: string; cwd: string; worktree: { sourceCwd: string; branch: string } } }).thread;
     expect(created.cwd).toContain(join(await realpath(dataHome), "worktrees"));
-    expect(created.worktree).toMatchObject({ sourceCwd: await realpath(workspace), branch: expect.stringMatching(/^tasty\//) });
+    expect(created.worktree).toMatchObject({ sourceCwd: await realpath(workspace), branch: expect.stringMatching(/^kimi\//) });
     await expect(access(join(created.cwd, "tracked.txt"))).resolves.toBeUndefined();
 
     const approval = waitFor(socket, messages, (message) => (message.payload as { type?: string } | undefined)?.type === "ApprovalRequested");

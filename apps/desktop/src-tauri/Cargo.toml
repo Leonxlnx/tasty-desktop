@@ -1,12 +1,12 @@
 [package]
-name = "tasty-desktop"
+name = "kimi-code-desktop"
 version = "0.11.2"
-description = "A native multi-provider coding agent control panel"
-authors = ["Tasty contributors"]
+description = "A native desktop harness for Kimi Code CLI"
+authors = ["Kimi Code Desktop contributors"]
 edition = "2021"
 
 [lib]
-name = "tasty_desktop_lib"
+name = "kimi_code_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -42,7 +42,7 @@ describe("remote server", () => {
     sockets.push(remote);
     const threads = await request(remote, { id: 4, method: "threads.list", params: {} }) as { threads: unknown[] };
     expect(threads.threads).toEqual([]);
-    await expect(request(remote, { id: 5, method: "threads.create", params: { cwd: join(dataHome, "unapproved"), standalone: false, isolate: false, provider: "kimi" } })).rejects.toThrow("existing Tasty workspace");
+    await expect(request(remote, { id: 5, method: "threads.create", params: { cwd: join(dataHome, "unapproved"), standalone: false, isolate: false, provider: "kimi" } })).rejects.toThrow("existing Kimi Code workspace");
     await expect(request(remote, { id: 6, method: "terminal.start", params: { cwd: dataHome } })).rejects.toThrow("not available to remote devices");
 
     const closed = new Promise<number>((resolve) => remote.once("close", (code) => resolve(code)));

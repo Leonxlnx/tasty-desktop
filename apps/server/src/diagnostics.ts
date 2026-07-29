@@ -48,7 +48,7 @@ export class DiagnosticJournal {
   async export(dataHome: string, environment: Record<string, string | number | boolean | null>): Promise<string> {
     const directory = join(dataHome, "diagnostics");
     await mkdir(directory, { recursive: true });
-    const path = join(directory, `tasty-support-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+    const path = join(directory, `kimi-code-support-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
     await writeFile(path, `${JSON.stringify({ generatedAt: new Date().toISOString(), environment, diagnostics: this.snapshot() }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     return path;
   }

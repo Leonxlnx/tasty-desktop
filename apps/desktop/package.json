@@ -1,5 +1,5 @@
 {
-  "name": "@tasty/desktop",
+  "name": "@kimi-code-desktop/desktop",
   "version": "0.11.2",
   "private": true,
   "scripts": {
