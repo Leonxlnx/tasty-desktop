@@ -108,11 +108,12 @@ async function terminateTree(session: TerminalSession): Promise<boolean> {
   return treeStopped && exited && closed;
 }
 
-async function terminateWindowsTree(child: ChildProcess): Promise<boolean> {
-  if (!child.pid || hasExited(child)) return false;
+export async function terminateWindowsTree(child: ChildProcess): Promise<boolean> {
+  if (hasExited(child)) return true;
+  if (!child.pid) return false;
   const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
   for (let attempt = 0; attempt < WINDOWS_TREE_KILL_ATTEMPTS; attempt += 1) {
-    if (hasExited(child)) return false;
+    if (hasExited(child)) return true;
     const killer = spawn(taskkill, ["/PID", String(child.pid), "/T", "/F"], {
       stdio: "ignore",
       windowsHide: true,
@@ -123,8 +124,9 @@ async function terminateWindowsTree(child: ChildProcess): Promise<boolean> {
     } else if (killer.exitCode === 0) {
       return true;
     }
+    if (hasExited(child)) return true;
   }
-  return false;
+  return waitForExit(child, TERMINATION_GRACE_MS);
 }
 
 async function terminatePosixTree(child: ChildProcess): Promise<boolean> {

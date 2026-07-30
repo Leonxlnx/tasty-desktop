@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isAllowedSocketOrigin, isAuthorizedSocketRequest } from "../src/socket-origin.js";
-import { TerminalService, type TerminalEvent } from "../src/terminal-service.js";
+import { TerminalService, terminateWindowsTree, type TerminalEvent } from "../src/terminal-service.js";
 
 describe("terminal service", () => {
   it("keeps a workspace shell alive and streams command output", async () => {
@@ -42,6 +42,20 @@ describe("terminal service", () => {
     expect(service.activeCount).toBe(0);
     expect(processExists(pid)).toBe(false);
   }, 30_000);
+
+  it("accepts a child exit that wins the Windows termination race", async () => {
+    let exitCodeReads = 0;
+    const child = {
+      pid: 1,
+      get exitCode() {
+        exitCodeReads += 1;
+        return exitCodeReads > 1 ? 0 : null;
+      },
+      signalCode: null,
+    } as unknown as import("node:child_process").ChildProcess;
+
+    await expect(terminateWindowsTree(child)).resolves.toBe(true);
+  });
 
   it("accepts the desktop origins but rejects arbitrary browser pages", () => {
     expect(isAllowedSocketOrigin(undefined)).toBe(false);
