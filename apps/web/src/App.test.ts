@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, classifyGitError, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiRuntimes, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, gitDiffLineKind, gitFileActions, gitFileGroup, gitPathBatches, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, joinLocalPath, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, parseProjectScripts, preferredGitRemote, preferredInitialThreadId, presentDiagnostic, profileConfigUpdates, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, repositoryNameFromUrl, reviewCommentKey, reviewFeedbackPrompt, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldShowRuntimePicker, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, terminalContext, thinkingEffortLabel, threadCanRun, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+import { ActivityTimeline, activityPreview, appendTerminalEntries, applyDraftConfig, applyEvents, applyTerminalOutputBatch, classifyGitError, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, createTerminalOutputBatcher, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiRuntimes, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, gitDiffLineKind, gitFileActions, gitFileGroup, gitPathBatches, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, joinLocalPath, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, onceForPointer, panelResizeWidth, parseHarnessCommand, parseProjectScripts, preferredGitRemote, preferredInitialThreadId, presentDiagnostic, profileConfigUpdates, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, repositoryNameFromUrl, reviewCommentKey, reviewFeedbackPrompt, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldShowRuntimePicker, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, terminalContext, thinkingEffortLabel, threadCanRun, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
 
 describe("global commands", () => {
   it("captures configurable shortcuts and disables conflicts", () => {
@@ -56,6 +56,67 @@ describe("terminal prompt context", () => {
   it("attaches only a bounded explicit output tail", () => {
     expect(terminalContext([])).toBe("");
     expect(terminalContext([{ id: 1, kind: "stdout", text: "before\n" }, { id: 2, kind: "stdout", text: "latest\n" }], 8)).toBe("<terminal_context>\ne\nlatest\n</terminal_context>\n");
+  });
+
+  it("batches adjacent output while bounding entries and total characters", () => {
+    const merged = appendTerminalEntries(
+      [{ id: 1, kind: "stdout", text: "abcdef" }],
+      [{ id: 2, kind: "stdout", text: "gh" }, { id: 3, kind: "stderr", text: "WXYZ" }],
+      3,
+      8,
+    );
+    expect(merged.map(({ kind, text }) => ({ kind, text }))).toEqual([{ kind: "stdout", text: "efgh" }, { kind: "stderr", text: "WXYZ" }]);
+    expect(appendTerminalEntries([], [
+      { id: 1, kind: "command", text: "1" }, { id: 2, kind: "system", text: "2" }, { id: 3, kind: "command", text: "3" },
+    ], 2, 100).map((entry) => entry.id)).toEqual([2, 3]);
+  });
+
+  it("applies a frame of terminal output and closes an exited session once", () => {
+    const tabs = [{ tabId: "tab", cwd: "E:/work", name: "Terminal", session: { sessionId: "session", cwd: "E:/work", shell: "pwsh" }, entries: [], command: "", starting: false }];
+    const [tab] = applyTerminalOutputBatch(tabs, [
+      { sessionId: "session", type: "stdout", text: "one" },
+      { sessionId: "session", type: "stdout", text: " two" },
+      { sessionId: "session", type: "exit", code: 0 },
+    ]);
+    expect(tab?.session).toBeUndefined();
+    expect(tab?.entries.map(({ kind, text }) => ({ kind, text }))).toEqual([
+      { kind: "stdout", text: "one two" },
+      { kind: "system", text: "Process exited with code 0\n" },
+    ]);
+  });
+
+  it("flushes terminal output once through the fallback or cleanup path", () => {
+    let frame: FrameRequestCallback | undefined;
+    let fallback: (() => void) | undefined;
+    const applied: string[][] = [];
+    const batcher = createTerminalOutputBatcher(
+      (events) => applied.push(events.map((event) => event.text ?? event.type)),
+      (callback) => { frame = callback; return 1; },
+      () => undefined,
+      (callback) => { fallback = callback; return 2; },
+      () => undefined,
+    );
+    batcher.push({ sessionId: "session", type: "stdout", text: "one" });
+    batcher.push({ sessionId: "session", type: "stdout", text: "two" });
+    fallback?.();
+    frame?.(0);
+    batcher.flush();
+    expect(applied).toEqual([["one", "two"]]);
+
+    batcher.push({ sessionId: "session", type: "stderr", text: "cleanup" });
+    batcher.flush();
+    expect(applied).toEqual([["one", "two"], ["cleanup"]]);
+  });
+});
+
+describe("panel resize lifecycle", () => {
+  it("commits only once when pointer completion signals overlap", () => {
+    let commits = 0;
+    const finish = onceForPointer(7, () => { commits += 1; });
+    finish({ pointerId: 6 });
+    finish({ pointerId: 7 });
+    finish({ pointerId: 7 });
+    expect(commits).toBe(1);
   });
 });
 
@@ -419,8 +480,8 @@ describe("project navigation", () => {
 
   it("never exposes current or legacy internal quota workspaces", () => {
     const paths = [
-      "C:/Users/User/AppData/Roaming/KimiCodeDesktop/runtime/quota-probe",
-      "C:/Users/User/AppData/Roaming/com.kimicode.desktop/runtime/quota-probe",
+      "C:/Profile/AppData/Roaming/KimiCodeDesktop/runtime/quota-probe",
+      "C:/Profile/AppData/Roaming/com.kimicode.desktop/runtime/quota-probe",
       "E:/work/real-project",
     ];
     expect(groupProjects(paths, [], []).map((project) => project.cwd)).toEqual(["E:/work/real-project"]);
@@ -434,7 +495,7 @@ describe("project navigation", () => {
   });
 
   it("keeps standalone chats out of project groups and preserves manual project order", () => {
-    const threads = [{ cwd: "C:/Users/User/AppData/Roaming/KimiCodeDesktop/runtime/chats", kind: "chat", title: "Personal chat" }] as unknown as Parameters<typeof groupProjects>[1];
+    const threads = [{ cwd: "C:/Profile/AppData/Roaming/KimiCodeDesktop/runtime/chats", kind: "chat", title: "Personal chat" }] as unknown as Parameters<typeof groupProjects>[1];
     expect(groupProjects([], threads, [])).toEqual([]);
     expect(reorderPaths(["E:/one", "E:/two", "E:/three"], "E:/three", "E:/one")).toEqual(["E:/three", "E:/one", "E:/two"]);
   });
@@ -453,6 +514,8 @@ describe("workspace panel sizing", () => {
     expect(clampPanelWidth("sidebar", 900)).toBe(420);
     expect(clampPanelWidth("rail", 120)).toBe(260);
     expect(clampPanelWidth("rail", 1600)).toBe(1200);
+    expect(panelResizeWidth("sidebar", 272, 40, "left")).toBe(312);
+    expect(panelResizeWidth("sidebar", 272, 40, "right")).toBe(232);
   });
 
   it("gives the conversation space before rendering a requested rail width", () => {

@@ -150,7 +150,10 @@ const keybindingActions: Array<{ id: KeybindingAction; label: string }> = [
   { id: "toggleSidebar", label: "Toggle sidebar" }, { id: "terminal", label: "Toggle terminal" }, { id: "settings", label: "Open settings" },
 ];
 const collapsedSidebarWidth = 60;
-const initialTurnWindow = 60;
+const initialTurnWindow = 30;
+const terminalMaxEntries = 500;
+const terminalMaxChars = 500_000;
+const terminalFlushFallbackMs = 100;
 let terminalEntryId = 0;
 const fallbackCommands: AvailableCommand[] = [
   { name: "goal", description: "Set, replace, or clear the goal for this chat." },
@@ -172,7 +175,98 @@ const fallbackCommands: AvailableCommand[] = [
 ];
 
 function terminalEntry(kind: TerminalEntry["kind"], text: string): TerminalEntry {
-  return { id: ++terminalEntryId, kind, text: text.slice(-100_000) };
+  return { id: ++terminalEntryId, kind, text: text.slice(-terminalMaxChars) };
+}
+
+export function appendTerminalEntries(entries: TerminalEntry[], additions: TerminalEntry[], maxEntries = terminalMaxEntries, maxChars = terminalMaxChars): TerminalEntry[] {
+  const next = [...entries];
+  for (const addition of additions) {
+    if (!addition.text) continue;
+    const previous = next.at(-1);
+    if ((addition.kind === "stdout" || addition.kind === "stderr") && previous?.kind === addition.kind) {
+      next[next.length - 1] = { ...previous, text: `${previous.text}${addition.text}`.slice(-maxChars) };
+    } else {
+      next.push({ ...addition, text: addition.text.slice(-maxChars) });
+    }
+  }
+  let start = next.length;
+  let characters = 0;
+  while (start > 0 && next.length - start < maxEntries) {
+    const entry = next[start - 1]!;
+    const remaining = maxChars - characters;
+    if (entry.text.length > remaining) {
+      if (remaining > 0) {
+        start -= 1;
+        next[start] = { ...entry, text: entry.text.slice(-remaining) };
+      }
+      break;
+    }
+    start -= 1;
+    characters += entry.text.length;
+  }
+  return next.slice(start);
+}
+
+export function applyTerminalOutputBatch(tabs: TerminalTab[], events: TerminalEvent[]): TerminalTab[] {
+  if (!events.length) return tabs;
+  const bySession = new Map<string, TerminalEvent[]>();
+  for (const event of events) {
+    const current = bySession.get(event.sessionId);
+    if (current) current.push(event);
+    else bySession.set(event.sessionId, [event]);
+  }
+  return tabs.map((tab) => {
+    if (!tab.session) return tab;
+    const output = bySession.get(tab.session.sessionId);
+    if (!output?.length) return tab;
+    const additions = output.flatMap((event) => {
+      const text = event.type === "exit" ? `Process exited${event.code == null ? "" : ` with code ${event.code}`}\n` : cleanTerminalOutput(event.text ?? "");
+      return text ? [terminalEntry(event.type === "exit" ? "system" : event.type, text)] : [];
+    });
+    return {
+      ...tab,
+      ...(output.some((event) => event.type === "exit") ? { session: undefined } : {}),
+      entries: appendTerminalEntries(tab.entries, additions),
+    };
+  });
+}
+
+export function createTerminalOutputBatcher(
+  apply: (events: TerminalEvent[]) => void,
+  requestFrame: (callback: FrameRequestCallback) => number = window.requestAnimationFrame.bind(window),
+  cancelFrame: (handle: number) => void = window.cancelAnimationFrame.bind(window),
+  setFallback: (callback: () => void) => number = (callback) => window.setTimeout(callback, terminalFlushFallbackMs),
+  clearFallback: (handle: number) => void = window.clearTimeout.bind(window),
+) {
+  const pending: TerminalEvent[] = [];
+  let frame: number | undefined;
+  let fallback: number | undefined;
+  const flush = () => {
+    if (frame !== undefined) cancelFrame(frame);
+    if (fallback !== undefined) clearFallback(fallback);
+    frame = undefined;
+    fallback = undefined;
+    const events = pending.splice(0);
+    if (events.length) apply(events);
+  };
+  return {
+    push(event: TerminalEvent) {
+      pending.push(event);
+      if (frame !== undefined || fallback !== undefined) return;
+      frame = requestFrame(flush);
+      fallback = setFallback(flush);
+    },
+    flush,
+  };
+}
+
+export function onceForPointer(pointerId: number, action: () => void) {
+  let finished = false;
+  return (event: Pick<PointerEvent, "pointerId">) => {
+    if (finished || event.pointerId !== pointerId) return;
+    finished = true;
+    action();
+  };
 }
 
 function createTerminalTab(cwd: string, index: number): TerminalTab {
@@ -1157,9 +1251,9 @@ export function App() {
       if (tab.session || tab.starting) continue;
       updateTerminalTab(tab.tabId, (current) => ({ ...current, starting: true }));
       void call("terminal.start", { cwd: tab.cwd }).then((session) => {
-        updateTerminalTab(tab.tabId, (current) => ({ ...current, session: session as TerminalSessionInfo, starting: false, entries: [...current.entries, terminalEntry("system", `${(session as TerminalSessionInfo).shell} · ${(session as TerminalSessionInfo).cwd}\n`)].slice(-1_000) }));
+        updateTerminalTab(tab.tabId, (current) => ({ ...current, session: session as TerminalSessionInfo, starting: false, entries: appendTerminalEntries(current.entries, [terminalEntry("system", `${(session as TerminalSessionInfo).shell} · ${(session as TerminalSessionInfo).cwd}\n`)]) }));
       }).catch((error: Error) => {
-        updateTerminalTab(tab.tabId, (current) => ({ ...current, starting: false, entries: [...current.entries, terminalEntry("stderr", `${error.message}\n`)].slice(-1_000) }));
+        updateTerminalTab(tab.tabId, (current) => ({ ...current, starting: false, entries: appendTerminalEntries(current.entries, [terminalEntry("stderr", `${error.message}\n`)]) }));
       });
     }
   }, [call, connection, railView, visibleTerminalTabs]);
@@ -1168,16 +1262,19 @@ export function App() {
     if (!pendingTerminalCommand || !activeTerminalTab?.session) return;
     const command = pendingTerminalCommand;
     setPendingTerminalCommand(undefined);
-    updateTerminalTab(activeTerminalTab.tabId, (current) => ({ ...current, entries: [...current.entries, terminalEntry("command", `› ${command}\n`)].slice(-1_000) }));
+    updateTerminalTab(activeTerminalTab.tabId, (current) => ({ ...current, entries: appendTerminalEntries(current.entries, [terminalEntry("command", `› ${command}\n`)]) }));
     setTerminalHistory((current) => [...current.filter((item) => item !== command), command].slice(-100));
     void call("terminal.write", { sessionId: activeTerminalTab.session.sessionId, command }).catch((error: Error) => {
-      updateTerminalTab(activeTerminalTab.tabId, (current) => ({ ...current, entries: [...current.entries, terminalEntry("stderr", `${error.message}\n`)].slice(-1_000) }));
+      updateTerminalTab(activeTerminalTab.tabId, (current) => ({ ...current, entries: appendTerminalEntries(current.entries, [terminalEntry("stderr", `${error.message}\n`)]) }));
     });
   }, [activeTerminalTab, call, pendingTerminalCommand]);
 
   useEffect(() => {
     let disposed = false;
     let client: ConnectionSupervisor | undefined;
+    const terminalOutput = createTerminalOutputBatcher((events) => {
+      setTerminalTabs((current) => applyTerminalOutputBatch(current, events));
+    });
     setServerLookupError(undefined);
     setStartupDelayed(false);
     void localServerUrl().then((url) => {
@@ -1198,6 +1295,7 @@ export function App() {
       if (supervisor.current === client) supervisor.current = undefined;
       if (automaticRestartTimer.current !== undefined) window.clearTimeout(automaticRestartTimer.current);
       if (domainEventFrame.current !== undefined) window.cancelAnimationFrame(domainEventFrame.current);
+      terminalOutput.flush();
     };
 
     function handleMessage(message: ServerMessage) {
@@ -1255,13 +1353,7 @@ export function App() {
         }
         void refreshProviders().catch(() => undefined);
       } else if (message.channel === "terminal.output") {
-        const event = message.payload as TerminalEvent;
-        const text = event.type === "exit" ? `Process exited${event.code == null ? "" : ` with code ${event.code}`}\n` : cleanTerminalOutput(event.text ?? "");
-        setTerminalTabs((current) => current.map((tab) => tab.session?.sessionId !== event.sessionId ? tab : {
-          ...tab,
-          ...(event.type === "exit" ? { session: undefined, starting: tab.starting } : {}),
-          entries: text ? [...tab.entries, terminalEntry(event.type === "exit" ? "system" : event.type, text)].slice(-1_000) : tab.entries,
-        }));
+        terminalOutput.push(message.payload as TerminalEvent);
       }
     }
   }, [refreshProviders, refreshSchedules, serverLookupAttempt]);
@@ -2088,10 +2180,10 @@ export function App() {
       updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: [] }));
       return;
     }
-    updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: [...current.entries, terminalEntry("command", `› ${command}\n`)].slice(-1_000) }));
+    updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: appendTerminalEntries(current.entries, [terminalEntry("command", `› ${command}\n`)]) }));
     setTerminalHistory((current) => [...current.filter((item) => item !== command), command].slice(-100));
     void call("terminal.write", { sessionId: tab.session.sessionId, command }).catch((error: Error) => {
-      updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: [...current.entries, terminalEntry("stderr", `${error.message}\n`)].slice(-1_000) }));
+      updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: appendTerminalEntries(current.entries, [terminalEntry("stderr", `${error.message}\n`)]) }));
     });
   }
 
@@ -2351,22 +2443,34 @@ export function App() {
 
   function beginPanelResize(panel: "sidebar" | "rail", event: ReactPointerEvent<HTMLDivElement>) {
     event.preventDefault();
+    const handle = event.currentTarget;
+    const shell = handle.closest<HTMLElement>(".shell");
+    const pointerId = event.pointerId;
     const startX = event.clientX;
     const startWidth = panel === "sidebar" ? preferences.sidebarWidth : renderedRailWidth;
     const side = panel === "sidebar" ? preferences.sidebarSide : preferences.railSide;
-    const direction = side === "left" ? 1 : -1;
+    const property = panel === "sidebar" ? "--sidebar-current-width" : "--rail-current-width";
+    let finalWidth = panel === "sidebar" ? preferences.sidebarWidth : preferences.railWidth;
     const move = (pointer: PointerEvent) => {
-      const width = clampPanelWidth(panel, startWidth + (pointer.clientX - startX) * direction);
-      setPreferences((current) => panel === "sidebar" ? { ...current, sidebarCollapsed: false, sidebarWidth: width } : { ...current, railWidth: width });
+      if (pointer.pointerId !== pointerId) return;
+      finalWidth = panelResizeWidth(panel, startWidth, pointer.clientX - startX, side);
+      const renderedWidth = panel === "rail" ? effectiveRailWidth(finalWidth, viewportWidth, layoutSidebarWidth) : finalWidth;
+      shell?.style.setProperty(property, `${renderedWidth}px`);
     };
-    const stop = () => {
+    const stop = onceForPointer(pointerId, () => {
       document.body.classList.remove("is-resizing");
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", stop);
-    };
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+      handle.removeEventListener("lostpointercapture", stop);
+      setPreferences((current) => panel === "sidebar" ? { ...current, sidebarCollapsed: false, sidebarWidth: finalWidth } : { ...current, railWidth: finalWidth });
+    });
     document.body.classList.add("is-resizing");
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", stop, { once: true });
+    handle.setPointerCapture(pointerId);
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
+    handle.addEventListener("lostpointercapture", stop);
   }
 
   function resizePanelWithKeyboard(panel: "sidebar" | "rail", event: ReactKeyboardEvent<HTMLDivElement>) {
@@ -2659,7 +2763,7 @@ export function App() {
             setShowJumpToLatest(!pinned && Boolean(activeThread && turnViews.length));
           }}>
             {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter provider="kimi" data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} profiles={preferences.agentProfiles.filter((profile) => profile.provider === "kimi")} profileDraft={profileDraft} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} canInstallSkill={Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onProfileDraft={setProfileDraft} onSaveProfile={saveAgentProfile} onUseProfile={useAgentProfile} onDeleteProfile={deleteAgentProfile} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding ? <Onboarding provider={providerState} cwd={cwd} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={() => void call("auth.cancel", { provider: "kimi" })} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !historicalThread && !runtimeReady && (!activeThread || !turnViews.length) ? <ProviderGate provider={providerState} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel", { provider: "kimi" })} /> : !historicalThread && (!activeThread || !turnViews.length) ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} agentName="Kimi" canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
-            {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{hiddenTurnCount > 0 && <button className="conversation-history-more" type="button" onClick={() => setVisibleTurnLimit((current) => current + initialTurnWindow)}><CaretDown /> Show {Math.min(initialTurnWindow, hiddenTurnCount)} earlier turns</button>}{visibleTurnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} readOnly={historicalThread} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={openCheckpointReview} />)}</div>}
+            {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage">{hiddenTurnCount > 0 && <button className="conversation-history-more" type="button" onClick={() => setVisibleTurnLimit((current) => current + initialTurnWindow)}><CaretDown /> Show {Math.min(initialTurnWindow, hiddenTurnCount)} earlier turns</button>}{visibleTurnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} readOnly={historicalThread} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={openCheckpointReview} />)}</div>}
           </div>
           {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}><CaretDown /> Jump to latest</button>}
         </div>
@@ -2813,7 +2917,7 @@ export function App() {
 
       {searchOpen && <div className="command-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setSearchOpen(false); setThreadFilter(""); } }}>
         <section className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette" onKeyDown={trapDialogFocus}>
-          <label className="command-input"><MagnifyingGlass /><input autoFocus value={threadFilter} onChange={(event) => setThreadFilter(event.target.value)} placeholder="Search actions, projects, chats, and scripts…" /><kbd>Esc</kbd></label>
+          <label className="command-input"><MagnifyingGlass /><input autoFocus value={threadFilter} onChange={(event) => setThreadFilter(event.target.value)} placeholder="Search actions, projects, chats, and scripts…" aria-label="Search commands, projects, chats, and scripts" /><kbd>Esc</kbd></label>
           <div className="command-results">
             {paletteActions.length > 0 && <section><h2>Actions</h2>{paletteActions.map((action) => <button type="button" key={action.id} disabled={action.disabled} onClick={action.run}>{action.icon}<span><strong>{action.label}</strong><small>{action.detail}</small></span>{action.shortcut && <kbd>{action.shortcut}</kbd>}</button>)}</section>}
             {visibleProjectScripts.length > 0 && <section><h2>Project scripts</h2>{visibleProjectScripts.slice(0, 8).map((script) => <button type="button" key={script.name} onClick={() => runProjectScript(script)}><TerminalWindow /><span><strong>npm run {script.name}</strong><small>{script.command}</small></span></button>)}</section>}
@@ -2955,18 +3059,19 @@ function EmptyConversation({ kind, workspace, agentName, canPrompt, onPrompt, on
 function ItemActions({ open, label, items, onToggle }: { open: boolean; label: string; items: Array<{ label: string; icon: React.ReactNode; danger?: boolean; onSelect: () => void }>; onToggle: () => void }) {
   const trigger = useRef<HTMLButtonElement | null>(null);
   const menu = useRef<HTMLDivElement | null>(null);
-  const [position, setPosition] = useState<{ top: number; left: number }>();
+  const [position, setPosition] = useState<{ top: number; left: number; side: "above" | "below" }>();
 
   useLayoutEffect(() => {
     if (!open) return;
     const place = () => {
       if (!trigger.current || !menu.current) return;
       const anchor = trigger.current.getBoundingClientRect();
-      setPosition(floatingMenuPosition(
+      const next = floatingMenuPosition(
         { top: anchor.top, right: anchor.right, bottom: anchor.bottom },
         { width: menu.current.offsetWidth, height: menu.current.offsetHeight },
         { width: window.innerWidth, height: window.innerHeight },
-      ));
+      );
+      setPosition({ ...next, side: next.top < anchor.top ? "above" : "below" });
     };
     place();
     const focusFrame = window.requestAnimationFrame(() => menu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')?.focus());
@@ -2982,7 +3087,7 @@ function ItemActions({ open, label, items, onToggle }: { open: boolean; label: s
 
   return <span className="item-menu-wrap">
     <button ref={trigger} className="item-menu-trigger" type="button" aria-label={label} aria-haspopup="menu" aria-expanded={open} onClick={(event) => { event.preventDefault(); event.stopPropagation(); onToggle(); }} onKeyDown={(event) => { if (event.key === "ArrowDown" && !open) { event.preventDefault(); onToggle(); } }}><DotsThree weight="bold" /></button>
-    {open && createPortal(<div ref={menu} className="item-menu item-menu-portal" role="menu" onKeyDown={moveMenuFocus} style={{ top: position?.top ?? 0, left: position?.left ?? 0, visibility: position ? "visible" : "hidden" }}>{items.map((item) => <button className={item.danger ? "danger" : ""} type="button" role="menuitem" key={item.label} onClick={(event) => { event.preventDefault(); event.stopPropagation(); item.onSelect(); onToggle(); }}>{item.icon}<span>{item.label}</span></button>)}</div>, document.body)}
+    {open && createPortal(<div ref={menu} className="item-menu item-menu-portal" role="menu" data-side={position?.side} onKeyDown={moveMenuFocus} style={{ top: position?.top ?? 0, left: position?.left ?? 0, visibility: position ? "visible" : "hidden" }}>{items.map((item) => <button className={item.danger ? "danger" : ""} type="button" role="menuitem" key={item.label} onClick={(event) => { event.preventDefault(); event.stopPropagation(); item.onSelect(); onToggle(); }}>{item.icon}<span>{item.label}</span></button>)}</div>, document.body)}
   </span>;
 }
 
@@ -3146,11 +3251,20 @@ function ConfigControl({ control, open, onToggle, onClose, onPick }: { control: 
 
   useLayoutEffect(() => {
     if (!open) return;
-    const anchor = trigger.current?.getBoundingClientRect();
-    const menu = popover.current?.getBoundingClientRect();
-    if (!anchor || !menu) return;
-    const next = floatingMenuPosition(anchor, { width: menu.width, height: menu.height }, { width: window.innerWidth, height: window.innerHeight });
-    setPosition({ ...next, side: next.top < anchor.top ? "above" : "below" });
+    const place = () => {
+      const anchor = trigger.current?.getBoundingClientRect();
+      const menu = popover.current?.getBoundingClientRect();
+      if (!anchor || !menu) return;
+      const next = floatingMenuPosition(anchor, { width: menu.width, height: menu.height }, { width: window.innerWidth, height: window.innerHeight });
+      setPosition({ ...next, side: next.top < anchor.top ? "above" : "below" });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
   }, [open]);
 
   useEffect(() => {
@@ -3812,6 +3926,10 @@ function loadPreferences(): Preferences {
 
 export function clampPanelWidth(panel: "sidebar" | "rail", width: number): number {
   return Math.round(Math.min(panel === "sidebar" ? 420 : 1200, Math.max(panel === "sidebar" ? 84 : 260, width)));
+}
+
+export function panelResizeWidth(panel: "sidebar" | "rail", startWidth: number, deltaX: number, side: "left" | "right"): number {
+  return clampPanelWidth(panel, startWidth + deltaX * (side === "left" ? 1 : -1));
 }
 
 export function effectiveRailWidth(requestedWidth: number, viewportWidth: number, sidebarWidth: number, minimumConversationWidth = 400): number {
