@@ -227,6 +227,9 @@ export function parseStatus(root: string, output: string): GitStatus {
       const path = parts.slice(renamed ? 9 : 8).join(" ");
       const originalPath = renamed ? records[++index] : undefined;
       files.push(fileStatus(path, xy, false, originalPath));
+    } else if (record.startsWith("u ")) {
+      const parts = record.split(" ");
+      files.push(fileStatus(parts.slice(10).join(" "), parts[1] ?? "UU", false));
     } else if (record.startsWith("? ")) {
       files.push(fileStatus(record.slice(2), "??", true));
     }

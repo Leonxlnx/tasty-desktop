@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { findGitBinary } from "../src/checkpoint-reactor.js";
-import { GitService, requireRemoteUrl } from "../src/git-service.js";
+import { GitService, parseStatus, requireRemoteUrl } from "../src/git-service.js";
 
 const exec = promisify(execFile);
 
@@ -44,6 +44,18 @@ describe("GitService", () => {
     await exec(git, ["-C", root, "init"]);
     const service = new GitService(git);
     await expect(service.stage(root, ["../outside.txt"])).rejects.toThrow("not part of the current change set");
+  });
+
+  it("reports porcelain-v2 unmerged records", () => {
+    const status = parseStatus("C:\\repo", "# branch.head main\0u UU N... 100644 100644 100644 100644 a b c conflicted file.txt\0");
+
+    expect(status.files).toEqual([expect.objectContaining({
+      path: "conflicted file.txt",
+      staged: true,
+      unstaged: true,
+      indexStatus: "U",
+      worktreeStatus: "U",
+    })]);
   });
 
   it("creates, switches, and publishes branches to an explicit remote", async () => {

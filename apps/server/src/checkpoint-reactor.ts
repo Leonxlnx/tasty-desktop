@@ -96,14 +96,34 @@ export class CheckpointReactor {
 
   async revert(threadId: string, turnId: string, before: Checkpoint, after: Checkpoint): Promise<Checkpoint | undefined> {
     if (before.root !== after.root) throw new Error("Checkpoint roots do not match");
-    await this.capture(threadId, turnId, "revert-safety", before.root);
+    const fullRevertRef = `refs/kimi-code/checkpoints/${safeRefPart(threadId)}/${safeRefPart(turnId)}/full-reverted`;
+    if (await this.#refExists(before.root, fullRevertRef)) throw new Error("This turn was already reverted");
     const patch = await this.diff(before, after);
+    let patchPath: string | undefined;
     if (patch) {
-      const patchPath = join(this.#dataHome, "checkpoints", safeRefPart(threadId), safeRefPart(turnId), "revert.patch");
+      patchPath = join(this.#dataHome, "checkpoints", safeRefPart(threadId), safeRefPart(turnId), "revert.patch");
       await writeFile(patchPath, patch, "utf8");
-      await this.#run(before.root, ["apply", "--reverse", "--whitespace=nowarn", patchPath]);
+      await this.#run(before.root, ["apply", "--reverse", "--check", "--whitespace=nowarn", patchPath]);
+    }
+    await this.capture(threadId, turnId, "revert-safety", before.root);
+    await this.#run(before.root, ["update-ref", fullRevertRef, after.commit, "0".repeat(after.commit.length)]);
+    try {
+      if (patchPath) await this.#run(before.root, ["apply", "--reverse", "--whitespace=nowarn", patchPath]);
+    } catch (error) {
+      await this.#run(before.root, ["update-ref", "-d", fullRevertRef, after.commit]).catch(() => undefined);
+      throw error;
     }
     return this.capture(threadId, turnId, "reverted", before.root);
+  }
+
+  async #refExists(cwd: string, ref: string): Promise<boolean> {
+    try {
+      await this.#run(cwd, ["show-ref", "--verify", "--quiet", ref]);
+      return true;
+    } catch (error) {
+      if ((error as { code?: number }).code === 1) return false;
+      throw error;
+    }
   }
 
   async #run(cwd: string, args: string[], env = process.env, trim = true): Promise<string> {

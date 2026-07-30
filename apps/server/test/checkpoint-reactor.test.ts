@@ -32,6 +32,10 @@ describe("CheckpointReactor", () => {
 
     expect((await readFile(file, "utf8")).replace(/\r\n/g, "\n")).toBe("base\nuser dirt\n");
     await expect(readFile(join(root, "agent-created.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+
+    await writeFile(file, "base\nuser dirt\nagent change\n", "utf8");
+    await expect(reactor.revert("thread", "turn", before!, after!)).rejects.toThrow("already reverted");
+    expect((await readFile(file, "utf8")).replace(/\r\n/g, "\n")).toBe("base\nuser dirt\nagent change\n");
   });
 
   it("reviews and reverts one hunk without removing another turn change", async () => {

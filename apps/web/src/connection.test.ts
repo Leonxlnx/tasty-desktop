@@ -86,14 +86,14 @@ describe("ConnectionSupervisor", () => {
     client.close();
   });
 
-  it("rejects an unanswered request instead of hanging forever", async () => {
+  it.each(["threads.list", "git.repository"])("bounds the idempotent %s request", async (method) => {
     const client = new ConnectionSupervisor("ws://127.0.0.1", () => undefined, () => undefined, 25);
     client.start();
     socket.readyState = FakeSocket.OPEN;
     socket.dispatchEvent(new Event("open"));
 
-    const request = client.request("threads.list");
-    const failure = expect(request).rejects.toThrow("Server request timed out: threads.list");
+    const request = client.request(method);
+    const failure = expect(request).rejects.toThrow(`Server request timed out: ${method}`);
     await vi.advanceTimersByTimeAsync(25);
     await failure;
     client.close();
