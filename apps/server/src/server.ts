@@ -1851,8 +1851,8 @@ server.on("connection", (socket, request) => {
   });
   socket.on("close", () => {
     sockets.delete(socket);
-    void Promise.all([...socketTerminals.get(socket) ?? []].map((sessionId) => terminal.stop(sessionId)))
-      .finally(() => releaseUpdateLease(socket));
+    releaseUpdateLease(socket);
+    void Promise.allSettled([...socketTerminals.get(socket) ?? []].map((sessionId) => terminal.stop(sessionId)));
   });
 });
 server.on("listening", () => console.log(`Kimi Code orchestration server listening on ws://127.0.0.1:${port}`));

@@ -632,7 +632,6 @@ describe("orchestration server", () => {
     const ownerClosed = new Promise<void>((resolve) => second.once("close", resolve));
     second.close();
     await ownerClosed;
-    await new Promise((resolve) => setTimeout(resolve, 25));
     const restarted = waitFor(first, firstMessages, (message) => message.id === 8);
     first.send(JSON.stringify({ id: 8, method: "terminal.start", params: { cwd: process.cwd() } }));
     const restartedSession = ((await restarted).result as { sessionId: string }).sessionId;
