@@ -2,7 +2,16 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { RemoteAccess, remoteMethodAllowed, remoteProtocolToken } from "../src/remote-access.js";
+import {
+  KIMI_REMOTE_PROTOCOL,
+  LEGACY_REMOTE_PROTOCOL,
+  RemoteAccess,
+  remoteClientProtocols,
+  remoteMethodAllowed,
+  remoteProtocolOffered,
+  remoteProtocolToken,
+  selectRemoteProtocol,
+} from "../src/remote-access.js";
 
 describe("remote access", () => {
   it("pairs once, persists only a token hash, and revokes the device", async () => {
@@ -47,6 +56,17 @@ describe("remote access", () => {
     expect(remoteMethodAllowed({ method: "threads.interruptTurn" })).toBe(true);
     expect(remoteMethodAllowed({ method: "terminal.write" })).toBe(false);
     expect(remoteMethodAllowed({ method: "remote.configure" })).toBe(false);
-    expect(remoteProtocolToken("tasty.remote.v1, tasty-token.device.secret")).toBe("device.secret");
+    expect(remoteProtocolToken("kimi-code.remote.v1, kimi-code-token.device.new")).toBe("device.new");
+    expect(remoteProtocolToken("tasty.remote.v1, tasty-token.device.legacy")).toBe("device.legacy");
+    expect(remoteProtocolToken("tasty-token.old, kimi-code-token.new")).toBe("new");
+    expect(remoteProtocolOffered(KIMI_REMOTE_PROTOCOL)).toBe(true);
+    expect(remoteProtocolOffered(LEGACY_REMOTE_PROTOCOL)).toBe(true);
+    expect(selectRemoteProtocol(new Set([LEGACY_REMOTE_PROTOCOL, KIMI_REMOTE_PROTOCOL]))).toBe(KIMI_REMOTE_PROTOCOL);
+    expect(remoteClientProtocols("device.secret")).toEqual([
+      KIMI_REMOTE_PROTOCOL,
+      LEGACY_REMOTE_PROTOCOL,
+      "kimi-code-token.device.secret",
+      "tasty-token.device.secret",
+    ]);
   });
 });

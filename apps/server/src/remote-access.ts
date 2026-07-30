@@ -19,6 +19,11 @@ export type RemoteDevice = Omit<RemoteDeviceRecord, "tokenHash">;
 const defaults: RemoteState = { version: 1, config: { enabled: false, bind: "127.0.0.1", port: 4318 }, devices: [], audit: [] };
 const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
+export const KIMI_REMOTE_PROTOCOL = "kimi-code.remote.v1";
+export const LEGACY_REMOTE_PROTOCOL = "tasty.remote.v1";
+export const KIMI_REMOTE_TOKEN_PREFIX = "kimi-code-token.";
+export const LEGACY_REMOTE_TOKEN_PREFIX = "tasty-token.";
+
 export class RemoteAccess {
   readonly #path: string;
   readonly #now: () => number;
@@ -120,8 +125,31 @@ export class RemoteAccess {
 }
 
 export function remoteProtocolToken(header: string | string[] | undefined): string | undefined {
-  const values = Array.isArray(header) ? header : header?.split(",");
-  return values?.map((value) => value.trim()).find((value) => value.startsWith("tasty-token."))?.slice("tasty-token.".length);
+  const values = (Array.isArray(header) ? header : header?.split(","))?.map((value) => value.trim()) ?? [];
+  for (const prefix of [KIMI_REMOTE_TOKEN_PREFIX, LEGACY_REMOTE_TOKEN_PREFIX]) {
+    const token = values.find((value) => value.startsWith(prefix));
+    if (token) return token.slice(prefix.length);
+  }
+  return undefined;
+}
+
+export function remoteProtocolOffered(header: string | string[] | undefined): boolean {
+  const values = (Array.isArray(header) ? header : header?.split(","))?.map((value) => value.trim()) ?? [];
+  return values.includes(KIMI_REMOTE_PROTOCOL) || values.includes(LEGACY_REMOTE_PROTOCOL);
+}
+
+export function selectRemoteProtocol(protocols: ReadonlySet<string>): string | false {
+  if (protocols.has(KIMI_REMOTE_PROTOCOL)) return KIMI_REMOTE_PROTOCOL;
+  if (protocols.has(LEGACY_REMOTE_PROTOCOL)) return LEGACY_REMOTE_PROTOCOL;
+  return false;
+}
+
+export function remoteClientProtocols(token?: string): string[] {
+  return [
+    KIMI_REMOTE_PROTOCOL,
+    LEGACY_REMOTE_PROTOCOL,
+    ...(token ? [`${KIMI_REMOTE_TOKEN_PREFIX}${token}`, `${LEGACY_REMOTE_TOKEN_PREFIX}${token}`] : []),
+  ];
 }
 
 const remoteMethods = new Set([

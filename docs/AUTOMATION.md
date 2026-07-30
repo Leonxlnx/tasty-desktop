@@ -37,7 +37,9 @@ The CLI is restricted to the remote method allowlist. It cannot access the termi
 
 ### Compatibility identifiers
 
-The headless client currently keeps its credential in `%USERPROFILE%\.tasty\headless.json` and accepts `TASTY_REMOTE_URL` plus `TASTY_REMOTE_TOKEN`. These are retained legacy storage and environment aliases, not current product branding. The token has user-only file permissions and is sent in the WebSocket subprotocol, never a URL or normal CLI output.
+The headless client writes its credential to `%USERPROFILE%\.kimi-code-desktop\headless.json`. `KIMI_DESKTOP_REMOTE_URL` and `KIMI_DESKTOP_REMOTE_TOKEN` can supply credentials without a file. The older `%USERPROFILE%\.tasty\headless.json`, `TASTY_REMOTE_URL`, and `TASTY_REMOTE_TOKEN` names remain read-only fallbacks for existing installations; new credentials are never written under the legacy name.
+
+New clients prefer `kimi-code.remote.v1` with `kimi-code-token.<device-token>`, while also offering the legacy protocol and token identifiers when connecting. New servers accept both generations. This preserves existing pairings in either upgrade direction without copying or rewriting their token.
 
 Do not place a remote token in shell history, repository files, logs, or command arguments. Revoke the device from the desktop app when a computer is lost or retired.
 

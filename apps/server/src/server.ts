@@ -26,7 +26,7 @@ import { readRecoverableJson, writeRecoverableJson } from "./recoverable-json.js
 import { assertKimiProvider, providerDescriptors, providerName, readProviderInstances, requireProviderBinary, resolveProviderBinary, type ProviderInstance } from "./provider-runtime.js";
 import { DiagnosticJournal, redactDiagnosticText, type DiagnosticLevel } from "./diagnostics.js";
 import { WslEnvironments } from "./wsl-environments.js";
-import { RemoteAccess, remoteMethodAllowed, remoteProtocolToken, type RemoteConfig, type RemoteDevice } from "./remote-access.js";
+import { RemoteAccess, remoteMethodAllowed, remoteProtocolOffered, remoteProtocolToken, selectRemoteProtocol, type RemoteConfig, type RemoteDevice } from "./remote-access.js";
 import { ScheduleStore, scheduleTarget, type Schedule } from "./schedule-store.js";
 import { exportSessionArchive } from "./session-export.js";
 import {
@@ -1722,14 +1722,13 @@ async function startRemoteServer(config: RemoteConfig): Promise<void> {
     const address = req.socket.remoteAddress ?? "unknown";
     if (path === "/pair") return remoteAccess.allow(`pair-open:${address}`, 30);
     const protocols = req.headers["sec-websocket-protocol"];
-    const offered = typeof protocols === "string" && protocols.split(",").some((protocol) => protocol.trim() === "tasty.remote.v1");
-    return path === "/remote" && offered && Boolean(remoteAccess.authenticate(remoteProtocolToken(protocols)));
+    return path === "/remote" && remoteProtocolOffered(protocols) && Boolean(remoteAccess.authenticate(remoteProtocolToken(protocols)));
   };
   const candidate = new WebSocketServer({
     host: config.bind,
     port: config.port,
     maxPayload: 8 * 1024 * 1024,
-    handleProtocols: (protocols) => protocols.has("tasty.remote.v1") ? "tasty.remote.v1" : false,
+    handleProtocols: selectRemoteProtocol,
     verifyClient: verifyRemote,
   });
   await new Promise<void>((resolveListen, reject) => {

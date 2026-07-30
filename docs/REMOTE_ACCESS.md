@@ -31,9 +31,9 @@ The companion opens `/pair` and sends:
 }
 ```
 
-The response contains a device ID and token. Kimi Code Desktop stores only the SHA-256 hash of that token. Reconnect to `/remote` with the WebSocket subprotocols `tasty.remote.v1` and `tasty-token.<device-token>`.
+The response contains a device ID and token. Kimi Code Desktop stores only the SHA-256 hash of that token. New clients reconnect to `/remote` with the WebSocket subprotocols `kimi-code.remote.v1` and `kimi-code-token.<device-token>`.
 
-`tasty.remote.v1` is a legacy wire identifier retained so existing paired clients continue to work. It is not current product branding. The token is never placed in a URL or query log.
+New clients also offer `tasty.remote.v1` and `tasty-token.<device-token>` so they can connect to an older desktop server. New servers prefer the Kimi protocol, but continue to accept both legacy identifiers so existing paired clients keep working. The token is never placed in a URL or query log.
 
 Device sessions are limited to 240 requests per minute and an 8 MiB WebSocket message. Revoking a device immediately closes all its connections. Audit records contain timestamps, action names, device IDs, and bounded error details, never prompts or tokens.
 

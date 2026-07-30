@@ -4,9 +4,10 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import WebSocket, { type RawData } from "ws";
 import { z } from "zod";
+import { remoteClientProtocols } from "./remote-access.js";
 
 const credentialSchema = z.object({ endpoint: z.string().url(), token: z.string().min(20).max(200), deviceName: z.string().min(1).max(80) });
-type Credentials = z.infer<typeof credentialSchema>;
+export type Credentials = z.infer<typeof credentialSchema>;
 type Request = { id: number; method: string; params: Record<string, unknown> };
 export type CliCommand =
   | { name: "pair"; endpoint: string; code: string; deviceName: string }
@@ -15,16 +16,14 @@ export type CliCommand =
   | { name: "stop"; threadId: string }
   | { name: "watch"; threadId?: string };
 
-const credentialPath = join(homedir(), ".tasty", "headless.json");
-
 export function parseCli(args: string[]): CliCommand {
   const [name, ...rest] = args;
-  if (name === "pair" && rest[0] && rest[1]) return { name, endpoint: normalizeRemoteEndpoint(rest[0]), code: rest[1], deviceName: rest.slice(2).join(" ") || "Tasty headless CLI" };
+  if (name === "pair" && rest[0] && rest[1]) return { name, endpoint: normalizeRemoteEndpoint(rest[0]), code: rest[1], deviceName: rest.slice(2).join(" ") || "Kimi Code headless CLI" };
   if ((name === "send" || name === "steer") && rest[0] && rest.slice(1).join(" ").trim()) return { name, threadId: rest[0], text: rest.slice(1).join(" ").trim() };
   if (name === "stop" && rest[0]) return { name, threadId: rest[0] };
   if (name === "watch") return { name, ...(rest[0] ? { threadId: rest[0] } : {}) };
   if (name === "list") return { name };
-  throw new Error("Usage: tasty-headless pair <ws[s]://host:port> <code> [device] | list | send <thread> <text> | steer <thread> <text> | stop <thread> | watch [thread]");
+  throw new Error("Usage: kimi-code-headless pair <ws[s]://host:port> <code> [device] | list | send <thread> <text> | steer <thread> <text> | stop <thread> | watch [thread]");
 }
 
 export function normalizeRemoteEndpoint(value: string): string {
@@ -59,11 +58,11 @@ async function main(): Promise<void> {
 }
 
 async function callPair(endpoint: string, code: string, deviceName: string): Promise<{ token: string; device: { name: string } }> {
-  return z.object({ token: z.string(), device: z.object({ name: z.string() }) }).parse(await request(`${endpoint}/pair`, ["tasty.remote.v1"], { id: 1, method: "remote.claim", params: { code, name: deviceName } }));
+  return z.object({ token: z.string(), device: z.object({ name: z.string() }) }).parse(await request(`${endpoint}/pair`, remoteClientProtocols(), { id: 1, method: "remote.claim", params: { code, name: deviceName } }));
 }
 
 async function callRemote(credentials: Credentials, method: string, params: Record<string, unknown>): Promise<unknown> {
-  return request(`${credentials.endpoint}/remote`, ["tasty.remote.v1", `tasty-token.${credentials.token}`], { id: 1, method, params });
+  return request(`${credentials.endpoint}/remote`, remoteClientProtocols(credentials.token), { id: 1, method, params });
 }
 
 async function request(url: string, protocols: string[], payload: Request): Promise<unknown> {
@@ -87,7 +86,7 @@ async function request(url: string, protocols: string[], payload: Request): Prom
 }
 
 async function watch(credentials: Credentials, threadId?: string): Promise<void> {
-  const socket = await connect(`${credentials.endpoint}/remote`, ["tasty.remote.v1", `tasty-token.${credentials.token}`]);
+  const socket = await connect(`${credentials.endpoint}/remote`, remoteClientProtocols(credentials.token));
   process.stdout.write("Watching remote events. Press Ctrl+C to stop.\n");
   socket.on("message", (data: RawData) => {
     const message = JSON.parse(data.toString()) as { channel?: string; payload?: { threadId?: string } };
@@ -107,16 +106,29 @@ function connect(url: string, protocols: string[]): Promise<WebSocket> {
   });
 }
 
-async function loadCredentials(): Promise<Credentials> {
-  const endpoint = process.env.TASTY_REMOTE_URL;
-  const token = process.env.TASTY_REMOTE_TOKEN;
-  if (endpoint && token) return credentialSchema.parse({ endpoint: normalizeRemoteEndpoint(endpoint), token, deviceName: "environment" });
-  return credentialSchema.parse(JSON.parse(await readFile(credentialPath, "utf8")));
+export async function loadCredentials(home = homedir(), environment: NodeJS.ProcessEnv = process.env): Promise<Credentials> {
+  const primary = environment.KIMI_DESKTOP_REMOTE_URL && environment.KIMI_DESKTOP_REMOTE_TOKEN
+    ? { endpoint: environment.KIMI_DESKTOP_REMOTE_URL, token: environment.KIMI_DESKTOP_REMOTE_TOKEN }
+    : undefined;
+  const legacy = environment.TASTY_REMOTE_URL && environment.TASTY_REMOTE_TOKEN
+    ? { endpoint: environment.TASTY_REMOTE_URL, token: environment.TASTY_REMOTE_TOKEN }
+    : undefined;
+  const configured = primary ?? legacy;
+  if (configured) return credentialSchema.parse({ endpoint: normalizeRemoteEndpoint(configured.endpoint), token: configured.token, deviceName: "environment" });
+  for (const path of [join(home, ".kimi-code-desktop", "headless.json"), join(home, ".tasty", "headless.json")]) {
+    try {
+      return credentialSchema.parse(JSON.parse(await readFile(path, "utf8")));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  throw new Error("No Kimi Code headless credentials found. Pair this device first.");
 }
 
-async function saveCredentials(credentials: Credentials): Promise<void> {
-  await mkdir(dirname(credentialPath), { recursive: true, mode: 0o700 });
-  await writeFile(credentialPath, `${JSON.stringify(credentials, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+export async function saveCredentials(credentials: Credentials, home = homedir()): Promise<void> {
+  const path = join(home, ".kimi-code-desktop", "headless.json");
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, `${JSON.stringify(credentials, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
 const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";

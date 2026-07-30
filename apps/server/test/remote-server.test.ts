@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
+import { KIMI_REMOTE_PROTOCOL, KIMI_REMOTE_TOKEN_PREFIX, LEGACY_REMOTE_PROTOCOL, LEGACY_REMOTE_TOKEN_PREFIX } from "../src/remote-access.js";
 
 describe("remote server", () => {
   let child: ChildProcess | undefined;
@@ -38,16 +39,20 @@ describe("remote server", () => {
     const claimed = await request(claimSocket, { id: 3, method: "remote.claim", params: { code: pairing.code, name: "Test phone" } }) as { token: string; device: { id: string } };
     claimSocket.close();
 
-    const remote = await connect(`ws://127.0.0.1:${remotePort}/remote`, ["tasty.remote.v1", `tasty-token.${claimed.token}`]);
-    sockets.push(remote);
+    const remote = await connect(`ws://127.0.0.1:${remotePort}/remote`, [KIMI_REMOTE_PROTOCOL, `${KIMI_REMOTE_TOKEN_PREFIX}${claimed.token}`]);
+    const legacyRemote = await connect(`ws://127.0.0.1:${remotePort}/remote`, [LEGACY_REMOTE_PROTOCOL, `${LEGACY_REMOTE_TOKEN_PREFIX}${claimed.token}`]);
+    sockets.push(remote, legacyRemote);
+    expect(remote.protocol).toBe(KIMI_REMOTE_PROTOCOL);
+    expect(legacyRemote.protocol).toBe(LEGACY_REMOTE_PROTOCOL);
     const threads = await request(remote, { id: 4, method: "threads.list", params: {} }) as { threads: unknown[] };
     expect(threads.threads).toEqual([]);
+    expect(await request(legacyRemote, { id: 8, method: "threads.list", params: {} })).toMatchObject({ threads: [] });
     await expect(request(remote, { id: 5, method: "threads.create", params: { cwd: join(dataHome, "unapproved"), standalone: false, isolate: false, provider: "kimi" } })).rejects.toThrow("existing Kimi Code workspace");
     await expect(request(remote, { id: 6, method: "terminal.start", params: { cwd: dataHome } })).rejects.toThrow("not available to remote devices");
 
-    const closed = new Promise<number>((resolve) => remote.once("close", (code) => resolve(code)));
+    const closed = [remote, legacyRemote].map((socket) => new Promise<number>((resolve) => socket.once("close", (code) => resolve(code))));
     await request(local, { id: 7, method: "remote.revokeDevice", params: { deviceId: claimed.device.id } });
-    await expect(closed).resolves.toBe(4003);
+    await expect(Promise.all(closed)).resolves.toEqual([4003, 4003]);
   }, 20_000);
 });
 
