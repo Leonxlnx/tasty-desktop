@@ -25,9 +25,8 @@ body:
     id: kimi
     attributes:
       label: Kimi Code CLI version
-      description: Run `kimi --version`.
-    validations:
-      required: true
+      description: Run `kimi --version`, or enter "not installed" or "command unavailable".
+      placeholder: 0.26.0, not installed, or command unavailable
   - type: textarea
     id: description
     attributes:

@@ -1,5 +1,10 @@
 {
   "name": "kimi-code-desktop",
+  "description": "Unofficial Windows desktop harness for Kimi Code CLI",
+  "license": "MIT",
+  "repository": "https://github.com/Leonxlnx/kimi-code-desktop",
+  "homepage": "https://github.com/Leonxlnx/kimi-code-desktop#readme",
+  "bugs": "https://github.com/Leonxlnx/kimi-code-desktop/issues",
   "private": true,
   "packageManager": "pnpm@10.13.1",
   "scripts": {

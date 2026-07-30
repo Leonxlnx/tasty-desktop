@@ -17,6 +17,14 @@ Requirements:
 
 The installer includes the Node.js runtime used by the local orchestration service. It does not bundle Kimi Code CLI or Kimi credentials.
 
+Each release includes `SHA256SUMS.txt`. After downloading, compare the listed installer hash with:
+
+```powershell
+Get-FileHash .\Kimi-Code-*-setup.exe -Algorithm SHA256
+```
+
+Windows SmartScreen may still show a warning because the installer is not currently Authenticode-signed. The checksum verifies that the download matches the GitHub release; it does not establish publisher identity.
+
 ## Highlights
 
 - Local projects with multiple resumable chats per folder
@@ -27,12 +35,14 @@ The installer includes the Node.js runtime used by the local orchestration servi
 - Git status, diffs, staging, commits, branches, push, pull, clone, GitHub publish and pull request handoff, checkpoints, review, and safe per-turn revert
 - Persistent terminal tabs and splits, workspace file preview, and agent-controlled localhost preview
 - Configurable theme, typography, density, panel placement, and panel sizing, with reduced-motion support
-- Optional schedules, redacted local exports, and paired private-network control
+- Optional schedules, redacted local exports, and a paired private-network remote protocol
 - Signed in-app updates with an explicit install and restart action
 
 Kimi Code Desktop starts sign-in through Kimi Code CLI and keeps authentication in the Kimi credential store. Passwords, API keys, OAuth tokens, and Kimi session credentials never enter desktop preferences.
 
 Chats created by discontinued runtime adapters remain available as read-only history. New work and resumed agent execution use Kimi Code only.
+
+Remote access requires a compatible companion client on a user-managed private network. The reference companion is still private while its protocol and distribution model are validated, so a public phone client is not available yet.
 
 ## Getting started
 
