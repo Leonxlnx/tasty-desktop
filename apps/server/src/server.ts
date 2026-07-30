@@ -147,7 +147,7 @@ const serverToken = process.env.KIMI_SERVER_TOKEN;
 const previewBridgeToken = process.env.KIMI_PREVIEW_BRIDGE_TOKEN || randomBytes(32).toString("hex");
 const configuredDefaultCwd = process.env.KIMI_DEFAULT_CWD ?? process.env.KIMI_WORKSPACE;
 const defaultCwd = configuredDefaultCwd === "" ? "" : resolve(configuredDefaultCwd ?? process.cwd());
-const configuredDataHome = resolve(process.env.TASTY_HOME ?? process.env.KIMI_DESKTOP_HOME ?? join(process.env.APPDATA ?? homedir(), "KimiCodeDesktop"));
+const configuredDataHome = resolve(process.env.KIMI_DESKTOP_HOME ?? process.env.TASTY_HOME ?? join(process.env.APPDATA ?? homedir(), "KimiCodeDesktop"));
 const configuredKimiHome = resolve(process.env.KIMI_CODE_HOME ?? join(homedir(), ".kimi-code"));
 await mkdir(configuredDataHome, { recursive: true });
 await mkdir(configuredKimiHome, { recursive: true });

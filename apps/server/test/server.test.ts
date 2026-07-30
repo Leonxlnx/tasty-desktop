@@ -17,6 +17,21 @@ describe("orchestration server", () => {
 
   afterEach(() => children.splice(0).forEach((child) => child.kill()));
 
+  it("prefers KIMI_DESKTOP_HOME over legacy TASTY_HOME", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-home-"));
+    const legacyHome = await mkdtemp(join(tmpdir(), "tasty-server-home-"));
+    await launchServer(serverPath, "45215", dataHome, children, { TASTY_HOME: legacyHome });
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45215", messages);
+
+    const createReply = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "threads.create", params: { standalone: true } }));
+    const created = ((await createReply).result as { thread: { cwd: string } }).thread;
+    expect(created.cwd).toBe(join(await realpath(dataHome), "runtime", "chats"));
+    socket.close();
+  });
+
   it("runs a full fake ACP turn through WebSocket", async () => {
     const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
     const port = "45117";
