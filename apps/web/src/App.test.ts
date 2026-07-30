@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, joinLocalPath, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, parseProjectScripts, presentDiagnostic, profileConfigUpdates, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, repositoryNameFromUrl, reviewCommentKey, reviewFeedbackPrompt, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, terminalContext, thinkingEffortLabel, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiRuntimes, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, joinLocalPath, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, parseProjectScripts, presentDiagnostic, profileConfigUpdates, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, repositoryNameFromUrl, reviewCommentKey, reviewFeedbackPrompt, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, terminalContext, thinkingEffortLabel, threadCanRun, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
 
 describe("global commands", () => {
   it("captures configurable shortcuts and disables conflicts", () => {
@@ -96,7 +96,7 @@ describe("composer send key", () => {
     expect(presentDiagnostic("ACP connection closed")).toBe("Agent runtime disconnected. Reconnecting without stopping active work.");
     expect(presentDiagnostic("Workspace path is required")).toBe("Workspace path is required");
     expect(presentDiagnostic("spawn EPERM")).toBeUndefined();
-    expect(presentDiagnostic("spawn ENOENT")).toBe("A required local tool was not found. Check the selected provider in Settings.");
+    expect(presentDiagnostic("spawn ENOENT")).toBe("A required local tool was not found. Check the Kimi CLI in Settings.");
   });
 
   it("recovers only after a reconnect remains unresolved", () => {
@@ -284,12 +284,26 @@ describe("harness commands", () => {
   });
 });
 
-describe("provider readiness", () => {
-  it("allows installed credential-managed CLIs with unknown status but rejects known signed-out providers", () => {
+describe("Kimi runtime boundary", () => {
+  it("allows the installed Kimi CLI with unknown status but rejects a known signed-out account", () => {
     expect(providerUsable({ installed: true, authenticated: null } as never)).toBe(true);
     expect(providerUsable({ installed: true, authenticated: true } as never)).toBe(true);
     expect(providerUsable({ installed: true, authenticated: false } as never)).toBe(false);
     expect(providerUsable({ installed: false, authenticated: true } as never)).toBe(false);
+  });
+
+  it("keeps only Kimi runtimes active while foreign threads remain historical", () => {
+    expect(filterKimiRuntimes([
+      { id: "kimi", provider: "kimi", name: "Kimi" },
+      { id: "codex", provider: "codex", name: "Codex" },
+      { id: "work", provider: "kimi", name: "Kimi in WSL" },
+    ] as never)).toEqual([
+      { id: "kimi", provider: "kimi", name: "Kimi" },
+      { id: "work", provider: "kimi", name: "Kimi in WSL" },
+    ]);
+    expect(threadCanRun(undefined)).toBe(true);
+    expect(threadCanRun({ provider: "kimi" } as never)).toBe(true);
+    expect(threadCanRun({ provider: "codex" } as never)).toBe(false);
   });
 });
 
@@ -656,10 +670,17 @@ describe("legacy thread ingress", () => {
   });
 
   it("preserves provider instance, parent, and goal metadata", () => {
-    expect(normalizeThread({
+    const historical = normalizeThread({
       threadId: "side", sessionId: "session", provider: "codex", instanceId: "work", parentThreadId: "main", cwd: "C:\\work", title: "Investigate",
       goal: { objective: "Find the regression", updatedAt: "2026-07-26T00:00:00.000Z" },
-    } as never)).toMatchObject({ provider: "codex", instanceId: "work", parentThreadId: "main", goal: { objective: "Find the regression" } });
+      turns: [{ turnId: "turn", startedAt: "2026-07-26T00:00:00.000Z", completedAt: "2026-07-26T00:01:00.000Z" }],
+      messages: [{ turnId: "turn", role: "assistant", text: "Preserved answer" }],
+      activity: [{ id: "step", turnId: "turn", kind: "thought", status: "completed", text: "Preserved step", seq: 1, createdAt: "2026-07-26T00:00:00.000Z", updatedAt: "2026-07-26T00:00:30.000Z" }],
+    } as never);
+    expect(historical).toMatchObject({ provider: "codex", instanceId: "work", parentThreadId: "main", goal: { objective: "Find the regression" } });
+    expect(historical.messages[0]?.text).toBe("Preserved answer");
+    expect(historical.activity[0]?.text).toBe("Preserved step");
+    expect(threadCanRun(historical)).toBe(false);
   });
 
   it("preserves isolated worktree and archive metadata", () => {

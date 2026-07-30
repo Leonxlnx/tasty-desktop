@@ -144,13 +144,13 @@ const initialTurnWindow = 60;
 let terminalEntryId = 0;
 const fallbackCommands: AvailableCommand[] = [
   { name: "goal", description: "Set, replace, or clear the goal for this chat." },
-  { name: "side", description: "Create a side chat with the same provider and workspace." },
+  { name: "side", description: "Create a side chat with the same Kimi runtime and workspace." },
   { name: "compact", description: "Compact the current agent session context." },
   { name: "status", description: "Show the current session and runtime status." },
   { name: "usage", description: "Show subscription usage reported by Kimi." },
   { name: "mcp", description: "Show MCP servers and tools available to Kimi." },
   { name: "tasks", description: "Show tasks managed by the current session." },
-  { name: "help", description: "Show provider commands and input help." },
+  { name: "help", description: "Show Kimi commands and input help." },
   { name: "mcp-config", description: "Configure MCP servers for Kimi Code." },
   { name: "update-config", description: "Review or update Kimi Code configuration." },
   { name: "check-kimi-code-docs", description: "Check the official Kimi Code documentation." },
@@ -224,7 +224,7 @@ function composerPrimaryLabel(action: ComposerPrimaryAction): string {
 export function presentDiagnostic(message: string): string | undefined {
   const normalized = message.trim();
   if (!normalized || /\bspawn\b.*\bEPERM\b/i.test(normalized)) return undefined;
-  if (/\bspawn\b.*\bENOENT\b/i.test(normalized)) return "A required local tool was not found. Check the selected provider in Settings.";
+  if (/\bspawn\b.*\bENOENT\b/i.test(normalized)) return "A required local tool was not found. Check the Kimi CLI in Settings.";
   if (/\bspawn\b.*\bEACCES\b/i.test(normalized)) return "Windows denied access to a required local tool. Check its permissions, then try again.";
   return /ACP connection closed|Server disconnected|Server is not connected/i.test(normalized)
     ? "Agent runtime disconnected. Reconnecting without stopping active work."
@@ -304,6 +304,21 @@ export function composerCanSubmit(
   configUpdating: boolean,
 ): boolean {
   return !configUpdating && targetKind === (view === "chats" ? "chat" : "project");
+}
+
+export function threadCanRun(thread: Pick<Thread, "provider"> | undefined): boolean {
+  return !thread || thread.provider === "kimi";
+}
+
+export function filterKimiRuntimes<T extends { id?: string; provider?: ProviderId }>(items: T[]): T[] {
+  return items.filter((item) => item.provider === "kimi" || (!item.provider && item.id === "kimi"));
+}
+
+function withKimiInstance(instances: Preferences["providerInstances"], instanceId?: string): Preferences["providerInstances"] {
+  const next = { ...instances };
+  if (instanceId) next.kimi = instanceId;
+  else delete next.kimi;
+  return next;
 }
 
 export function workspaceForView(
@@ -467,11 +482,13 @@ export function App() {
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
 
   const activeThread = threads.find((thread) => thread.threadId === activeThreadId);
-  const providerId = activeThread?.provider ?? preferences.provider;
-  const instanceId = activeThread?.instanceId ?? preferences.providerInstances[providerId];
-  const providerState = providers.find((provider) => provider.id === providerId);
-  const instanceState = providerInstances.find((instance) => instance.id === instanceId && instance.provider === providerId);
-  const runtimeReady = instanceId ? Boolean(instanceState?.installed) : providerId === "kimi" ? Boolean(auth?.authenticated && kimiRuntimeReady) : providerUsable(providerState);
+  const historicalThread = !threadCanRun(activeThread);
+  const providerId = activeThread?.provider ?? "kimi";
+  const instanceId = activeThread?.provider === "kimi" ? activeThread.instanceId : preferences.providerInstances.kimi;
+  const providerState = providers.find((provider) => provider.id === "kimi");
+  const instanceState = providerInstances.find((instance) => instance.id === instanceId && instance.provider === "kimi");
+  const kimiRuntimeAvailable = instanceId ? Boolean(instanceState?.installed) : Boolean(auth?.authenticated && kimiRuntimeReady);
+  const runtimeReady = !historicalThread && kimiRuntimeAvailable;
   const promptTrigger = useMemo(() => composerTrigger(prompt), [prompt]);
   const composerProjectCwd = activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : undefined;
   const fileSuggestionQuery = promptTrigger?.kind === "file" ? promptTrigger.query : undefined;
@@ -483,7 +500,7 @@ export function App() {
   currentConfigTargetKey.current = configTarget?.key;
   const agentRuns = useMemo(() => subagentRuns(activeThread), [activeThread]);
   const composerOptions = useMemo(() => activeThread ? activeThread.configOptions : applyDraftConfig(configDefaults, draftConfig), [activeThread, configDefaults, draftConfig]);
-  const workBlocksUpdate = hasBlockingWork(threads, draftSending);
+  const workBlocksUpdate = hasBlockingWork(threads.filter((thread) => thread.provider === "kimi"), draftSending);
   const updateBlocked = workBlocksUpdate || Object.keys(configUpdating).length > 0;
   const updateMutationsBlocked = updatePreparing || updateStatus.phase === "downloading" || updateStatus.phase === "installing";
   const configMutationPending = Object.keys(configUpdating).length > 0;
@@ -790,8 +807,8 @@ export function App() {
   }, [call, revealLocalPath, setDiagnostic]);
   const refreshProviders = useCallback(async () => {
     const result = await call("providers.list") as { providers: ProviderState[]; instances?: ProviderInstance[] };
-    setProviders(result.providers.map((provider) => ({ ...provider, id: normalizeProvider(provider.id ?? provider.provider), provider: normalizeProvider(provider.provider ?? provider.id) })));
-    setProviderInstances(result.instances?.map((instance) => ({ ...instance, provider: normalizeProvider(instance.provider) })) ?? []);
+    setProviders(filterKimiRuntimes(result.providers.map((provider) => ({ ...provider, id: normalizeProvider(provider.id ?? provider.provider), provider: normalizeProvider(provider.provider ?? provider.id) }))));
+    setProviderInstances(filterKimiRuntimes(result.instances?.map((instance) => ({ ...instance, provider: normalizeProvider(instance.provider) })) ?? []));
   }, [call]);
   const refreshEnvironments = useCallback(async () => {
     const result = await call("environments.list") as { environments: WslEnvironment[] };
@@ -829,7 +846,7 @@ export function App() {
     catch (error) { setDiagnostic(`Could not load schedules: ${error instanceof Error ? error.message : String(error)}`); }
   }, [call, setDiagnostic]);
   const createSchedule = useCallback(async (input: { name: string; text: string; recurrence: Schedule["recurrence"]; nextRunAt: string }) => {
-    if (!activeThread) throw new Error("Open the chat this schedule should use");
+    if (!activeThread || activeThread.provider !== "kimi") throw new Error("Open a Kimi chat before scheduling work");
     setSchedulesBusy(true);
     try {
       await call("schedules.create", { ...input, threadId: activeThread.threadId });
@@ -837,20 +854,22 @@ export function App() {
     } finally { setSchedulesBusy(false); }
   }, [activeThread, call, refreshSchedules]);
   const updateSchedule = useCallback(async (id: string, patch: Partial<Pick<Schedule, "enabled" | "name" | "text" | "recurrence" | "nextRunAt">>) => {
+    if (patch.enabled && schedules.find((schedule) => schedule.id === id)?.provider !== "kimi") throw new Error("Historical provider schedules cannot be resumed");
     setSchedulesBusy(true);
     try { await call("schedules.update", { id, ...patch }); await refreshSchedules(); }
     finally { setSchedulesBusy(false); }
-  }, [call, refreshSchedules]);
+  }, [call, refreshSchedules, schedules]);
   const deleteSchedule = useCallback(async (id: string) => {
     setSchedulesBusy(true);
     try { await call("schedules.delete", { id }); await refreshSchedules(); }
     finally { setSchedulesBusy(false); }
   }, [call, refreshSchedules]);
   const runSchedule = useCallback(async (id: string) => {
+    if (schedules.find((schedule) => schedule.id === id)?.provider !== "kimi") throw new Error("Historical provider schedules cannot be run");
     setSchedulesBusy(true);
     try { await call("schedules.run", { id }); await refreshSchedules(); }
     finally { setSchedulesBusy(false); }
-  }, [call, refreshSchedules]);
+  }, [call, refreshSchedules, schedules]);
   const exportSessions = useCallback(async (threadIds?: string[]) => {
     try {
       const result = await call("threads.export", threadIds ? { threadIds } : {}) as { path: string; threadCount: number };
@@ -963,13 +982,13 @@ export function App() {
   const refreshCapabilities = useCallback(async () => {
     setCapabilitiesLoading(true);
     try {
-      setCapabilities(await call("capabilities.list", { provider: providerId, ...(capabilityCwd ? { cwd: capabilityCwd } : {}) }) as KimiCapabilities);
+      setCapabilities(await call("capabilities.list", { provider: "kimi", ...(capabilityCwd ? { cwd: capabilityCwd } : {}) }) as KimiCapabilities);
     } catch (error) {
       setDiagnostic(error instanceof Error ? error.message : String(error));
     } finally {
       setCapabilitiesLoading(false);
     }
-  }, [call, capabilityCwd, providerId, setDiagnostic]);
+  }, [call, capabilityCwd, setDiagnostic]);
 
   useEffect(() => {
     if (connection === "connected") void refreshCapabilities();
@@ -1148,10 +1167,6 @@ export function App() {
           }).catch((error: Error) => setDiagnostic(error.message));
         }
         void refreshProviders().catch(() => undefined);
-      } else if (message.channel === "provider.authStatus") {
-        const status = message.payload as ProviderState & { event?: AuthState["event"] };
-        setProviders((current) => current.map((provider) => provider.id === status.provider ? { ...provider, ...status, id: status.provider } : provider));
-        if (status.event?.message) setDiagnostic(status.event.message);
       } else if (message.channel === "terminal.output") {
         const event = message.payload as TerminalEvent;
         const text = event.type === "exit" ? `Process exited${event.code == null ? "" : ` with code ${event.code}`}\n` : cleanTerminalOutput(event.text ?? "");
@@ -1197,25 +1212,25 @@ export function App() {
       setKimiRuntimeReady(Boolean(environment.initialize));
       if (environment.runtimeError) setDiagnostic(`Agent runtime unavailable: ${environment.runtimeError}`);
       if (environment.auth.authenticated) void refreshQuota();
-      return call("threads.list", { provider: preferences.provider, ...(preferences.providerInstances[preferences.provider] ? { instanceId: preferences.providerInstances[preferences.provider] } : {}) });
+      return call("threads.list", { provider: "kimi", ...(preferences.providerInstances.kimi ? { instanceId: preferences.providerInstances.kimi } : {}) });
     }).then((result) => {
       const listed = result as { threads: Thread[]; runtimeSessions: RuntimeSession[] };
       const incoming = listed.threads.map(normalizeThread);
       setThreads(incoming);
       setRuntimeSessions(listed.runtimeSessions);
-      setActiveThreadId((current) => current ?? incoming[0]?.threadId);
+      setActiveThreadId((current) => current ?? incoming.find((thread) => thread.provider === "kimi")?.threadId ?? incoming[0]?.threadId);
     }).catch((error: Error) => setDiagnostic(error.message)).finally(() => setBootstrapping(false));
-  }, [call, connection, preferences.provider, preferences.providerInstances, refreshQuota]);
+  }, [call, connection, preferences.providerInstances.kimi, refreshQuota]);
 
   useEffect(() => {
-    if (providerId !== "kimi" || connection !== "connected" || bootstrapping || runtimeReady || !auth?.authenticated) return;
+    if (connection !== "connected" || bootstrapping || kimiRuntimeAvailable || !auth?.authenticated) return;
     const timer = window.setInterval(() => {
       void call("env.bootstrap").then((result) => {
         if ((result as { initialize?: unknown }).initialize) setKimiRuntimeReady(true);
       }).catch(() => undefined);
     }, 12_000);
     return () => window.clearInterval(timer);
-  }, [auth?.authenticated, bootstrapping, call, connection, providerId, runtimeReady]);
+  }, [auth?.authenticated, bootstrapping, call, connection, kimiRuntimeAvailable]);
 
   useEffect(() => {
     if (fileSuggestionQuery === undefined || !composerProjectCwd) {
@@ -1237,18 +1252,18 @@ export function App() {
   useEffect(() => {
     setConfigDefaults([]);
     setDraftConfig({});
-  }, [providerId, instanceId]);
+  }, [instanceId]);
 
   useEffect(() => {
     if (!runtimeReady || configDefaults.length) return;
     let cancelled = false;
-    void call("runtime.configDefaults", { provider: providerId, ...(instanceId ? { instanceId } : {}) }).then((result) => {
+    void call("runtime.configDefaults", { provider: "kimi", ...(instanceId ? { instanceId } : {}) }).then((result) => {
       if (cancelled) return;
       const options = (result as { configOptions?: unknown }).configOptions;
       if (Array.isArray(options)) setConfigDefaults(options as ConfigOption[]);
     }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [call, configDefaults.length, instanceId, providerId, runtimeReady]);
+  }, [call, configDefaults.length, instanceId, runtimeReady]);
 
   useEffect(() => {
     if (!draftChat || activeThread) return;
@@ -1258,7 +1273,7 @@ export function App() {
   useEffect(() => {
     if (!runtimeReady || !activeThread || activeThread.archivedAt || isThreadBusy(activeThread)) return;
     let cancelled = false;
-    void call("threads.resume", { threadId: activeThread.threadId, sessionId: activeThread.sessionId, cwd: activeThread.cwd, provider: activeThread.provider, ...(activeThread.instanceId ? { instanceId: activeThread.instanceId } : {}), replay: false })
+    void call("threads.resume", { threadId: activeThread.threadId, sessionId: activeThread.sessionId, cwd: activeThread.cwd, provider: "kimi", ...(activeThread.instanceId ? { instanceId: activeThread.instanceId } : {}), replay: false })
       .catch((error: Error) => { if (!cancelled) setDiagnostic(error.message); });
     return () => { cancelled = true; };
   }, [activeThread?.archivedAt, activeThread?.cwd, activeThread?.instanceId, activeThread?.lifecycle.phase, activeThread?.running, activeThread?.sessionId, activeThread?.threadId, call, runtimeReady]);
@@ -1275,9 +1290,9 @@ export function App() {
     window.setTimeout(() => composerInput.current?.focus(), 0);
   }
 
-  function selectProvider(provider: ProviderId, selectedInstanceId?: string) {
-    if (activeThread || (provider === preferences.provider && selectedInstanceId === preferences.providerInstances[provider])) return;
-    setPreferences((current) => ({ ...current, provider, providerInstances: { ...current.providerInstances, [provider]: selectedInstanceId } }));
+  function selectKimiRuntime(selectedInstanceId?: string) {
+    if (activeThread || selectedInstanceId === preferences.providerInstances.kimi) return;
+    setPreferences((current) => ({ ...current, provider: "kimi", providerInstances: withKimiInstance(current.providerInstances, selectedInstanceId) }));
     setDiagnostics([]);
   }
 
@@ -1342,7 +1357,7 @@ export function App() {
     setCapabilityCenterOpen(false);
     setDraftChat(undefined);
     setActiveThreadId(thread.threadId);
-    setPreferences((current) => ({ ...current, provider: thread.provider, providerInstances: { ...current.providerInstances, [thread.provider]: thread.instanceId } }));
+    if (thread.provider === "kimi") setPreferences((current) => ({ ...current, provider: "kimi", providerInstances: withKimiInstance(current.providerInstances, thread.instanceId) }));
     setNavView(thread.kind === "chat" ? "chats" : "projects");
   }
 
@@ -1352,8 +1367,8 @@ export function App() {
         setCwd(session.cwd);
         rememberWorkspace(session.cwd);
       }
-      const selectedInstanceId = preferences.providerInstances[preferences.provider];
-      const result = await call("threads.resume", { threadId: session.sessionId, sessionId: session.sessionId, cwd: session.cwd, provider: preferences.provider, ...(selectedInstanceId ? { instanceId: selectedInstanceId } : {}), replay: false }) as { thread: Thread };
+      const selectedInstanceId = preferences.providerInstances.kimi;
+      const result = await call("threads.resume", { threadId: session.sessionId, sessionId: session.sessionId, cwd: session.cwd, provider: "kimi", ...(selectedInstanceId ? { instanceId: selectedInstanceId } : {}), replay: false }) as { thread: Thread };
       const thread = normalizeThread(result.thread);
       setThreads((current) => current.some((item) => item.threadId === thread.threadId) ? current : [thread, ...current]);
       selectThread(thread);
@@ -1399,8 +1414,8 @@ export function App() {
       const created = activeThread ? undefined : await call("threads.create", {
         ...(draftChat?.kind === "chat" ? { standalone: true } : { cwd: draftChat?.cwd }),
         ...(draftChat?.isolate ? { isolate: true } : {}),
-        provider: preferences.provider,
-        ...(preferences.providerInstances[preferences.provider] ? { instanceId: preferences.providerInstances[preferences.provider] } : {}),
+        provider: "kimi",
+        ...(preferences.providerInstances.kimi ? { instanceId: preferences.providerInstances.kimi } : {}),
         ...(Object.keys(draftConfig).length ? { config: draftConfig } : {}),
       }) as { thread: Thread };
       const thread = activeThread ?? normalizeThread(created!.thread);
@@ -1434,6 +1449,7 @@ export function App() {
   }
 
   function stopThread(threadId: string) {
+    if (threads.find((thread) => thread.threadId === threadId)?.provider !== "kimi") return;
     void call("threads.interruptTurn", { threadId, clearQueue: true }).catch((error: Error) => setDiagnostic(error.message));
   }
 
@@ -1450,7 +1466,7 @@ export function App() {
   }
 
   async function createSideThread(title?: string) {
-    if (!activeThread) return;
+    if (!activeThread || activeThread.provider !== "kimi") return;
     try {
       const result = await call("threads.createSide", { threadId: activeThread.threadId, ...(title?.trim() ? { title: title.trim() } : {}) }) as { thread: Thread };
       const side = normalizeThread(result.thread);
@@ -1472,6 +1488,7 @@ export function App() {
   }
 
   async function editTurnPrompt(text: string) {
+    if (activeThread?.provider !== "kimi") return;
     if (activeThread && activeThreadBusy) {
       try {
         await call("threads.interruptTurn", { threadId: activeThread.threadId, clearQueue: true });
@@ -1484,19 +1501,22 @@ export function App() {
   }
 
   function removeQueuedPrompt(threadId: string, queuedId: string) {
+    if (threads.find((thread) => thread.threadId === threadId)?.provider !== "kimi") return;
     void call("threads.removeQueuedTurn", { threadId, queuedId }).catch((error: Error) => setDiagnostic(error.message));
   }
 
   function updateQueuedPrompt(threadId: string, queuedId: string, text: string) {
+    if (threads.find((thread) => thread.threadId === threadId)?.provider !== "kimi") return;
     void call("threads.updateQueuedTurn", { threadId, queuedId, text }).catch((error: Error) => setDiagnostic(error.message));
   }
 
   function steerQueuedPrompt(threadId: string, queuedId: string) {
-    if (configUpdatesInFlight.current > 0) return;
+    if (configUpdatesInFlight.current > 0 || threads.find((thread) => thread.threadId === threadId)?.provider !== "kimi") return;
     void call("threads.steerQueuedTurn", { threadId, queuedId }).catch((error: Error) => setDiagnostic(error.message));
   }
 
   function clearQueuedPrompts(threadId: string) {
+    if (threads.find((thread) => thread.threadId === threadId)?.provider !== "kimi") return;
     void call("threads.clearQueue", { threadId }).catch((error: Error) => setDiagnostic(error.message));
   }
 
@@ -1544,12 +1564,12 @@ export function App() {
   }
 
   function respond(approval: Approval, optionId?: string) {
-    if (!activeThread) return;
+    if (!activeThread || activeThread.provider !== "kimi") return;
     void call("threads.respondToRequest", { threadId: activeThread.threadId, requestId: approval.requestId, optionId }).catch((error: Error) => setDiagnostic(error.message));
   }
 
   async function setConfig(configId: string, value: string, target = configTarget): Promise<boolean> {
-    if (!target || target.key !== currentConfigTargetKey.current || updateMutationsBlocked || configUpdatesInFlight.current > 0) return false;
+    if (!runtimeReady || !target || target.key !== currentConfigTargetKey.current || updateMutationsBlocked || configUpdatesInFlight.current > 0) return false;
     if (target.kind === "thread") {
       const threadId = target.threadId;
       const update = { targetKey: target.key, configId, requestId: ++configRequestId.current };
@@ -1635,6 +1655,12 @@ export function App() {
 
   function useCapabilityPrompt(text: string) {
     setCapabilityCenterOpen(false);
+    if (activeThread && activeThread.provider !== "kimi") {
+      activeThread.kind === "chat" ? createStandaloneChat() : createThread(activeThread.worktree?.sourceCwd ?? activeThread.cwd);
+      setPrompt(text);
+      window.setTimeout(() => composerInput.current?.focus(), 0);
+      return;
+    }
     if (!activeThread && !draftChat && !cwd) {
       setNavView("chats");
       setActiveThreadId(undefined);
@@ -1700,7 +1726,7 @@ export function App() {
     const permission = composerOptions.find(isModeOption);
     const profile: AgentProfile = {
       id: globalThis.crypto?.randomUUID?.() ?? `profile-${Date.now()}`,
-      name, provider: providerId, prompt: profilePrompt,
+      name, provider: "kimi", prompt: profilePrompt,
       ...(model ? { model: String(model.currentValue) } : {}),
       ...(reasoning ? { reasoning: String(reasoning.currentValue) } : {}),
       ...(permission ? { permission: String(permission.currentValue) } : {}),
@@ -1710,8 +1736,8 @@ export function App() {
   }
 
   async function useAgentProfile(profile: AgentProfile) {
-    if (profile.provider !== providerId) {
-      setDiagnostic(`This profile belongs to ${providerName(profile.provider)}. Select that provider in a new draft first.`);
+    if (profile.provider !== "kimi") {
+      setDiagnostic("This historical profile cannot be used with Kimi.");
       return;
     }
     for (const update of profileConfigUpdates(composerOptions, profile)) await setConfig(update.id, update.value);
@@ -1971,7 +1997,7 @@ export function App() {
   }
 
   async function revertTurn(turnId: string) {
-    if (!activeThread) return;
+    if (!activeThread || activeThread.provider !== "kimi") return;
     try {
       await call("checkpoints.revert", { threadId: activeThread.threadId, turnId });
     } catch (error) {
@@ -1980,7 +2006,7 @@ export function App() {
   }
 
   async function openCheckpointReview(turnId: string) {
-    if (!activeThread) return;
+    if (!activeThread || activeThread.provider !== "kimi") return;
     const threadId = activeThread.threadId;
     setRailView("git");
     setGitBusy(true);
@@ -1996,7 +2022,7 @@ export function App() {
   }
 
   async function revertCheckpointPart(path: string, hunkIndex?: number) {
-    if (!activeThread || !checkpointReview) return;
+    if (!activeThread || activeThread.provider !== "kimi" || !checkpointReview) return;
     setGitBusy(true);
     try {
       await call("checkpoints.revertPart", { threadId: activeThread.threadId, turnId: checkpointReview.turnId, path, ...(hunkIndex === undefined ? {} : { hunkIndex }) });
@@ -2008,7 +2034,7 @@ export function App() {
   }
 
   function addReviewFeedbackToPrompt() {
-    if (!checkpointReview) return;
+    if (!checkpointReview || activeThread?.provider !== "kimi") return;
     const feedback = reviewFeedbackPrompt(checkpointReview, reviewComments);
     if (!feedback) return;
     setPrompt((current) => `${current}${current && !/\s$/.test(current) ? "\n\n" : ""}${feedback}`);
@@ -2033,46 +2059,30 @@ export function App() {
     }
   }
 
-  async function beginLogin(provider: ProviderId = preferences.provider) {
+  async function beginLogin() {
     try {
-      if (provider === "kimi") {
-        setAuth((current) => current ? { ...current, loginRunning: true } : current);
-        setAuth(await call("auth.beginLogin", { provider }) as AuthState);
-      } else {
-        const status = await call("auth.beginLogin", { provider }) as ProviderState;
-        setProviders((current) => current.map((item) => item.id === provider ? { ...item, ...status, id: provider } : item));
-      }
+      setAuth((current) => current ? { ...current, loginRunning: true } : current);
+      setAuth(await call("auth.beginLogin", { provider: "kimi" }) as AuthState);
     } catch (error) {
       setDiagnostic(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function installCli(provider: ProviderId = preferences.provider) {
+  async function installCli() {
     try {
-      if (provider === "kimi") {
-        const status = await call("env.installCli") as AuthState;
-        setAuth(status);
-        await openExternalLink(status.installUrl);
-      } else {
-        const target = providers.find((item) => item.id === provider)?.installUrl;
-        if (!target) throw new Error("Provider install guide is unavailable");
-        await openExternalLink(target);
-      }
+      const status = await call("env.installCli") as AuthState;
+      setAuth(status);
+      await openExternalLink(status.installUrl);
     } catch (error) {
       setDiagnostic(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function logout(provider: ProviderId = preferences.provider) {
+  async function logout() {
     try {
-      if (provider === "kimi") {
-        setAuth(await call("auth.logout", { provider }) as AuthState);
-        setKimiRuntimeReady(false);
-        setQuota(undefined);
-      } else {
-        const status = await call("auth.logout", { provider }) as ProviderState;
-        setProviders((current) => current.map((item) => item.id === provider ? { ...item, ...status, id: provider } : item));
-      }
+      setAuth(await call("auth.logout", { provider: "kimi" }) as AuthState);
+      setKimiRuntimeReady(false);
+      setQuota(undefined);
       setSettingsCategory("account");
       setSettingsOpen(true);
     } catch (error) {
@@ -2251,13 +2261,15 @@ export function App() {
     { id: "open-editor", label: "Open workspace in editor", detail: preferences.editor === "system" ? "Reveal in the system file manager" : `Open with ${preferences.editor === "vscode" ? "Visual Studio Code" : "Cursor"}`, icon: <ArrowSquareOut />, disabled: !workspaceCwd, run: () => void openWorkspaceInEditor() },
     { id: "terminal", label: "Toggle terminal", detail: "Open a shell in the active workspace", icon: <TerminalWindow />, shortcut: preferences.keybindings.terminal, disabled: !workspaceCwd, run: () => { toggleRail("terminal"); setSearchOpen(false); setThreadFilter(""); } },
     { id: "agents", label: "Show subagents", detail: "Inspect active and completed delegated work", icon: <Robot />, disabled: !activeThread && !workspaceCwd, run: () => { setRailView("agents"); setSearchOpen(false); setThreadFilter(""); } },
-    { id: "settings", label: "Open settings", detail: "Appearance, shortcuts, providers, and updates", icon: <GearSix />, shortcut: preferences.keybindings.settings, run: () => { setSettingsCategory("general"); setSettingsOpen(true); setSearchOpen(false); setThreadFilter(""); } },
+    { id: "settings", label: "Open settings", detail: "Appearance, shortcuts, Kimi account, and updates", icon: <GearSix />, shortcut: preferences.keybindings.settings, run: () => { setSettingsCategory("general"); setSettingsOpen(true); setSearchOpen(false); setThreadFilter(""); } },
   ].filter((action) => !commandQuery || `${action.label} ${action.detail}`.toLowerCase().includes(commandQuery));
   const visibleProjectScripts = projectScripts.filter((script) => !commandQuery || `${script.name} ${script.command}`.toLowerCase().includes(commandQuery));
   const turnViews = useMemo(() => activeThread ? projectTurns(activeThread) : [], [activeThread]);
   const visibleTurnViews = useMemo(() => recentTurns(turnViews, visibleTurnLimit), [turnViews, visibleTurnLimit]);
   const hiddenTurnCount = turnViews.length - visibleTurnViews.length;
-  const runtimeCommands = activeThread?.commands.length ? activeThread.commands : threads.find((thread) => thread.commands.length)?.commands;
+  const runtimeCommands = activeThread?.provider === "kimi" && activeThread.commands.length
+    ? activeThread.commands
+    : threads.find((thread) => thread.provider === "kimi" && thread.commands.length)?.commands;
   const commandCatalog = useMemo(() => runtimeCommands?.length ? runtimeCommands : fallbackCommands, [runtimeCommands]);
   const nativeCapabilityCommands = useMemo(() => new Set((runtimeCommands ?? []).map((command) => command.name)), [runtimeCommands]);
   const commandSuggestions = useMemo(() => {
@@ -2367,7 +2379,7 @@ export function App() {
               <button type="button" role="menuitem" disabled={!workspaceCwd} onClick={() => { setOpenMenu(undefined); void openWorkspaceInEditor(); }}><span>Open in Editor</span></button>
               <span className="menu-separator" role="separator" />
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void runWindowAction("close"); }}><span>Close Window</span><kbd>Ctrl W</kbd></button>
-              <button type="button" role="menuitem" disabled={!providerState?.installed} onClick={() => { setOpenMenu(undefined); void logout(providerId); }}>Log Out of {providerName(providerId)}</button>
+              <button type="button" role="menuitem" disabled={!providerState?.installed} onClick={() => { setOpenMenu(undefined); void logout(); }}>Log Out of Kimi</button>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void exitApp(); }}>Exit</button>
             </div>}
           </div>
@@ -2425,7 +2437,7 @@ export function App() {
           <button className="toolbar-icon" type="button" aria-label="Open command palette" title={`Command palette (${preferences.keybindings.palette})`} onClick={() => setSearchOpen(true)}><MagnifyingGlass /></button>
         </div>
 
-        <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title={`${providerName(providerId)} profiles and runtime capabilities`} onClick={() => { setRailView(undefined); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Agents & extensions</strong><small>{capabilities?.provider === providerId ? `${preferences.agentProfiles.filter((profile) => profile.provider === providerId).length} profiles · ${capabilities.skills.length} skills` : `${providerName(providerId)} capabilities`}</small></span><CaretRight /></button>
+        <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title="Kimi profiles and runtime capabilities" onClick={() => { setRailView(undefined); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Agents & extensions</strong><small>{capabilities?.provider === "kimi" ? `${preferences.agentProfiles.filter((profile) => profile.provider === "kimi").length} profiles · ${capabilities.skills.length} skills` : "Kimi capabilities"}</small></span><CaretRight /></button>
         <button className={`capability-link ${settingsOpen && settingsCategory === "automations" ? "active" : ""}`} type="button" aria-current={settingsOpen && settingsCategory === "automations" ? "page" : undefined} title="Scheduled agent tasks" onClick={() => { setCapabilityCenterOpen(false); setSettingsCategory("automations"); setSettingsOpen(true); }}><Clock /><span><strong>Scheduled</strong><small>{schedules.filter((schedule) => schedule.enabled).length || ""}</small></span><CaretRight /></button>
 
         <div className="sidebar-body">
@@ -2463,10 +2475,10 @@ export function App() {
         </div>
 
         <footer className="sidebar-footer">
-          {providerId === "kimi" && <button className="sidebar-quota" type="button" title={quotaLeft === undefined ? "Subscription usage unavailable" : `${quotaLeft}% of current Kimi quota left`} onClick={() => { setSettingsCategory("usage"); setSettingsOpen(true); }}>
+          <button className="sidebar-quota" type="button" title={quotaLeft === undefined ? "Subscription usage unavailable" : `${quotaLeft}% of current Kimi quota left`} onClick={() => { setSettingsCategory("usage"); setSettingsOpen(true); }}>
             <Gauge />
             <span><span className="quota-label"><small>Kimi usage</small><strong>{quotaLeft === undefined ? (quotaLoading ? "Updating…" : "View") : `${quotaLeft}% left`}</strong></span>{quotaLeft !== undefined && <i><b style={{ transform: `scaleX(${quotaLeft / 100})` }} /></i>}</span>
-          </button>}
+          </button>
           {updateNotice && <div className="sidebar-update-note" role="status">{updateNotice}</div>}
           <div className="sidebar-footer-actions">
             <button className={`nav-item settings-link ${settingsOpen ? "active" : ""}`} type="button" title="Settings" onClick={() => { setSettingsCategory("general"); setSettingsOpen(true); }}><GearSix size={17} /><span>Settings</span></button>
@@ -2477,13 +2489,16 @@ export function App() {
 
       <section id="conversation-content" className="conversation" tabIndex={-1}>
         <header className="topbar">
-          <div className="topbar-title"><strong>{capabilityCenterOpen ? "Capabilities" : activeThread?.title ?? (draftChat ? "New chat" : navView === "chats" ? "Chats" : cwd ? workspaceName(cwd) : "Kimi Code")}</strong>{!capabilityCenterOpen && <span className="topbar-provider"><ProviderMark provider={providerId} />{providerName(providerId)}</span>}{!capabilityCenterOpen && (activeThread?.worktree || draftChat?.isolate) && <span className="worktree-badge" title={activeThread?.worktree ? `${activeThread.worktree.branch} · ${activeThread.cwd}` : "A new isolated Git worktree will be created when you send the first task"}><GitBranch />{activeThread?.worktree?.branch ?? "Isolated worktree"}</span>}</div>
+          <div className="topbar-title"><strong>{capabilityCenterOpen ? "Capabilities" : activeThread?.title ?? (draftChat ? "New chat" : navView === "chats" ? "Chats" : cwd ? workspaceName(cwd) : "Kimi Code")}</strong>{!capabilityCenterOpen && <span className="topbar-provider"><ProviderMark provider={providerId} />{providerName(providerId)}{historicalThread ? " · History" : ""}</span>}{!capabilityCenterOpen && (activeThread?.worktree || draftChat?.isolate) && <span className="worktree-badge" title={activeThread?.worktree ? `${activeThread.worktree.branch} · ${activeThread.cwd}` : "A new isolated Git worktree will be created when you send the first task"}><GitBranch />{activeThread?.worktree?.branch ?? "Isolated worktree"}</span>}</div>
           <div className="topbar-actions">
             {railAvailable && !capabilityCenterOpen && <button className={`panel-toggle rail-master-toggle ${railView ? "active" : ""}`} type="button" title={railView ? "Close work panel" : "Open work panel"} aria-label={railView ? "Close work panel" : "Open work panel"} aria-expanded={Boolean(railView)} onClick={() => setRailView((current) => current ? undefined : activeThread?.kind === "chat" ? "agents" : agentRuns.some((run) => run.status === "running") ? "agents" : "git")}><SidebarSimple /></button>}
           </div>
         </header>
 
-        {activeThread && !capabilityCenterOpen && <div className={`thread-contextbar ${activeThread.goal ? "has-goal" : ""}`}>
+        {activeThread && !capabilityCenterOpen && (historicalThread ? <div className="thread-contextbar historical-thread-banner" role="note">
+          <Archive /><span><strong>Historical {providerName(activeThread.provider)} chat</strong><small>This transcript is preserved locally and cannot continue in Kimi.</small></span>
+          <button type="button" disabled={!kimiRuntimeAvailable} onClick={() => activeThread.kind === "chat" ? createStandaloneChat() : createThread(activeThread.worktree?.sourceCwd ?? activeThread.cwd)}><Plus /> Start Kimi chat</button>
+        </div> : <div className={`thread-contextbar ${activeThread.goal ? "has-goal" : ""}`}>
           <button className="thread-goal" type="button" title={activeThread.goal ? "Edit this goal" : "Define a goal for this chat"} onClick={() => { setPrompt(activeThread.goal ? `/goal ${activeThread.goal.objective}` : "/goal "); window.setTimeout(() => composerInput.current?.focus(), 0); }}>
             <Hammer /><span><small>Goal</small><strong>{activeThread.goal?.objective ?? "Define what done means"}</strong></span>
           </button>
@@ -2491,7 +2506,7 @@ export function App() {
             {activeThread.goal && <button type="button" title="Clear goal" aria-label="Clear goal" onClick={() => void clearGoal(activeThread.threadId)}><X /></button>}
             <button type="button" title="Create a side chat" onClick={() => void createSideThread()}><GitBranch /><span>Side chat</span></button>
           </div>
-        </div>}
+        </div>)}
 
         <div className="timeline-shell">
           <div ref={timeline} className={`timeline ${capabilityCenterOpen ? "capability-timeline" : ""}`} onScroll={(event) => {
@@ -2499,13 +2514,13 @@ export function App() {
             timelinePinned.current = pinned;
             setShowJumpToLatest(!pinned && Boolean(activeThread && turnViews.length));
           }}>
-            {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter provider={providerId} data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} profiles={preferences.agentProfiles.filter((profile) => profile.provider === providerId)} profileDraft={profileDraft} nativePlugins={providerId === "kimi" && nativeCapabilityCommands.has("plugins")} nativeMcp={providerId === "kimi" && (nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp"))} canInstallSkill={providerId === "kimi" && Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onProfileDraft={setProfileDraft} onSaveProfile={saveAgentProfile} onUseProfile={useAgentProfile} onDeleteProfile={deleteAgentProfile} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding ? <Onboarding providers={providers} selected={preferences.provider} cwd={cwd} onProvider={selectProvider} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={(provider) => void call("auth.cancel", { provider })} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !runtimeReady && (!activeThread || !turnViews.length) ? <ProviderGate provider={providerState} onInstall={() => installCli(providerId)} onLogin={() => beginLogin(providerId)} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel", { provider: providerId })} /> : !activeThread || !turnViews.length ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} agentName={providerName(providerId)} canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
-            {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{hiddenTurnCount > 0 && <button className="conversation-history-more" type="button" onClick={() => setVisibleTurnLimit((current) => current + initialTurnWindow)}><CaretDown /> Show {Math.min(initialTurnWindow, hiddenTurnCount)} earlier turns</button>}{visibleTurnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={openCheckpointReview} />)}</div>}
+            {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter provider="kimi" data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} profiles={preferences.agentProfiles.filter((profile) => profile.provider === "kimi")} profileDraft={profileDraft} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} canInstallSkill={Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onProfileDraft={setProfileDraft} onSaveProfile={saveAgentProfile} onUseProfile={useAgentProfile} onDeleteProfile={deleteAgentProfile} onCopyPath={(path) => void navigator.clipboard.writeText(path)} /> : showOnboarding ? <Onboarding provider={providerState} cwd={cwd} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={() => void call("auth.cancel", { provider: "kimi" })} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !historicalThread && !runtimeReady && (!activeThread || !turnViews.length) ? <ProviderGate provider={providerState} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel", { provider: "kimi" })} /> : !historicalThread && (!activeThread || !turnViews.length) ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} agentName="Kimi" canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
+            {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage" key={activeThread?.threadId ?? `${draftChat?.kind ?? "empty"}-${navView}`}>{hiddenTurnCount > 0 && <button className="conversation-history-more" type="button" onClick={() => setVisibleTurnLimit((current) => current + initialTurnWindow)}><CaretDown /> Show {Math.min(initialTurnWindow, hiddenTurnCount)} earlier turns</button>}{visibleTurnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} readOnly={historicalThread} onOpenUrl={openExternalLink} onOpenPreview={showPreview} onOpenLocation={openLocation} onRevealPath={revealLocalPath} onEdit={editTurnPrompt} onRespond={respond} onRevert={revertTurn} onReview={openCheckpointReview} />)}</div>}
           </div>
           {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}><CaretDown /> Jump to latest</button>}
         </div>
 
-        {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <form ref={composer} className={`composer ${draftSending ? "sending" : activeThreadBusy ? "working" : ""}`} onSubmit={send}>
+        {!bootstrapping && !capabilityCenterOpen && !showOnboarding && (historicalThread ? <div className="composer historical-composer" role="status"><Archive /><span><strong>Read-only history</strong><small>Start a Kimi chat above to continue this work.</small></span></div> : <form ref={composer} className={`composer ${draftSending ? "sending" : activeThreadBusy ? "working" : ""}`} onSubmit={send}>
           {activeThread?.queue.length ? <PromptQueue
             queue={activeThread.queue}
             onClear={() => clearQueuedPrompts(activeThread.threadId)}
@@ -2515,7 +2530,7 @@ export function App() {
             onSteer={(queuedId) => steerQueuedPrompt(activeThread.threadId, queuedId)}
           /> : null}
           <textarea ref={composerInput} role="combobox" aria-autocomplete="list" aria-controls={suggestionsOpen ? "composer-suggestions" : undefined} aria-expanded={suggestionsOpen} aria-activedescendant={activeSuggestionId} aria-label={activeThreadBusy ? "Task prompt. Enter queues. Control Enter steers." : "Task prompt"} title={activeThreadBusy ? "Enter to queue · Ctrl+Enter to steer" : undefined} value={prompt} onChange={(event) => setPrompt(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={updateMutationsBlocked ? "Updating Kimi Code…" : !runtimeReady ? `Connect ${providerName(providerId)} to continue…` : activeThreadBusy ? "Queue the next instruction (Ctrl+Enter to steer)" : activeThread?.kind === "chat" || draftChat?.kind === "chat" ? `Message ${providerName(providerId)}` : activeThread || draftChat ? `Ask ${providerName(providerId)} to work in this project` : "Start a chat first"} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} />
-          {suggestionsOpen && (commandSuggestions.length > 0 || skillSuggestions.length > 0) && <div className="mention-menu command-mention-menu" id="composer-suggestions" role="listbox" aria-label={promptTrigger?.kind === "skill" ? "Installed skills" : "Provider commands"}>
+          {suggestionsOpen && (commandSuggestions.length > 0 || skillSuggestions.length > 0) && <div className="mention-menu command-mention-menu" id="composer-suggestions" role="listbox" aria-label={promptTrigger?.kind === "skill" ? "Installed skills" : "Kimi commands"}>
             <small>{promptTrigger?.kind === "skill" ? "Installed skills" : `Commands from ${providerName(providerId)}`}</small>
             {promptTrigger?.kind === "skill"
               ? skillSuggestions.map((skill, index) => <button id={`composer-suggestion-${index}`} type="button" role="option" tabIndex={-1} aria-selected={activeSuggestionIndex === index} key={`${skill.scope}-${skill.source}-${skill.name}`} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSuggestionIndex(index)} onClick={() => insertSkill(skill)}><SlidersHorizontal /><span><strong>${skill.name}</strong><small>{skill.description || `${skill.scope} skill`}</small></span><em>{skill.scope}</em></button>)
@@ -2536,7 +2551,7 @@ export function App() {
                 <button type="button" role="menuitem" onClick={() => startComposerTrigger("$")}><SlidersHorizontal /><span><strong>Skills</strong><small>Type $ to invoke a Kimi skill</small></span><kbd>$</kbd></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("folder")}><DownloadSimple /><span><strong>Install skill folder…</strong><small>{composerProjectCwd ? "Copy a skill bundle from this project" : "Available inside a project"}</small></span></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("file")}><FileText /><span><strong>Install skill file…</strong><small>{composerProjectCwd ? "Copy a flat Markdown skill from this project" : "Available inside a project"}</small></span></button>
-                {nativeCapabilityCommands.has("plugins") && <button type="button" role="menuitem" onClick={() => startComposerCommand("plugins")}><PlugsConnected /><span><strong>Plugin manager…</strong><small>Open the manager exposed by this provider</small></span><kbd>/plugins</kbd></button>}
+                {nativeCapabilityCommands.has("plugins") && <button type="button" role="menuitem" onClick={() => startComposerCommand("plugins")}><PlugsConnected /><span><strong>Plugin manager…</strong><small>Open Kimi's plugin manager</small></span><kbd>/plugins</kbd></button>}
                 <button type="button" role="menuitem" onClick={() => startComposerCommand("goal")}><Hammer /><span><strong>Set chat goal…</strong><small>Keep the objective attached to this chat</small></span><kbd>/goal</kbd></button>
                 <button type="button" role="menuitem" disabled={!activeThread} onClick={() => startComposerCommand("side")}><GitBranch /><span><strong>Create side chat…</strong><small>Branch without losing this chat</small></span><kbd>/side</kbd></button>
                 <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => startComposerTrigger("#")}><FileText /><span><strong>Project files</strong><small>Type # to mention workspace context</small></span><kbd>#</kbd></button>
@@ -2547,12 +2562,12 @@ export function App() {
               </div>
             </div>
             <div className="composer-controls">
-              {(activeThread || draftChat) && <ProviderPicker providers={providers} instances={providerInstances} selected={providerId} {...(instanceId ? { selectedInstanceId: instanceId } : {})} locked={Boolean(activeThread)} disabled={updateMutationsBlocked || configMutationPending} onSelect={selectProvider} />}
+              {(activeThread || draftChat) && <ProviderPicker providers={providers} instances={providerInstances} {...(instanceId ? { selectedInstanceId: instanceId } : {})} locked={Boolean(activeThread)} disabled={updateMutationsBlocked || configMutationPending} onSelect={selectKimiRuntime} />}
               {(activeThread || draftChat) && <ComposerConfig options={composerOptions} busyId={configBusyId} disabled={!runtimeReady || updateMutationsBlocked || configMutationPending} onChange={changeConfig} />}
               <button className={`icon-button primary composer-submit ${primaryComposerAction === "stop" ? "composer-stop" : ""}`} type={primaryComposerAction === "stop" ? "button" : "submit"} aria-label={composerPrimaryLabel(primaryComposerAction)} title={composerPrimaryLabel(primaryComposerAction)} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked || (primaryComposerAction !== "stop" && (!composerSubmitReady || !prompt.trim()))} onClick={primaryComposerAction === "stop" && activeThread ? () => stopThread(activeThread.threadId) : undefined}>{primaryComposerAction === "stop" ? <Stop weight="fill" /> : <ArrowUp weight="bold" />}</button>
             </div>
           </div>
-        </form>}
+        </form>)}
       </section>
 
       {railView && <aside className={`rail ${railView}-rail`}>
@@ -2617,12 +2632,12 @@ export function App() {
             </div>
           </>}
 
-          {railView === "agents" && <SubagentsRail provider={activeThread?.provider ?? providerId} runs={agentRuns} canStop={Boolean(providerState?.capabilities?.subagents.stop)} onInspect={async (run) => {
+          {railView === "agents" && <SubagentsRail provider={activeThread?.provider ?? providerId} runs={agentRuns} readOnly={historicalThread} canStop={!historicalThread && Boolean(providerState?.capabilities?.subagents.stop)} onInspect={async (run) => {
             const agentThreadId = run.threadIds?.[0];
-            if (!activeThread || !agentThreadId) return undefined;
+            if (!activeThread || historicalThread || !agentThreadId) return undefined;
             const result = await call("subagents.inspect", { threadId: activeThread.threadId, agentThreadId }) as { inspection: SubagentInspection };
             return result.inspection;
-          }} onStop={async (run) => { const agentThreadId = run.threadIds?.[0]; if (!activeThread || !agentThreadId) return; await call("subagents.stop", { threadId: activeThread.threadId, agentThreadId }); }} onUseAgent={(agent) => useCapabilityPrompt(`Use the ${agent} subagent for this task: `)} onOpenCenter={() => { setCapabilityTab("agents"); setCapabilityCenterOpen(true); setRailView(undefined); }} />}
+          }} onStop={async (run) => { const agentThreadId = run.threadIds?.[0]; if (!activeThread || historicalThread || !agentThreadId) return; await call("subagents.stop", { threadId: activeThread.threadId, agentThreadId }); }} onUseAgent={(agent) => { if (!historicalThread) useCapabilityPrompt(`Use the ${agent} subagent for this task: `); }} onOpenCenter={() => { setCapabilityTab("agents"); setCapabilityCenterOpen(true); setRailView(undefined); }} />}
         </div>
       </aside>}
 
@@ -2633,7 +2648,7 @@ export function App() {
             {paletteActions.length > 0 && <section><h2>Actions</h2>{paletteActions.map((action) => <button type="button" key={action.id} disabled={action.disabled} onClick={action.run}>{action.icon}<span><strong>{action.label}</strong><small>{action.detail}</small></span>{action.shortcut && <kbd>{action.shortcut}</kbd>}</button>)}</section>}
             {visibleProjectScripts.length > 0 && <section><h2>Project scripts</h2>{visibleProjectScripts.slice(0, 8).map((script) => <button type="button" key={script.name} onClick={() => runProjectScript(script)}><TerminalWindow /><span><strong>npm run {script.name}</strong><small>{script.command}</small></span></button>)}</section>}
             {visibleProjects.length > 0 && <section><h2>Projects</h2>{visibleProjects.slice(0, 6).map((project) => <button type="button" key={project.cwd} onClick={() => { setCapabilityCenterOpen(false); setCwd(project.cwd); rememberWorkspace(project.cwd); setNavView("projects"); setDraftChat(undefined); const first = project.threads[0]; if (first) selectThread(first); else setActiveThreadId(undefined); setSearchOpen(false); setThreadFilter(""); }}><FolderSimple /><span><strong>{project.name}</strong><small>{project.cwd}</small></span></button>)}</section>}
-            {(visibleThreads.length > 0 || visibleRuntimeSessions.length > 0) && <section><h2>Chats</h2>{visibleThreads.slice(0, 8).map((thread) => <button type="button" key={thread.threadId} onClick={() => { selectThread(thread); setSearchOpen(false); setThreadFilter(""); }}><ChatCircleDots /><span><strong>{thread.title}</strong><small>{providerName(thread.provider)}</small></span></button>)}{visibleRuntimeSessions.slice(0, Math.max(0, 8 - visibleThreads.length)).map((session) => <button type="button" key={session.sessionId} onClick={() => { setSearchOpen(false); setThreadFilter(""); void resumeSession(session); }}><ChatCircleDots /><span><strong>{session.title ?? "Agent chat"}</strong><small>{providerName(preferences.provider)}</small></span></button>)}</section>}
+            {(visibleThreads.length > 0 || visibleRuntimeSessions.length > 0) && <section><h2>Chats</h2>{visibleThreads.slice(0, 8).map((thread) => <button type="button" key={thread.threadId} onClick={() => { selectThread(thread); setSearchOpen(false); setThreadFilter(""); }}><ChatCircleDots /><span><strong>{thread.title}</strong><small>{thread.provider === "kimi" ? "Kimi" : `${providerName(thread.provider)} · History`}</small></span></button>)}{visibleRuntimeSessions.slice(0, Math.max(0, 8 - visibleThreads.length)).map((session) => <button type="button" key={session.sessionId} onClick={() => { setSearchOpen(false); setThreadFilter(""); void resumeSession(session); }}><ChatCircleDots /><span><strong>{session.title ?? "Agent chat"}</strong><small>Kimi</small></span></button>)}</section>}
             {!paletteActions.length && !visibleProjectScripts.length && !visibleProjects.length && !visibleThreads.length && !visibleRuntimeSessions.length && <div className="command-empty"><MagnifyingGlass /><strong>No matches</strong><span>Try an action, project, chat, or script name.</span></div>}
           </div>
           <footer><span>Everything stays local</span><span><kbd>{preferences.keybindings.palette}</kbd></span></footer>
@@ -2654,7 +2669,6 @@ export function App() {
         schedulesBusy={schedulesBusy}
         threads={threads}
         activeThread={activeThread}
-        selectedProvider={preferences.provider}
         cwd={cwd}
         quota={quota}
         quotaError={quotaError}
@@ -2803,7 +2817,7 @@ function ItemActions({ open, label, items, onToggle }: { open: boolean; label: s
 }
 
 function ThreadNavItem({ thread, active, chat = false, side = false, archived = false, menuOpen, onSelect, onMenu, onStop, onRename, onArchive, onDelete }: { thread: Thread; active: boolean; chat?: boolean; side?: boolean; archived?: boolean; menuOpen: boolean; onSelect: () => void; onMenu: (forceOpen?: boolean) => void; onStop: () => void; onRename: () => void; onArchive: () => void; onDelete: () => void }) {
-  const busy = isThreadBusy(thread);
+  const busy = thread.provider === "kimi" && isThreadBusy(thread);
   const items = [
     ...(busy ? [{ label: "Stop task", icon: <Stop weight="fill" />, onSelect: onStop }] : []),
     { label: "Rename chat", icon: <PencilSimple />, onSelect: onRename },
@@ -2811,7 +2825,7 @@ function ThreadNavItem({ thread, active, chat = false, side = false, archived = 
     { label: "Delete chat", icon: <Trash />, danger: true, onSelect: onDelete },
   ];
   return <div className={`thread-row-wrap ${side ? "side-thread-row" : ""} ${active ? "active" : ""}`} onContextMenu={(event) => { event.preventDefault(); onMenu(true); }}>
-    <button className={`thread ${chat ? "chat-thread" : ""} ${active ? "active" : ""}`} type="button" aria-current={active ? "page" : undefined} onClick={onSelect}>
+    <button className={`thread ${chat ? "chat-thread" : ""} ${active ? "active" : ""}`} type="button" aria-current={active ? "page" : undefined} title={thread.provider === "kimi" ? thread.title : `${thread.title} · Historical ${providerName(thread.provider)} chat`} onClick={onSelect}>
       {side && <GitBranch className="side-thread-icon" />}{chat ? <span className="thread-copy"><strong>{thread.title}</strong></span> : <span>{thread.title}</span>}
     </button>
     <span className="thread-row-actions">{busy && <i className="thread-running" role="status" aria-label={`Task ${thread.lifecycle.phase}`} />}<ItemActions open={menuOpen} label={`Manage ${thread.title}`} items={items} onToggle={onMenu} /></span>
@@ -2878,26 +2892,29 @@ type ComposerControl = {
   choices: Array<{ value: string; name: string; description?: string; danger?: boolean }>;
 };
 
-function ProviderPicker({ providers, instances, selected, selectedInstanceId, locked, disabled, onSelect }: { providers: ProviderState[]; instances: ProviderInstance[]; selected: ProviderId; selectedInstanceId?: string; locked: boolean; disabled: boolean; onSelect: (provider: ProviderId, instanceId?: string) => void }) {
+function ProviderPicker({ providers, instances, selectedInstanceId, locked, disabled, onSelect }: { providers: ProviderState[]; instances: ProviderInstance[]; selectedInstanceId?: string; locked: boolean; disabled: boolean; onSelect: (instanceId?: string) => void }) {
   const [open, setOpen] = useState(false);
-  const provider = providers.find((item) => item.id === selected);
-  const choices = providers.map((item) => ({
-    value: item.id,
-    name: item.name,
-    description: !item.installed ? "CLI not installed" : item.authenticated === false ? "Sign in required" : item.account ?? `${item.protocol} runtime`,
-  })).concat(instances.map((instance) => ({ value: `${instance.provider}:${instance.id}` as ProviderId, name: instance.name, description: instance.environment ?? `${providerName(instance.provider)} · configured instance${instance.installed ? "" : " · CLI missing"}` })));
-  const selectedInstance = instances.find((instance) => instance.id === selectedInstanceId && instance.provider === selected);
+  const defaultRuntimeValue = "__kimi_default__";
+  const provider = providers.find((item) => item.id === "kimi");
+  const kimiInstances = instances.filter((instance) => instance.provider === "kimi");
+  const choices = [{
+    value: defaultRuntimeValue,
+    name: provider?.name ?? "Kimi",
+    description: !provider?.installed ? "CLI not installed" : provider.authenticated === false ? "Sign in required" : provider.account ?? "Default Kimi runtime",
+  }, ...kimiInstances.map((instance) => ({ value: instance.id, name: instance.name, description: instance.environment ?? `Configured Kimi runtime${instance.installed ? "" : " · CLI missing"}` }))];
+  const selectedInstance = kimiInstances.find((instance) => instance.id === selectedInstanceId);
+  if (choices.length === 1) return null;
   const control: ComposerControl = {
-    id: "provider",
-    label: "Provider",
+    id: "runtime",
+    label: "Kimi runtime",
     icon: <Robot />,
-    tooltip: locked ? "Provider is fixed for this chat" : "AI provider for the new chat",
-    current: selectedInstance?.name ?? provider?.name ?? providerName(selected),
-    value: selectedInstance ? `${selected}:${selectedInstance.id}` : selected,
+    tooltip: locked ? "Kimi runtime is fixed for this chat" : "Kimi runtime for the new chat",
+    current: selectedInstance?.name ?? provider?.name ?? "Kimi",
+    value: selectedInstance?.id ?? defaultRuntimeValue,
     choices,
     disabled: locked || disabled || !choices.length,
   };
-  return <div className="provider-picker"><ConfigControl control={control} open={open} onToggle={() => setOpen((current) => !current)} onClose={() => setOpen(false)} onPick={(value) => { const [providerValue, instanceValue] = value.split(":", 2); onSelect(normalizeProvider(providerValue), instanceValue); setOpen(false); }} /></div>;
+  return <div className="provider-picker"><ConfigControl control={control} open={open} onToggle={() => setOpen((current) => !current)} onClose={() => setOpen(false)} onPick={(value) => { onSelect(value === defaultRuntimeValue ? undefined : value); setOpen(false); }} /></div>;
 }
 
 export function ComposerConfig({ options, busyId, disabled = false, onChange }: { options: ConfigOption[]; busyId?: string | undefined; disabled?: boolean; onChange: (configId: string, value: string) => void }) {
@@ -2909,7 +2926,7 @@ export function ComposerConfig({ options, busyId, disabled = false, onChange }: 
   if (model) {
     const choices = flattenOptions(model);
     controls.push({
-      id: model.id, label: "Model", icon: <Cpu />, tooltip: "Model the provider uses for this chat",
+      id: model.id, label: "Model", icon: <Cpu />, tooltip: "Model Kimi uses for this chat",
       current: currentChoiceName(model), value: String(model.currentValue), disabled: choices.length < 2,
       choices: choices.map((choice) => ({ value: choice.value, name: choice.name, description: modelDescription(choice.name) })),
     });
@@ -3065,7 +3082,7 @@ function modelDescription(name: string): string {
   if (/swarm/i.test(name)) return "Parallel agent orchestration";
   if (/k3/i.test(name)) return "Flagship coding and agent model";
   if (/k2/i.test(name)) return "Fast, efficient coding model";
-  return "Available from the active provider";
+  return "Available from Kimi";
 }
 
 function isModelOption(option: ConfigOption): boolean {
@@ -3115,7 +3132,7 @@ export function applyDraftConfig(defaults: ConfigOption[], draft: Record<string,
   return defaults.map((option) => draft[option.id] !== undefined ? { ...option, currentValue: draft[option.id]! } : option);
 }
 
-function SettingsDialog({ category, query, preferences, auth, providers, environments, remote, remotePairing, remoteBusy, schedules, schedulesBusy, threads, activeThread, selectedProvider, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onExportDiagnostics, onExportSessions, onRefreshEnvironments, onRefreshRemote, onConfigureRemote, onCreateRemotePairing, onRevokeRemoteDevice, onCreateSchedule, onUpdateSchedule, onDeleteSchedule, onRunSchedule, onShowOnboarding }: {
+function SettingsDialog({ category, query, preferences, auth, providers, environments, remote, remotePairing, remoteBusy, schedules, schedulesBusy, threads, activeThread, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onExportDiagnostics, onExportSessions, onRefreshEnvironments, onRefreshRemote, onConfigureRemote, onCreateRemotePairing, onRevokeRemoteDevice, onCreateSchedule, onUpdateSchedule, onDeleteSchedule, onRunSchedule, onShowOnboarding }: {
   category: SettingsCategory;
   query: string;
   preferences: Preferences;
@@ -3129,7 +3146,6 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
   schedulesBusy: boolean;
   threads: Thread[];
   activeThread: Thread | undefined;
-  selectedProvider: ProviderId;
   cwd: string;
   quota: KimiQuota | undefined;
   quotaError: string | undefined;
@@ -3141,9 +3157,9 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
   onPreferences: (patch: Partial<Preferences>) => void;
   onClose: () => void;
   onChooseWorkspace: () => Promise<void>;
-  onInstallCli: (provider?: ProviderId) => Promise<void>;
-  onLogin: (provider?: ProviderId) => Promise<void>;
-  onLogout: (provider?: ProviderId) => Promise<void>;
+  onInstallCli: () => Promise<void>;
+  onLogin: () => Promise<void>;
+  onLogout: () => Promise<void>;
   onRefreshQuota: () => Promise<void>;
   onCheckUpdates: (manual?: boolean) => Promise<void>;
   onInstallUpdate: () => Promise<void>;
@@ -3164,7 +3180,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
     { id: "general", label: "General", keywords: "workspace folder startup onboarding density send enter shift keyboard", icon: <SlidersHorizontal /> },
     { id: "appearance", label: "Appearance", keywords: "theme light dark colors accent font text zoom", icon: <Palette /> },
     { id: "layout", label: "Layout", keywords: "sidebar side panel rail resize left right", icon: <SidebarSimple /> },
-    { id: "account", label: "Providers", keywords: "profile login logout kimi codex openai claude anthropic cursor cli", icon: <UserCircle /> },
+    { id: "account", label: "Kimi account", keywords: "profile login logout kimi cli account", icon: <UserCircle /> },
     { id: "environments", label: "Environments", keywords: "windows wsl linux distributions runtime execution", icon: <TerminalWindow /> },
     { id: "remote", label: "Remote access", keywords: "phone mobile pairing device lan private network tailscale", icon: <DeviceMobile /> },
     { id: "automations", label: "Automations", keywords: "scheduled tasks daily weekly recurring headless notifications", icon: <Clock /> },
@@ -3177,6 +3193,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
   const visibleCategories = categories.filter((item) => !normalizedQuery || `${item.label} ${item.keywords}`.toLowerCase().includes(normalizedQuery));
   const current = categories.find((item) => item.id === category) ?? categories[0]!;
   const shortcutConflicts = keybindingConflicts(preferences.keybindings);
+  const kimiProvider = providers.find((provider) => provider.id === "kimi");
   const updateTitle = updateStatus.phase === "available" ? `Version ${updateStatus.version} is available` : updateStatus.phase === "downloading" ? `Downloading ${updateStatus.version}` : updateStatus.phase === "installing" ? `Installing ${updateStatus.version}` : updateStatus.phase === "checking" ? "Checking for updates" : updateStatus.phase === "current" ? "Kimi Code is up to date" : updateStatus.phase === "error" ? "Update check failed" : "Automatic updates";
   const updateMessage = updateStatus.phase === "downloading" ? `${updateStatus.percent ?? 0}% complete` : updateStatus.phase === "installing" ? "The app will restart when installation finishes." : updateStatus.phase === "error" ? updateStatus.message : updateStatus.currentVersion ? `Installed version ${updateStatus.currentVersion}` : updateStatus.version ? `Installed version ${updateStatus.version}` : "Updates are checked automatically when the app starts.";
   const remoteMode = !remote?.config.enabled ? "off" : remote.config.bind === "0.0.0.0" ? "lan" : "loopback";
@@ -3211,7 +3228,7 @@ function SettingsDialog({ category, query, preferences, auth, providers, environ
               <section className="settings-group"><h2>Sizing</h2><SettingsRow title="Sidebar width" description="Drag the divider in the workspace or adjust it here."><label className="settings-range"><input type="range" min="84" max="420" step="4" value={preferences.sidebarWidth} onChange={(event) => onPreferences({ sidebarCollapsed: false, sidebarWidth: clampPanelWidth("sidebar", Number(event.target.value)) })} /><output>{preferences.sidebarWidth}px</output></label></SettingsRow><SettingsRow title="Work panel width" description="Applies to every work-panel tab, including desktop preview."><label className="settings-range"><input type="range" min="260" max="1200" step="4" value={preferences.railWidth} onChange={(event) => onPreferences({ railWidth: clampPanelWidth("rail", Number(event.target.value)) })} /><output>{preferences.railWidth}px</output></label></SettingsRow><SettingsRow title="Restore layout" description="Return panels to their balanced default positions and sizes."><button className="secondary" type="button" onClick={() => onPreferences({ sidebarCollapsed: false, sidebarSide: "left", railSide: "right", sidebarWidth: defaultPreferences.sidebarWidth, railWidth: defaultPreferences.railWidth })}><ArrowsClockwise /> Reset panels</button></SettingsRow></section>
             </>}
 
-            {category === "account" && <section className="settings-group"><h2>Agent providers</h2><div className="settings-provider-list">{providers.map((provider) => <article className={provider.id === selectedProvider ? "active" : ""} key={provider.id}><ProviderMark provider={provider.id} /><div><strong>{provider.name}</strong><small>{!provider.installed ? "CLI not installed" : provider.authenticated === true ? provider.account ?? "Account connected" : provider.authenticated === false ? "Sign in required" : provider.account ?? "CLI ready"}</small></div><button className="provider-default" type="button" disabled={provider.id === selectedProvider} onClick={() => onPreferences({ provider: provider.id })}>{provider.id === selectedProvider ? "Default" : "Use"}</button>{!provider.installed ? <button className="secondary" type="button" onClick={() => void onInstallCli(provider.id)}><DownloadSimple /> Guide</button> : provider.authenticated === true ? <button className="secondary danger-text" type="button" disabled={provider.loginRunning} onClick={() => void onLogout(provider.id)}><SignOut /> Log out</button> : <button className="secondary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin(provider.id)}><SignIn />{provider.loginRunning ? "Waiting…" : "Sign in"}</button>}</article>)}</div>{selectedProvider === "kimi" && auth?.home && <code className="account-home">{auth.home}</code>}<p className="settings-note">Kimi Code starts official local runtimes. Passwords and API credentials stay in each provider's own account store and never enter this repository.</p></section>}
+            {category === "account" && <section className="settings-group"><h2>Kimi account</h2><div className="settings-provider-list">{kimiProvider ? <article className="active"><ProviderMark provider="kimi" /><div><strong>{kimiProvider.name}</strong><small>{!kimiProvider.installed ? "CLI not installed" : kimiProvider.authenticated === true ? kimiProvider.account ?? "Account connected" : kimiProvider.authenticated === false ? "Sign in required" : kimiProvider.account ?? "CLI ready"}</small></div>{!kimiProvider.installed ? <button className="secondary" type="button" onClick={() => void onInstallCli()}><DownloadSimple /> Guide</button> : kimiProvider.authenticated === true ? <button className="secondary danger-text" type="button" disabled={kimiProvider.loginRunning} onClick={() => void onLogout()}><SignOut /> Log out</button> : <button className="secondary" type="button" disabled={kimiProvider.loginRunning} onClick={() => void onLogin()}><SignIn />{kimiProvider.loginRunning ? "Waiting…" : "Sign in"}</button>}</article> : <p className="settings-note">Checking the local Kimi Code CLI…</p>}</div>{auth?.home && <code className="account-home">{auth.home}</code>}<p className="settings-note">Kimi Code uses the official local Kimi runtime. Passwords and API credentials stay in Kimi's account store and never enter this repository.</p></section>}
 
             {category === "environments" && <section className="settings-group"><h2>Execution environments</h2><SettingsRow title="Windows" description="Kimi Code orchestration and local runtimes run under this Windows account."><span className="environment-status healthy">Active</span></SettingsRow>{environments.map((environment) => <SettingsRow key={environment.name} title={environment.name} description={environment.system ? "WSL system distribution; intentionally unavailable for agent work." : environment.healthy ? "Healthy WSL agent boundary." : environment.message ?? "WSL distribution is unavailable."}><span className={`environment-status ${environment.healthy && !environment.system ? "healthy" : ""}`}>{environment.system ? "System" : environment.healthy ? "Ready" : "Unavailable"}</span></SettingsRow>)}<button className="secondary" type="button" onClick={() => void onRefreshEnvironments()}><ArrowsClockwise /> Refresh</button><p className="settings-note">Named Kimi runtimes can be configured in <code>provider-instances.json</code>. Windows remains the default; only healthy user distributions are offered.</p></section>}
 
@@ -3245,6 +3262,7 @@ function ScheduleSettings({ schedules, threads, activeThread, busy, onCreate, on
 }) {
   const [draft, setDraft] = useState({ name: "", text: "", recurrence: "once" as Schedule["recurrence"], nextRunAt: localDateTimeValue(Date.now() + 60 * 60_000) });
   const [error, setError] = useState<string>();
+  const activeKimiThread = activeThread?.provider === "kimi" ? activeThread : undefined;
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setError(undefined);
@@ -3255,14 +3273,14 @@ function ScheduleSettings({ schedules, threads, activeThread, busy, onCreate, on
   };
   return <>
     <section className="settings-group"><h2>New scheduled task</h2><form className="schedule-form" onSubmit={(event) => void submit(event)}>
-      <p>Schedules run in the currently open chat and retain its provider, workspace, and permission boundary.</p>
-      <label><span>Target</span><strong>{activeThread?.title ?? "Open a chat first"}</strong></label>
+      <p>Schedules run in the currently open Kimi chat and retain its workspace and permission boundary.</p>
+      <label><span>Target</span><strong>{activeKimiThread?.title ?? (activeThread ? "Historical chats are read-only" : "Open a Kimi chat first")}</strong></label>
       <label><span>Name</span><input required maxLength={120} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="Daily project review" /></label>
       <label><span>Instruction</span><textarea required maxLength={100_000} value={draft.text} onChange={(event) => setDraft({ ...draft, text: event.target.value })} placeholder="Review open changes and report failures." /></label>
       <div><label><span>Run</span><input required type="datetime-local" value={draft.nextRunAt} onChange={(event) => setDraft({ ...draft, nextRunAt: event.target.value })} /></label><label><span>Repeat</span><select value={draft.recurrence} onChange={(event) => setDraft({ ...draft, recurrence: event.target.value as Schedule["recurrence"] })}><option value="once">Once</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label></div>
-      {error && <p className="schedule-error" role="alert">{error}</p>}<button className="primary" type="submit" disabled={busy || !activeThread || !draft.name.trim() || !draft.text.trim()}><Clock /> Schedule task</button>
+      {error && <p className="schedule-error" role="alert">{error}</p>}<button className="primary" type="submit" disabled={busy || !activeKimiThread || !draft.name.trim() || !draft.text.trim()}><Clock /> Schedule task</button>
     </form></section>
-    <section className="settings-group"><h2>Schedules</h2><div className="schedule-list">{schedules.map((schedule) => { const thread = threads.find((candidate) => candidate.threadId === schedule.threadId); const run = (operation: Promise<void>) => void operation.catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))); return <article key={schedule.id}><Clock /><span><strong>{schedule.name}</strong><small>{schedule.enabled ? `${schedule.recurrence} · ${relativeTime(schedule.nextRunAt)}` : "Paused"} · {thread?.title ?? "Unavailable chat"}</small>{schedule.lastResult && <small>{schedule.lastResult}</small>}</span><div><button className="secondary" type="button" disabled={busy} onClick={() => run(onRun(schedule.id))}>Run now</button><button className="secondary" type="button" disabled={busy} onClick={() => run(onUpdate(schedule.id, { enabled: !schedule.enabled }))}>{schedule.enabled ? "Pause" : "Resume"}</button><button className="secondary danger-text" type="button" disabled={busy} aria-label={`Delete ${schedule.name}`} onClick={() => run(onDelete(schedule.id))}><Trash /></button></div></article>; })}{!schedules.length && <p>No scheduled tasks yet.</p>}</div>{error && <p className="schedule-error settings-note" role="alert">{error}</p>}<p className="settings-note">Missed recurring times advance to the next calendar slot instead of replaying a backlog. Failed runs stay visible here and never change permissions automatically.</p></section>
+    <section className="settings-group"><h2>Schedules</h2><div className="schedule-list">{schedules.map((schedule) => { const thread = threads.find((candidate) => candidate.threadId === schedule.threadId); const historical = schedule.provider !== "kimi" || (thread && thread.provider !== "kimi"); const run = (operation: Promise<void>) => void operation.catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))); return <article key={schedule.id}><Clock /><span><strong>{schedule.name}</strong><small>{schedule.enabled ? `${schedule.recurrence} · ${relativeTime(schedule.nextRunAt)}` : "Paused"} · {thread?.title ?? "Unavailable chat"}{historical ? " · Historical" : ""}</small>{schedule.lastResult && <small>{schedule.lastResult}</small>}</span><div><button className="secondary" type="button" disabled={busy || historical} onClick={() => run(onRun(schedule.id))}>Run now</button><button className="secondary" type="button" disabled={busy || (historical && !schedule.enabled)} onClick={() => run(onUpdate(schedule.id, { enabled: !schedule.enabled }))}>{schedule.enabled ? "Pause" : "Resume"}</button><button className="secondary danger-text" type="button" disabled={busy} aria-label={`Delete ${schedule.name}`} onClick={() => run(onDelete(schedule.id))}><Trash /></button></div></article>; })}{!schedules.length && <p>No scheduled tasks yet.</p>}</div>{error && <p className="schedule-error settings-note" role="alert">{error}</p>}<p className="settings-note">Missed recurring times advance to the next calendar slot instead of replaying a backlog. Failed runs stay visible here and never change permissions automatically.</p></section>
   </>;
 }
 
@@ -3300,7 +3318,7 @@ function settingsDescription(category: SettingsCategory): string {
     general: "Workspace defaults and everyday behavior.",
     appearance: "Theme, typography, color, and interface scale.",
     layout: "Place and resize every part of the workspace.",
-    account: "Local provider runtimes, accounts, and defaults.",
+    account: "Local Kimi runtime, account, and sign-in state.",
     environments: "Windows and WSL execution boundaries for local agents.",
     remote: "Pair and revoke private-network companion devices.",
     automations: "Schedule explicit agent tasks and review delivery state.",
@@ -3397,7 +3415,7 @@ function CapabilityEmpty({ icon, title, text, action, onAction }: { icon: React.
   return <div className="capability-empty"><span>{icon}</span><strong>{title}</strong><p>{text}</p>{action && onAction && <button type="button" onClick={() => void onAction()}>{action}</button>}</div>;
 }
 
-function SubagentsRail({ provider, runs, canStop, onInspect, onStop, onUseAgent, onOpenCenter }: { provider: ProviderId; runs: SubagentRun[]; canStop: boolean; onInspect: (run: SubagentRun) => Promise<SubagentInspection | undefined>; onStop: (run: SubagentRun) => Promise<void>; onUseAgent: (agent: string) => void; onOpenCenter: () => void }) {
+function SubagentsRail({ provider, runs, readOnly, canStop, onInspect, onStop, onUseAgent, onOpenCenter }: { provider: ProviderId; runs: SubagentRun[]; readOnly: boolean; canStop: boolean; onInspect: (run: SubagentRun) => Promise<SubagentInspection | undefined>; onStop: (run: SubagentRun) => Promise<void>; onUseAgent: (agent: string) => void; onOpenCenter: () => void }) {
   const active = runs.filter((run) => run.status === "running").length;
   const [selectedId, setSelectedId] = useState<string>();
   const [inspection, setInspection] = useState<SubagentInspection>();
@@ -3432,24 +3450,20 @@ function SubagentsRail({ provider, runs, canStop, onInspect, onStop, onUseAgent,
   </section>;
   return <section className="agents-rail-content">
     <header><div><span>{active ? `${active} active` : "Subagents"}</span><strong>Focused work, separate context.</strong></div><button type="button" onClick={onOpenCenter}>Browse agents</button></header>
-    {runs.length ? <div className="agent-run-list">{runs.map((run) => <button className={`agent-run ${run.status}`} type="button" key={run.id} onClick={() => void inspect(run)}><span className="agent-run-state">{run.status === "running" ? <i /> : run.status === "completed" ? <Check /> : <WarningCircle />}</span><span className="agent-run-copy"><strong>{run.description}</strong><small><b>{run.type}</b>{run.background ? " · background" : " · foreground"}{run.agentId ? ` · ${run.agentId}` : ""}</small></span><span>{run.detail ?? run.status}</span><CaretRight /></button>)}</div> : <div className="agents-empty"><Robot /><strong>No subagents in this chat</strong><p>Ask the active provider to delegate exploration, planning, or implementation without filling the main context.</p><div><button type="button" onClick={() => onUseAgent("explore")}>Explore</button><button type="button" onClick={() => onUseAgent("plan")}>Plan</button><button type="button" onClick={() => onUseAgent("coder")}>Code</button></div></div>}
+    {runs.length ? <div className="agent-run-list">{runs.map((run) => <button className={`agent-run ${run.status}`} type="button" key={run.id} onClick={() => void inspect(run)}><span className="agent-run-state">{run.status === "running" ? <i /> : run.status === "completed" ? <Check /> : <WarningCircle />}</span><span className="agent-run-copy"><strong>{run.description}</strong><small><b>{run.type}</b>{run.background ? " · background" : " · foreground"}{run.agentId ? ` · ${run.agentId}` : ""}</small></span><span>{run.detail ?? run.status}</span><CaretRight /></button>)}</div> : <div className="agents-empty"><Robot /><strong>{readOnly ? "No recorded subagents" : "No subagents in this chat"}</strong><p>{readOnly ? "This historical chat cannot start or steer subagents." : "Ask Kimi to delegate exploration, planning, or implementation without filling the main context."}</p>{!readOnly && <div><button type="button" onClick={() => onUseAgent("explore")}>Explore</button><button type="button" onClick={() => onUseAgent("plan")}>Plan</button><button type="button" onClick={() => onUseAgent("coder")}>Code</button></div>}</div>}
   </section>;
 }
 
-function Onboarding({ providers, selected, cwd, onProvider, onInstall, onLogin, onOpenUrl, onChooseWorkspace, onCancel, onFinish, onSkip }: {
-  providers: ProviderState[]; selected: ProviderId; cwd: string; onProvider: (provider: ProviderId) => void; onInstall: (provider: ProviderId) => Promise<void>; onLogin: (provider: ProviderId) => Promise<void>; onOpenUrl: (url: string) => Promise<void>;
-  onChooseWorkspace: () => Promise<void>; onCancel: (provider: ProviderId) => void; onFinish: () => void; onSkip: () => void;
+function Onboarding({ provider, cwd, onInstall, onLogin, onOpenUrl, onChooseWorkspace, onCancel, onFinish, onSkip }: {
+  provider: ProviderState | undefined; cwd: string; onInstall: () => Promise<void>; onLogin: () => Promise<void>; onOpenUrl: (url: string) => Promise<void>;
+  onChooseWorkspace: () => Promise<void>; onCancel: () => void; onFinish: () => void; onSkip: () => void;
 }) {
-  const provider = providers.find((item) => item.id === selected);
   const connected = providerUsable(provider);
   return <section className="onboarding">
     <header><div className="onboarding-mark"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div><div><span>Welcome to Kimi Code</span><h1>Your Kimi workspace, ready to build.</h1><p>Connect Kimi Code CLI with your own account and quota. Credentials stay with Kimi; thread metadata stays locally on this computer.</p></div></header>
-    <div className="provider-grid" role="radiogroup" aria-label="AI provider">
-      {providers.length ? providers.map((item) => <button className={item.id === selected ? "active" : ""} type="button" role="radio" aria-checked={item.id === selected} key={item.id} onClick={() => onProvider(item.id)}><ProviderMark provider={item.id} /><span><strong>{item.name}</strong><small>{!item.installed ? "Install CLI" : item.authenticated === false ? "Sign in" : item.account ?? "Ready"}</small></span>{item.id === selected && <Check />}</button>) : <ProviderSkeleton />}
-    </div>
     <ol className="setup-steps">
-      <li className={provider?.installed ? "complete" : ""}><span>{provider?.installed ? <Check /> : "1"}</span><div><strong>Install {provider?.name ?? "a provider"}</strong><p>{provider?.installed ? `Found the ${provider.name} CLI.` : "Open the provider's official installation guide, then return here."}</p>{provider && !provider.installed && <button className="primary" type="button" onClick={() => void onInstall(provider.id)}><DownloadSimple />Open install guide</button>}</div></li>
-      <li className={connected ? "complete" : ""}><span>{connected ? <Check /> : "2"}</span><div><strong>Connect your Kimi account</strong><p>{connected ? provider?.account ?? "Kimi Code is ready." : "Use Kimi's official sign-in flow. This app never receives your password."}</p>{provider?.installed && !connected && <div className="auth-actions"><button className="primary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin(provider.id)}><SignIn />{provider.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button>{provider.loginRunning && <button className="secondary" type="button" onClick={() => onCancel(provider.id)}>Cancel</button>}</div>}{provider?.event?.operation === "login" && provider.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(provider.event!.url!)}>Open verification</button>}{provider?.event?.operation === "login" && provider.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(provider.event?.code ?? "")}><Copy />{provider.event.code}</button>}</div></li>
+      <li className={provider?.installed ? "complete" : ""}><span>{provider?.installed ? <Check /> : "1"}</span><div><strong>Install Kimi Code CLI</strong><p>{provider?.installed ? "Found the Kimi Code CLI." : "Open Kimi's official installation guide, then return here."}</p>{provider && !provider.installed && <button className="primary" type="button" onClick={() => void onInstall()}><DownloadSimple />Open install guide</button>}</div></li>
+      <li className={connected ? "complete" : ""}><span>{connected ? <Check /> : "2"}</span><div><strong>Connect your Kimi account</strong><p>{connected ? provider?.account ?? "Kimi Code is ready." : "Use Kimi's official sign-in flow. This app never receives your password."}</p>{provider?.installed && !connected && <div className="auth-actions"><button className="primary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin()}><SignIn />{provider.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button>{provider.loginRunning && <button className="secondary" type="button" onClick={onCancel}>Cancel</button>}</div>}{provider?.event?.operation === "login" && provider.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(provider.event!.url!)}>Open verification</button>}{provider?.event?.operation === "login" && provider.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(provider.event?.code ?? "")}><Copy />{provider.event.code}</button>}</div></li>
       <li className={cwd ? "complete" : ""}><span>{cwd ? <Check /> : "3"}</span><div><strong>Choose a workspace</strong><p>{cwd || "Pick the folder your agent can work in."}</p><button className="secondary" type="button" onClick={() => void onChooseWorkspace()}><FolderOpen />{cwd ? "Change folder" : "Choose folder"}</button></div></li>
     </ol>
     <footer><button className="text-button" type="button" onClick={onSkip}>Skip for now</button><button className="primary" type="button" disabled={!connected || !cwd} onClick={onFinish}>Start coding</button></footer>
@@ -3459,16 +3473,12 @@ function Onboarding({ providers, selected, cwd, onProvider, onInstall, onLogin, 
 function ProviderGate({ provider, onInstall, onLogin, onOpenUrl, onCancel }: {
   provider: ProviderState | undefined; onInstall: () => Promise<void>; onLogin: () => Promise<void>; onOpenUrl: (url: string) => Promise<void>; onCancel: () => void;
 }) {
-  if (!provider) return <section className="auth-card" aria-live="polite"><ArrowsClockwise size={24} /><div><h1>Checking providers</h1><p>Reading the locally installed agent CLIs…</p></div></section>;
+  if (!provider) return <section className="auth-card" aria-live="polite"><ArrowsClockwise size={24} /><div><h1>Checking Kimi Code</h1><p>Reading the locally installed Kimi CLI…</p></div></section>;
   return <section className="auth-card"><ProviderMark provider={provider.id} /><div><h1>{provider.installed ? "Connect Kimi Code" : "Install Kimi Code CLI"}</h1><p>{provider.installed ? "Sign in through Kimi Code CLI. Credentials remain in Kimi's local account store." : "Kimi Code CLI was not found. Open its official install guide, then return here."}</p>{provider.event?.operation === "login" && provider.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(provider.event!.url!)}>Open verification</button>}{provider.event?.operation === "login" && provider.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(provider.event?.code ?? "")}><Copy />{provider.event.code}</button>}<div className="auth-actions">{provider.installed ? <button className="primary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin()}>{provider.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button> : <button className="primary" type="button" onClick={() => void onInstall()}>Open install guide</button>}{provider.loginRunning && <button className="secondary" type="button" onClick={onCancel}>Cancel</button>}</div></div></section>;
 }
 
 function ProviderMark({ provider }: { provider: ProviderId }) {
   return <span className={`provider-mark provider-${provider}`} aria-hidden="true">{provider === "kimi" ? "K" : provider === "codex" ? "O" : provider === "claude" ? "A" : provider === "cursor" ? "C" : "OC"}</span>;
-}
-
-function ProviderSkeleton() {
-  return <div className="provider-skeleton" aria-label="Loading providers" aria-busy="true"><span /><span /><span /><span /></div>;
 }
 
 function SidebarSkeleton() {
@@ -3618,7 +3628,7 @@ function loadPreferences(): Preferences {
       hiddenSessions,
       composerConfig,
       yoloAcknowledged: value.yoloAcknowledged === true,
-      provider: normalizeProvider(value.provider),
+      provider: "kimi",
       providerInstances,
       editor: value.editor === "vscode" || value.editor === "cursor" ? value.editor : "system",
       keybindings,
@@ -3987,8 +3997,9 @@ export function reviewFeedbackPrompt(review: CheckpointReview, comments: Record<
   return items.length ? `Review the following feedback for turn ${review.turnId}:\n\n${items.map((item) => `- ${item.path} (${item.label})\n  ${item.comment.slice(0, 4_000)}`).join("\n")}` : "";
 }
 
-function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPath, onEdit, onRespond, onRevert, onReview }: {
+function TurnBlock({ turn, readOnly, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPath, onEdit, onRespond, onRevert, onReview }: {
   turn: TurnView;
+  readOnly: boolean;
   onOpenUrl: (url: string) => Promise<void>;
   onOpenPreview: (url: string) => void;
   onOpenLocation: (path: string) => void;
@@ -4002,7 +4013,7 @@ function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPat
   const { commentary, final } = turnAssistantMessages(turn);
   const report = final?.text ?? "";
   const failure = turn.record.error
-    ?? (turn.record.stopReason === "error" ? "The agent stopped before finishing this turn. You can edit the prompt and try again." : undefined);
+    ?? (turn.record.stopReason === "error" ? readOnly ? "This historical turn stopped before finishing." : "The agent stopped before finishing this turn. You can edit the prompt and try again." : undefined);
   const previewLink = useMemo(() => findLocalPreviewUrl([
     ...turn.messages.map((message) => message.text),
     ...turn.tools.flatMap((tool) => [tool.title ?? "", ...tool.content?.map((item) => item.content?.text ?? "") ?? [], safeStringify(tool.rawOutput)]),
@@ -4012,22 +4023,22 @@ function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPat
       <MarkdownText text={message.text} onOpenUrl={onOpenUrl} />
       <PathLinks text={message.text} onReveal={onRevealPath} />
       <AttachmentSummary message={message} />
-      <div className="message-actions"><button type="button" aria-label="Edit task" title="Edit task" onClick={() => void onEdit(message.text)}><PencilSimple /></button><button type="button" aria-label="Copy task" title="Copy task" onClick={() => void navigator.clipboard.writeText(message.text)}><Copy /></button></div>
+      <div className="message-actions">{!readOnly && <button type="button" aria-label="Edit task" title="Edit task" onClick={() => void onEdit(message.text)}><PencilSimple /></button>}<button type="button" aria-label="Copy task" title="Copy task" onClick={() => void navigator.clipboard.writeText(message.text)}><Copy /></button></div>
     </article>)}
     <div className="turn-output">
       {(turn.running || turn.activity.length > 0 || commentary.length > 0) && <ActivityTimeline turn={turn} commentary={commentary} onOpenUrl={onOpenUrl} onOpenLocation={onOpenLocation} />}
       {final && <article className="assistant-message markdown"><MarkdownText text={final.text} onOpenUrl={onOpenUrl} /><PathLinks text={final.text} onReveal={onRevealPath} /></article>}
       {turn.approvals.map((approval) => <article className="approval" key={approval.requestId}>
         <div><strong>{approval.kind === "question" ? "Question" : approval.kind === "plan_review" ? "Review plan" : "Permission required"}</strong><p>{approval.title}</p></div>
-        <div className="approval-actions">{approval.options.map((option) => <button className={permissionClass(option.kind)} type="button" key={option.optionId} onClick={() => onRespond(approval, option.optionId)}>{option.name}</button>)}</div>
+        <div className="approval-actions">{readOnly ? <small>Historical request · no response can be sent</small> : approval.options.map((option) => <button className={permissionClass(option.kind)} type="button" key={option.optionId} onClick={() => onRespond(approval, option.optionId)}>{option.name}</button>)}</div>
       </article>)}
       {turn.record.completedAt && failure && <div className="turn-failure" role="alert"><WarningCircle /><div><strong>Stopped with an error</strong><span>{failure}</span></div></div>}
       {turn.record.completedAt && (report || turn.canRevert || turn.record.usage?.totalTokens != null || turn.record.stopReason === "cancelled" || failure) && <footer className="turn-report">
         <div className="turn-report-meta">{turn.record.usage?.totalTokens != null && <span>{formatTokens(turn.record.usage.totalTokens)} tokens</span>}{turn.record.stopReason === "cancelled" && <span>Stopped</span>}{failure && <span>Failed</span>}</div>
-        <div className="turn-report-actions">{report && <button type="button" onClick={() => void navigator.clipboard.writeText(report)}><Copy /> Copy summary</button>}{turn.canRevert && <button type="button" onClick={() => void onRevert(turn.record.turnId)}><ArrowCounterClockwise /> Undo changes</button>}</div>
+        <div className="turn-report-actions">{report && <button type="button" onClick={() => void navigator.clipboard.writeText(report)}><Copy /> Copy summary</button>}{!readOnly && turn.canRevert && <button type="button" onClick={() => void onRevert(turn.record.turnId)}><ArrowCounterClockwise /> Undo changes</button>}</div>
       </footer>}
       {turn.record.completedAt && previewLink && <div className="turn-preview-link"><span><i />{previewLink}</span><div><button type="button" onClick={() => onOpenPreview(previewLink)}><Browser /> Preview</button><button type="button" onClick={() => void onOpenUrl(previewLink)}><ArrowSquareOut /> Browser</button></div></div>}
-      {turn.record.completedAt && turn.checkpoint?.diff && <ChangesCard diff={turn.checkpoint.diff} onReview={() => onReview(turn.record.turnId)} />}
+      {turn.record.completedAt && turn.checkpoint?.diff && <ChangesCard diff={turn.checkpoint.diff} readOnly={readOnly} onReview={() => onReview(turn.record.turnId)} />}
     </div>
   </section>;
 }
@@ -4180,13 +4191,13 @@ export function summarizeDiff(diff: string): DiffSummary {
   return { files, additions: files.reduce((sum, file) => sum + file.additions, 0), deletions: files.reduce((sum, file) => sum + file.deletions, 0) };
 }
 
-function ChangesCard({ diff, onReview }: { diff: string; onReview: () => void }) {
+function ChangesCard({ diff, readOnly, onReview }: { diff: string; readOnly: boolean; onReview: () => void }) {
   const [showAll, setShowAll] = useState(false);
   const summary = summarizeDiff(diff);
   if (!summary.files.length) return null;
   return <details className="changes-card">
     <summary><span><GitBranch /><strong>Edited {summary.files.length} {summary.files.length === 1 ? "file" : "files"}</strong></span><span className="diff-totals"><b>+{summary.additions}</b><i>−{summary.deletions}</i><CaretDown /></span></summary>
-    <div className="change-list">{summary.files.slice(0, showAll ? undefined : 3).map((file) => <div className="change-row" key={file.path}><span>{file.path}</span><small><b>+{file.additions}</b><i>−{file.deletions}</i></small></div>)}<div className="changes-actions">{summary.files.length > 3 && <button type="button" onClick={() => setShowAll((value) => !value)}>{showAll ? "Show less" : `Show ${summary.files.length - 3} more`}</button>}<button type="button" onClick={() => void navigator.clipboard.writeText(diff)}>Copy patch</button><button type="button" onClick={onReview}>Open Changes</button></div></div>
+    <div className="change-list">{summary.files.slice(0, showAll ? undefined : 3).map((file) => <div className="change-row" key={file.path}><span>{file.path}</span><small><b>+{file.additions}</b><i>−{file.deletions}</i></small></div>)}<div className="changes-actions">{summary.files.length > 3 && <button type="button" onClick={() => setShowAll((value) => !value)}>{showAll ? "Show less" : `Show ${summary.files.length - 3} more`}</button>}<button type="button" onClick={() => void navigator.clipboard.writeText(diff)}>Copy patch</button>{!readOnly && <button type="button" onClick={onReview}>Open Changes</button>}</div></div>
   </details>;
 }
 
