@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { Archive, ArrowCounterClockwise, ArrowSquareOut, ArrowsClockwise, ArrowUp, Brain, Browser, Broom, Bug, CaretDown, CaretRight, ChatCircleDots, Check, Circle, Clock, Copy, CornersIn, CornersOut, Cpu, DeviceMobile, DotsThree, DownloadSimple, FileText, FolderOpen, FolderSimple, Gauge, GearSix, GitBranch, GitCommit, Hammer, ImageSquare, Info, MagnifyingGlass, Minus, Palette, PaperPlaneRight, Paperclip, PencilSimple, PlugsConnected, Plus, Robot, ShieldCheck, SidebarSimple, SignIn, SignOut, SlidersHorizontal, Square, Stop, TerminalWindow, Trash, UserCircle, WarningCircle, X } from "@phosphor-icons/react";
 import { createPortal } from "react-dom";
 import { ConnectionSupervisor, type ConnectionState, type ServerMessage } from "./connection";
@@ -4003,10 +4003,10 @@ function TurnBlock({ turn, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPat
   const report = final?.text ?? "";
   const failure = turn.record.error
     ?? (turn.record.stopReason === "error" ? "The agent stopped before finishing this turn. You can edit the prompt and try again." : undefined);
-  const previewLink = findLocalPreviewUrl([
+  const previewLink = useMemo(() => findLocalPreviewUrl([
     ...turn.messages.map((message) => message.text),
     ...turn.tools.flatMap((tool) => [tool.title ?? "", ...tool.content?.map((item) => item.content?.text ?? "") ?? [], safeStringify(tool.rawOutput)]),
-  ].join("\n"));
+  ].join("\n")), [turn.messages, turn.tools]);
   return <section className={`turn-block ${turn.running ? "running" : "complete"}`}>
     {user.map((message, index) => <article className="user-message" key={`${message.turnId}-user-${index}`}>
       <MarkdownText text={message.text} onOpenUrl={onOpenUrl} />
@@ -4073,12 +4073,12 @@ export function ActivityTimeline({ turn, commentary = turnAssistantMessages(turn
   const statusLabel = turn.running ? turnPhaseLabel(turn.phase) : `Worked for ${duration}`;
   return <details className="turn-activity" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary><span className={`activity-state ${turn.running ? "active" : ""}`}>{turn.running ? <i className="activity-spinner" aria-hidden="true" /> : <Check />}</span><strong>{statusLabel}</strong><small>{turn.running ? duration : `${timeline.length} ${timeline.length === 1 ? "step" : "steps"}`}</small><CaretDown /></summary>
-    <div className="activity-content">
+    {open && <div className="activity-content">
       {hidden > 0 && !showEarlier && <button className="activity-earlier" type="button" onClick={() => setShowEarlier(true)}>Show {hidden} earlier {hidden === 1 ? "step" : "steps"}</button>}
       {entries.map((item) => item.kind === "activity"
         ? <ActivityStep key={item.id} entry={item.entry} current={item.id === currentEntryId} tool={item.entry.toolCallId ? turn.tools.find((tool) => tool.toolCallId === item.entry.toolCallId) : undefined} onOpenUrl={onOpenUrl} onOpenLocation={onOpenLocation} />
         : <CommentaryStep key={item.id} message={item.message} current={item.id === currentEntryId} onOpenUrl={onOpenUrl} />)}
-    </div>
+    </div>}
   </details>;
 }
 
@@ -4090,16 +4090,18 @@ function turnPhaseLabel(phase: TurnPhase): string {
 }
 
 function CommentaryStep({ message, current, onOpenUrl }: { message: Message; current: boolean; onOpenUrl: (url: string) => Promise<void> }) {
-  return <details className="activity-step commentary-step">
+  const [open, setOpen] = useState(false);
+  return <details className="activity-step commentary-step" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary><span className="activity-step-state">{current ? <i className="activity-spinner" aria-label="Current update" /> : <Check />}</span><span>{activityPreview(message.text)}</span><CaretRight /></summary>
-    <div className="activity-detail"><div className="markdown"><MarkdownText text={message.text} onOpenUrl={onOpenUrl} /></div></div>
+    {open && <div className="activity-detail"><div className="markdown"><MarkdownText text={message.text} onOpenUrl={onOpenUrl} /></div></div>}
   </details>;
 }
 
 function ActivityStep({ entry, current, tool, onOpenUrl, onOpenLocation }: { entry: ActivityEntry; current: boolean; tool: Tool | undefined; onOpenUrl: (url: string) => Promise<void>; onOpenLocation: (path: string) => void }) {
-  return <details className={`activity-step ${entry.status}`}>
+  const [open, setOpen] = useState(false);
+  return <details className={`activity-step ${entry.status}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary><span className="activity-step-state">{entry.status === "completed" ? <Check /> : entry.status === "failed" ? <WarningCircle /> : current ? <i className="activity-spinner" aria-label="Current step" /> : <Circle />}</span><span>{activityPreview(entry.text)}</span><CaretRight /></summary>
-    <div className="activity-detail">{entry.kind === "tool" && tool ? <ToolCard tool={tool} onOpenLocation={onOpenLocation} /> : <div className="markdown"><MarkdownText text={entry.text} onOpenUrl={onOpenUrl} /></div>}</div>
+    {open && <div className="activity-detail">{entry.kind === "tool" && tool ? <ToolCard tool={tool} onOpenLocation={onOpenLocation} /> : <div className="markdown"><MarkdownText text={entry.text} onOpenUrl={onOpenUrl} /></div>}</div>}
   </details>;
 }
 
@@ -4130,11 +4132,11 @@ function useElapsedDuration(start: string, end: string | undefined, running: boo
   return formatDuration(start, end);
 }
 
-function MarkdownText({ text, onOpenUrl }: { text: string; onOpenUrl: (url: string) => Promise<void> }) {
+const MarkdownText = memo(function MarkdownText({ text, onOpenUrl }: { text: string; onOpenUrl: (url: string) => Promise<void> }) {
   return <Suspense fallback={<div className="markdown-fallback">{text}</div>}>
     <MarkdownTextContent text={text} onOpenUrl={onOpenUrl} />
   </Suspense>;
-}
+});
 
 export function extractLocalPaths(text: string): string[] {
   const codePaths = [...text.matchAll(/`([^`\r\n]+)`/g)].map((match) => match[1] ?? "");

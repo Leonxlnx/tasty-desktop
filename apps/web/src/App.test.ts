@@ -159,8 +159,22 @@ describe("turn activity", () => {
     const completed = renderToStaticMarkup(createElement(ActivityTimeline, { ...callbacks, turn: { ...base, running: false, record: { ...base.record, completedAt: "2026-07-18T10:00:10.000Z" } } as never }));
     expect(running).toContain('<details class="turn-activity" open="">');
     expect(running).toContain("Working");
+    expect(running).toContain("Inspecting files");
     expect(completed).not.toContain('<details class="turn-activity" open="">');
     expect(completed).toContain("Worked for 10s");
+    expect(completed).not.toContain("Inspecting files");
+  });
+
+  it("does not render collapsed tool output until its step is expanded", () => {
+    const activity = [{ id: "tool-1", turnId: "turn-1", kind: "tool", status: "in_progress", text: "Run the focused check", toolCallId: "call-1", seq: 1, createdAt: "2026-07-18T10:00:00.000Z", updatedAt: "2026-07-18T10:00:01.000Z" }];
+    const tools = [{ toolCallId: "call-1", turnId: "turn-1", title: "Focused check", status: "in_progress", rawOutput: "SECRET_RAW_OUTPUT" }];
+    const markup = renderToStaticMarkup(createElement(ActivityTimeline, {
+      turn: { record: { turnId: "turn-1", startedAt: "2026-07-18T10:00:00.000Z" }, messages: [], activity, tools, approvals: [], canRevert: false, running: true } as never,
+      onOpenUrl: async () => undefined,
+      onOpenLocation: () => undefined,
+    }));
+    expect(markup).toContain("Run the focused check");
+    expect(markup).not.toContain("SECRET_RAW_OUTPUT");
   });
 
   it("keeps activity attached to its original turn", () => {
