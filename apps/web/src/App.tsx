@@ -314,6 +314,14 @@ export function filterKimiRuntimes<T extends { id?: string; provider?: ProviderI
   return items.filter((item) => item.provider === "kimi" || (!item.provider && item.id === "kimi"));
 }
 
+export function preferredInitialThreadId(threads: Array<Pick<Thread, "threadId" | "provider">>): string | undefined {
+  return threads.find((thread) => thread.provider === "kimi")?.threadId ?? threads[0]?.threadId;
+}
+
+export function shouldShowRuntimePicker(instanceIds: string[], selectedInstanceId?: string): boolean {
+  return instanceIds.length > 0 || Boolean(selectedInstanceId);
+}
+
 function withKimiInstance(instances: Preferences["providerInstances"], instanceId?: string): Preferences["providerInstances"] {
   const next = { ...instances };
   if (instanceId) next.kimi = instanceId;
@@ -757,7 +765,7 @@ export function App() {
       const triggered = (action: KeybindingAction) => !conflicts.has(action) && matchesShortcut(event, preferences.keybindings[action]);
       if (triggered("newChat")) {
         event.preventDefault();
-        if (runtimeReady) navView === "chats" ? createStandaloneChat() : createThread(cwd);
+        if (kimiRuntimeAvailable && (navView === "chats" || cwd)) navView === "chats" ? createStandaloneChat() : createThread(cwd);
       } else if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "n") {
         event.preventDefault();
         void createAppWindow();
@@ -793,7 +801,7 @@ export function App() {
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [activeThread, cwd, draftChat, navView, preferences.keybindings, runtimeReady]);
+  }, [activeThread, cwd, draftChat, kimiRuntimeAvailable, navView, preferences.keybindings]);
 
   const call = useCallback((method: string, params: Record<string, unknown> = {}) => supervisor.current?.request(method, params) ?? Promise.reject(new Error("Server is not connected")), []);
   const exportDiagnostics = useCallback(async () => {
@@ -808,7 +816,11 @@ export function App() {
   const refreshProviders = useCallback(async () => {
     const result = await call("providers.list") as { providers: ProviderState[]; instances?: ProviderInstance[] };
     setProviders(filterKimiRuntimes(result.providers.map((provider) => ({ ...provider, id: normalizeProvider(provider.id ?? provider.provider), provider: normalizeProvider(provider.provider ?? provider.id) }))));
-    setProviderInstances(filterKimiRuntimes(result.instances?.map((instance) => ({ ...instance, provider: normalizeProvider(instance.provider) })) ?? []));
+    const nextInstances = filterKimiRuntimes(result.instances?.map((instance) => ({ ...instance, provider: normalizeProvider(instance.provider) })) ?? []);
+    setProviderInstances(nextInstances);
+    setPreferences((current) => current.providerInstances.kimi && !nextInstances.some((instance) => instance.id === current.providerInstances.kimi)
+      ? { ...current, providerInstances: withKimiInstance(current.providerInstances) }
+      : current);
   }, [call]);
   const refreshEnvironments = useCallback(async () => {
     const result = await call("environments.list") as { environments: WslEnvironment[] };
@@ -1120,7 +1132,7 @@ export function App() {
         if (payload.threads) {
           const incoming = payload.threads.map(normalizeThread);
           setThreads(incoming);
-          setActiveThreadId((current) => current ?? incoming[0]?.threadId);
+          setActiveThreadId((current) => current ?? preferredInitialThreadId(incoming));
         }
       } else if (message.channel === "orchestration.domainEvent") {
         const event = message.payload as StoredEvent;
@@ -1218,7 +1230,7 @@ export function App() {
       const incoming = listed.threads.map(normalizeThread);
       setThreads(incoming);
       setRuntimeSessions(listed.runtimeSessions);
-      setActiveThreadId((current) => current ?? incoming.find((thread) => thread.provider === "kimi")?.threadId ?? incoming[0]?.threadId);
+      setActiveThreadId((current) => current ?? preferredInitialThreadId(incoming));
     }).catch((error: Error) => setDiagnostic(error.message)).finally(() => setBootstrapping(false));
   }, [call, connection, preferences.providerInstances.kimi, refreshQuota]);
 
@@ -2256,7 +2268,7 @@ export function App() {
   const visibleProjects = useMemo(() => filterProjects(projects, threadFilter), [projects, threadFilter]);
   const commandQuery = threadFilter.trim().toLowerCase();
   const paletteActions = [
-    { id: "new-chat", label: "New chat", detail: navView === "chats" ? "Start a standalone conversation" : "Start in the current project", icon: <Plus />, shortcut: preferences.keybindings.newChat, disabled: !runtimeReady || (navView === "projects" && !cwd), run: () => { navView === "chats" ? createStandaloneChat() : createThread(cwd); setSearchOpen(false); setThreadFilter(""); } },
+    { id: "new-chat", label: "New chat", detail: navView === "chats" ? "Start a standalone conversation" : "Start in the current project", icon: <Plus />, shortcut: preferences.keybindings.newChat, disabled: !kimiRuntimeAvailable || (navView === "projects" && !cwd), run: () => { navView === "chats" ? createStandaloneChat() : createThread(cwd); setSearchOpen(false); setThreadFilter(""); } },
     { id: "open-folder", label: "Open folder", detail: "Choose a local workspace", icon: <FolderOpen />, shortcut: preferences.keybindings.openFolder, run: () => { setSearchOpen(false); setThreadFilter(""); void chooseWorkspace(); } },
     { id: "open-editor", label: "Open workspace in editor", detail: preferences.editor === "system" ? "Reveal in the system file manager" : `Open with ${preferences.editor === "vscode" ? "Visual Studio Code" : "Cursor"}`, icon: <ArrowSquareOut />, disabled: !workspaceCwd, run: () => void openWorkspaceInEditor() },
     { id: "terminal", label: "Toggle terminal", detail: "Open a shell in the active workspace", icon: <TerminalWindow />, shortcut: preferences.keybindings.terminal, disabled: !workspaceCwd, run: () => { toggleRail("terminal"); setSearchOpen(false); setThreadFilter(""); } },
@@ -2374,7 +2386,7 @@ export function App() {
             <button ref={(element) => { menuTriggers.current.file = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "file"} onClick={() => setOpenMenu((current) => current === "file" ? undefined : "file")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("file", event)}>File</button>
             {openMenu === "file" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus}>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void createAppWindow(); }}><span>New Window</span><kbd>Ctrl Shift N</kbd></button>
-              <button type="button" role="menuitem" disabled={!runtimeReady || (navView === "projects" && !cwd)} onClick={() => { setOpenMenu(undefined); navView === "chats" ? createStandaloneChat() : createThread(cwd); }}><span>New Chat</span><kbd>{preferences.keybindings.newChat}</kbd></button>
+              <button type="button" role="menuitem" disabled={!kimiRuntimeAvailable || (navView === "projects" && !cwd)} onClick={() => { setOpenMenu(undefined); navView === "chats" ? createStandaloneChat() : createThread(cwd); }}><span>New Chat</span><kbd>{preferences.keybindings.newChat}</kbd></button>
               <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void chooseWorkspace(); }}><span>Open Folder…</span><kbd>{preferences.keybindings.openFolder}</kbd></button>
               <button type="button" role="menuitem" disabled={!workspaceCwd} onClick={() => { setOpenMenu(undefined); void openWorkspaceInEditor(); }}><span>Open in Editor</span></button>
               <span className="menu-separator" role="separator" />
@@ -2441,13 +2453,13 @@ export function App() {
         <button className={`capability-link ${settingsOpen && settingsCategory === "automations" ? "active" : ""}`} type="button" aria-current={settingsOpen && settingsCategory === "automations" ? "page" : undefined} title="Scheduled agent tasks" onClick={() => { setCapabilityCenterOpen(false); setSettingsCategory("automations"); setSettingsOpen(true); }}><Clock /><span><strong>Scheduled</strong><small>{schedules.filter((schedule) => schedule.enabled).length || ""}</small></span><CaretRight /></button>
 
         <div className="sidebar-body">
-          <div className="sidebar-heading"><span>{navView === "projects" ? "Projects" : "Chats"}</span><button type="button" title={navView === "projects" ? "Open folder" : "New chat"} aria-label={navView === "projects" ? "Open folder" : "New chat"} disabled={navView === "chats" && !runtimeReady} onClick={() => navView === "projects" ? void chooseWorkspace() : createStandaloneChat()}>{navView === "projects" ? <FolderOpen /> : <Plus />}</button></div>
+          <div className="sidebar-heading"><span>{navView === "projects" ? "Projects" : "Chats"}</span><button type="button" title={navView === "projects" ? "Open folder" : "New chat"} aria-label={navView === "projects" ? "Open folder" : "New chat"} disabled={navView === "chats" && !kimiRuntimeAvailable} onClick={() => navView === "projects" ? void chooseWorkspace() : createStandaloneChat()}>{navView === "projects" ? <FolderOpen /> : <Plus />}</button></div>
           <div className="sidebar-list">
             {bootstrapping ? <SidebarSkeleton /> : navView === "projects" ? visibleProjects.map((project) => <details ref={initializeProjectDetails} className={`project-group ${draggingProject && samePath(draggingProject, project.cwd) ? "dragging" : ""}`} key={project.cwd}>
               <summary className={`project-row ${samePath(project.cwd, cwd) ? "active" : ""}`} title={project.cwd} draggable onDragStart={() => setDraggingProject(project.cwd)} onDragEnd={() => setDraggingProject(undefined)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (draggingProject) reorderProject(draggingProject, project.cwd); setDraggingProject(undefined); }} onContextMenu={(event) => { event.preventDefault(); setItemMenu({ kind: "project", id: project.cwd }); }} onClick={() => { setCapabilityCenterOpen(false); setCwd(project.cwd); rememberWorkspace(project.cwd); setDraftChat(undefined); const first = project.threads[0]; if (first) selectThread(first); else setActiveThreadId(undefined); }}>
                 <CaretRight className="project-caret" size={13} /><FolderSimple size={15} /><span>{project.name}</span>
                 <span className="row-actions">
-                  <button className="project-new" type="button" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} disabled={!runtimeReady} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void createThread(project.cwd); }}><Plus /></button>
+                  <button className="project-new" type="button" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} disabled={!kimiRuntimeAvailable} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void createThread(project.cwd); }}><Plus /></button>
                   <ItemActions open={itemMenu?.kind === "project" && itemMenu.id === project.cwd} label={`Manage ${project.name}`} onToggle={() => setItemMenu((current) => current?.kind === "project" && current.id === project.cwd ? undefined : { kind: "project", id: project.cwd })} items={[
                     { label: "New isolated chat", icon: <GitBranch />, onSelect: () => createThread(project.cwd, true) },
                     { label: "Rename project", icon: <PencilSimple />, onSelect: () => setManageDialog({ kind: "rename-project", cwd: project.cwd, name: project.name }) },
@@ -2466,7 +2478,7 @@ export function App() {
             </>}
             {!bootstrapping && threadFilter && (navView === "projects" ? !visibleProjects.length : !visibleThreads.length && !visibleRuntimeSessions.length) && <p className="thread-empty">No matches</p>}
             {!bootstrapping && !threadFilter && navView === "projects" && !visibleProjects.length && <button className="sidebar-empty" type="button" onClick={() => void chooseWorkspace()}><FolderOpen /> Open your first folder</button>}
-            {!bootstrapping && !threadFilter && navView === "chats" && !visibleThreads.length && !visibleRuntimeSessions.length && <button className="sidebar-empty" type="button" disabled={!runtimeReady} onClick={createStandaloneChat}><ChatCircleDots /> Start a chat</button>}
+            {!bootstrapping && !threadFilter && navView === "chats" && !visibleThreads.length && !visibleRuntimeSessions.length && <button className="sidebar-empty" type="button" disabled={!kimiRuntimeAvailable} onClick={createStandaloneChat}><ChatCircleDots /> Start a chat</button>}
           </div>
           {!bootstrapping && archivedThreads.length > 0 && <details className="archived-threads">
             <summary><Archive /><span>Archived</span><small>{archivedThreads.length}</small><CaretRight /></summary>
@@ -2903,7 +2915,7 @@ function ProviderPicker({ providers, instances, selectedInstanceId, locked, disa
     description: !provider?.installed ? "CLI not installed" : provider.authenticated === false ? "Sign in required" : provider.account ?? "Default Kimi runtime",
   }, ...kimiInstances.map((instance) => ({ value: instance.id, name: instance.name, description: instance.environment ?? `Configured Kimi runtime${instance.installed ? "" : " · CLI missing"}` }))];
   const selectedInstance = kimiInstances.find((instance) => instance.id === selectedInstanceId);
-  if (choices.length === 1) return null;
+  if (!shouldShowRuntimePicker(kimiInstances.map((instance) => instance.id), selectedInstanceId)) return null;
   const control: ComposerControl = {
     id: "runtime",
     label: "Kimi runtime",

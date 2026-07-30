@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiRuntimes, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, joinLocalPath, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, parseProjectScripts, presentDiagnostic, profileConfigUpdates, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, repositoryNameFromUrl, reviewCommentKey, reviewFeedbackPrompt, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, terminalContext, thinkingEffortLabel, threadCanRun, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiRuntimes, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, joinLocalPath, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, parseProjectScripts, preferredInitialThreadId, presentDiagnostic, profileConfigUpdates, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, repositoryNameFromUrl, reviewCommentKey, reviewFeedbackPrompt, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldShowRuntimePicker, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, terminalContext, thinkingEffortLabel, threadCanRun, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
 
 describe("global commands", () => {
   it("captures configurable shortcuts and disables conflicts", () => {
@@ -304,6 +304,10 @@ describe("Kimi runtime boundary", () => {
     expect(threadCanRun(undefined)).toBe(true);
     expect(threadCanRun({ provider: "kimi" } as never)).toBe(true);
     expect(threadCanRun({ provider: "codex" } as never)).toBe(false);
+    expect(preferredInitialThreadId([{ threadId: "old", provider: "codex" }, { threadId: "kimi", provider: "kimi" }])).toBe("kimi");
+    expect(shouldShowRuntimePicker([], undefined)).toBe(false);
+    expect(shouldShowRuntimePicker([], "removed")).toBe(true);
+    expect(shouldShowRuntimePicker(["default"], "default")).toBe(true);
   });
 });
 
