@@ -207,17 +207,14 @@ export function promptShortcutMode(event: { key: string; shiftKey: boolean; ctrl
   return sendKey === "enter" || event.ctrlKey || event.metaKey ? "queue" : undefined;
 }
 
-export type ComposerPrimaryAction = "send" | "stop" | "queue";
+export type ComposerPrimaryAction = "send" | "stop";
 
-export function composerPrimaryAction(running: boolean, hasText: boolean): ComposerPrimaryAction {
-  if (!running) return "send";
-  if (!hasText) return "stop";
-  return "queue";
+export function composerPrimaryAction(running: boolean): ComposerPrimaryAction {
+  return running ? "stop" : "send";
 }
 
 function composerPrimaryLabel(action: ComposerPrimaryAction): string {
   if (action === "stop") return "Stop task and clear queue";
-  if (action === "queue") return "Queue after active task";
   return "Send task";
 }
 
@@ -516,7 +513,7 @@ export function App() {
   const composerTargetKind = activeThread?.kind ?? draftChat?.kind;
   const composerSubmitReady = runtimeReady && composerCanSubmit(navView, composerTargetKind, configMutationPending);
   const activeThreadBusy = activeThread ? isThreadBusy(activeThread) : false;
-  const primaryComposerAction = composerPrimaryAction(activeThreadBusy, Boolean(prompt.trim()));
+  const primaryComposerAction = composerPrimaryAction(activeThreadBusy);
   const layoutSidebarWidth = preferences.sidebarCollapsed ? collapsedSidebarWidth : preferences.sidebarWidth;
   const renderedRailWidth = effectiveRailWidth(preferences.railWidth, viewportWidth, layoutSidebarWidth);
   const previewPanelMode = renderedRailWidth >= 1_080 ? "Wide" : renderedRailWidth >= 760 ? "Desktop" : "Compact";
@@ -2984,14 +2981,15 @@ export function ComposerConfig({ options, busyId, disabled = false, onChange }: 
 function ConfigControl({ control, open, onToggle, onClose, onPick }: { control: ComposerControl; open: boolean; onToggle: () => void; onClose: () => void; onPick: (value: string) => void }) {
   const trigger = useRef<HTMLButtonElement | null>(null);
   const popover = useRef<HTMLDivElement | null>(null);
-  const [position, setPosition] = useState<{ top: number; left: number }>();
+  const [position, setPosition] = useState<{ top: number; left: number; side: "above" | "below" }>();
 
   useLayoutEffect(() => {
     if (!open) return;
     const anchor = trigger.current?.getBoundingClientRect();
     const menu = popover.current?.getBoundingClientRect();
     if (!anchor || !menu) return;
-    setPosition(floatingMenuPosition(anchor, { width: menu.width, height: menu.height }, { width: window.innerWidth, height: window.innerHeight }));
+    const next = floatingMenuPosition(anchor, { width: menu.width, height: menu.height }, { width: window.innerWidth, height: window.innerHeight });
+    setPosition({ ...next, side: next.top < anchor.top ? "above" : "below" });
   }, [open]);
 
   useEffect(() => {
@@ -3035,7 +3033,7 @@ function ConfigControl({ control, open, onToggle, onClose, onPick }: { control: 
       {control.icon}<span>{control.current}</span><CaretDown />
     </button>
     {open && createPortal(
-      <div ref={popover} className="config-popover config-popover-portal" role="menu" aria-label={control.label} style={position ?? { visibility: "hidden", top: 0, left: 0 }} onKeyDown={moveFocus}>
+      <div ref={popover} className="config-popover config-popover-portal" role="menu" aria-label={control.label} data-side={position?.side} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }} onKeyDown={moveFocus}>
         <header><strong>{control.label}</strong><small>{control.tooltip}</small></header>
         <div className="config-options">
           {control.choices.map((choice) => {

@@ -78,10 +78,9 @@ describe("composer send key", () => {
     expect(promptShortcutMode({ ...enter, shiftKey: true }, "enter", true)).toBeUndefined();
   });
 
-  it("uses one primary control for send, stop, and queue", () => {
-    expect(composerPrimaryAction(false, true)).toBe("send");
-    expect(composerPrimaryAction(true, false)).toBe("stop");
-    expect(composerPrimaryAction(true, true)).toBe("queue");
+  it("keeps one primary control as send while idle and stop for all running states", () => {
+    expect(composerPrimaryAction(false)).toBe("send");
+    expect(composerPrimaryAction(true)).toBe("stop");
   });
 
   it("never submits to a hidden view or while configuration is still applying", () => {
