@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { WebSocket, type RawData } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
+import { EventStore } from "../src/event-store.js";
+import { ScheduleStore } from "../src/schedule-store.js";
 
 const exec = promisify(execFile);
 
@@ -1216,9 +1218,51 @@ describe("orchestration server", () => {
     const rejected = waitFor(socket, messages, (message) => message.id === 4);
     socket.send(JSON.stringify({ id: 4, method: "skills.install", params: { cwd: workspace, source: external } }));
     expect((await rejected).error).toMatchObject({ message: expect.stringMatching(/inside the active workspace/i) });
-    const codexListed = waitFor(socket, messages, (message) => message.id === 5);
-    socket.send(JSON.stringify({ id: 5, method: "capabilities.list", params: { provider: "codex", cwd: workspace } }));
-    expect((await codexListed).result).toMatchObject({ provider: "codex", skills: [], plugins: [], support: { quota: false, subagents: { inspect: true, stop: true, steer: false } } });
+    const providersListed = waitFor(socket, messages, (message) => message.id === 5);
+    socket.send(JSON.stringify({ id: 5, method: "providers.list", params: {} }));
+    expect(((await providersListed).result as { providers: Array<{ id: string }> }).providers.map((provider) => provider.id)).toEqual(["kimi"]);
+    socket.close();
+  });
+
+  it("keeps historical provider chats readable but blocks new runtime work", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-historical-provider-"));
+    const store = new EventStore(join(dataHome, "events.jsonl"));
+    await store.open(() => undefined);
+    await store.append("historical-codex", {
+      type: "ThreadCreated",
+      payload: { sessionId: "codex-session", provider: "codex", cwd: process.cwd(), kind: "project", title: "Historical Codex chat" },
+    });
+    const scheduleStore = new ScheduleStore(join(dataHome, "schedules.json"));
+    await scheduleStore.open();
+    const legacySchedule = await scheduleStore.create({ name: "Legacy", threadId: "historical-codex", text: "Continue", cwd: process.cwd(), provider: "codex", recurrence: "once", nextRunAt: "2030-08-01T09:00:00.000Z" });
+    await scheduleStore.update(legacySchedule.id, { enabled: false });
+
+    await launchServer(serverPath, "45147", dataHome, children);
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45147", messages);
+
+    const listed = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "threads.list", params: {} }));
+    expect(((await listed).result as { threads: Array<{ threadId: string; provider: string }> }).threads).toContainEqual(
+      expect.objectContaining({ threadId: "historical-codex", provider: "codex" }),
+    );
+
+    for (const [id, method, params] of [
+      [2, "threads.sendTurn", { threadId: "historical-codex", text: "Continue" }],
+      [3, "threads.steerQueuedTurn", { threadId: "historical-codex", queuedId: crypto.randomUUID() }],
+      [4, "threads.createSide", { threadId: "historical-codex" }],
+      [5, "schedules.create", { threadId: "historical-codex", name: "Continue later", text: "Continue", recurrence: "once", nextRunAt: "2030-08-01T09:00:00.000Z" }],
+      [6, "threads.setConfigOption", { threadId: "historical-codex", configId: "model", value: "kimi-k3" }],
+      [7, "subagents.inspect", { threadId: "historical-codex", agentThreadId: "legacy-agent" }],
+      [8, "threads.resume", { threadId: "historical-codex", sessionId: "codex-session", cwd: process.cwd() }],
+      [9, "checkpoints.revert", { threadId: "historical-codex", turnId: "legacy-turn" }],
+      [10, "schedules.update", { id: legacySchedule.id, enabled: true }],
+    ] as const) {
+      const response = waitFor(socket, messages, (message) => message.id === id);
+      socket.send(JSON.stringify({ id, method, params }));
+      expect(((await response).error as { message: string }).message).toMatch(/historical provider chat/i);
+    }
     socket.close();
   });
 });

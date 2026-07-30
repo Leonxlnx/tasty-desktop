@@ -9,8 +9,6 @@ import { WebSocketServer, type VerifyClientCallbackSync, type WebSocket } from "
 import { z } from "zod";
 import { AcpClient, isTransientWindowsSpawnError, isUnknownAcpSessionError, type RuntimeEvent } from "./acp-client.js";
 import type { AgentRuntime } from "./agent-runtime.js";
-import { CodexRuntime } from "./codex-runtime.js";
-import { ClaudeRuntime } from "./claude-runtime.js";
 import { ConfigDefaults, sanitizeSessionConfig } from "./config-defaults.js";
 import { EventStore } from "./event-store.js";
 import { OrchestrationEngine, titleFromPrompt, type ProviderId, type ThreadProjection } from "./orchestration.js";
@@ -25,8 +23,7 @@ import { TerminalService } from "./terminal-service.js";
 import { installKimiSkill, readKimiCapabilities, readKimiMcpServers } from "./kimi-capabilities.js";
 import { createDesktopPreviewMcpServer, desktopPreviewMcpName, isPreviewBridgeRequest, normalizeDesktopPreviewUrl } from "./desktop-preview.js";
 import { readRecoverableJson, writeRecoverableJson } from "./recoverable-json.js";
-import { providerDescriptors, providerName, readProviderInstances, requireProviderBinary, resolveProviderBinary, type ProviderInstance } from "./provider-runtime.js";
-import { ProviderAuthService, type ProviderAuthEvent } from "./provider-auth.js";
+import { assertKimiProvider, providerDescriptors, providerName, readProviderInstances, requireProviderBinary, resolveProviderBinary, type ProviderInstance } from "./provider-runtime.js";
 import { DiagnosticJournal, redactDiagnosticText, type DiagnosticLevel } from "./diagnostics.js";
 import { WslEnvironments } from "./wsl-environments.js";
 import { RemoteAccess, remoteMethodAllowed, remoteProtocolToken, type RemoteConfig, type RemoteDevice } from "./remote-access.js";
@@ -43,21 +40,22 @@ import {
 } from "./background-tasks.js";
 
 const id = z.union([z.string(), z.number()]);
+const activeProvider = z.literal("kimi");
 const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("env.bootstrap"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("env.prepareUpdate"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("env.confirmUpdate"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("env.cancelUpdate"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("env.installCli"), params: z.object({}).default({}) }),
-  z.object({ id, method: z.literal("auth.beginLogin"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi") }).default({ provider: "kimi" }) }),
-  z.object({ id, method: z.literal("auth.cancel"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi") }).default({ provider: "kimi" }) }),
-  z.object({ id, method: z.literal("auth.logout"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi") }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("auth.beginLogin"), params: z.object({ provider: activeProvider.default("kimi") }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("auth.cancel"), params: z.object({ provider: activeProvider.default("kimi") }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("auth.logout"), params: z.object({ provider: activeProvider.default("kimi") }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("providers.list"), params: z.object({}).default({}) }),
-  z.object({ id, method: z.literal("threads.list"), params: z.object({ cwd: z.string().optional(), provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).optional(), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional() }).default({}) }),
+  z.object({ id, method: z.literal("threads.list"), params: z.object({ cwd: z.string().optional(), provider: activeProvider.optional(), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional() }).default({}) }),
   z.object({ id, method: z.literal("threads.export"), params: z.object({ threadIds: z.array(z.string().min(1)).max(100).optional() }).default({}) }),
-  z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), isolate: z.boolean().default(false), provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional(), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
+  z.object({ id, method: z.literal("threads.create"), params: z.object({ cwd: z.string().min(1).optional(), standalone: z.boolean().default(false), isolate: z.boolean().default(false), provider: activeProvider.default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional(), config: z.record(z.string(), z.union([z.string(), z.boolean()])).optional() }) }),
   z.object({ id, method: z.literal("threads.createSide"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120).optional() }) }),
-  z.object({ id, method: z.literal("threads.resume"), params: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), cwd: z.string().min(1), provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional(), replay: z.boolean().default(false) }) }),
+  z.object({ id, method: z.literal("threads.resume"), params: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), cwd: z.string().min(1), provider: activeProvider.default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional(), replay: z.boolean().default(false) }) }),
   z.object({ id, method: z.literal("threads.rename"), params: z.object({ threadId: z.string().min(1), title: z.string().trim().min(1).max(120) }) }),
   z.object({ id, method: z.literal("threads.setGoal"), params: z.object({ threadId: z.string().min(1), objective: z.string().trim().min(1).max(20_000) }) }),
   z.object({ id, method: z.literal("threads.clearGoal"), params: z.object({ threadId: z.string().min(1) }) }),
@@ -77,7 +75,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("threads.interruptTurn"), params: z.object({ threadId: z.string().min(1), clearQueue: z.boolean().default(true) }) }),
   z.object({ id, method: z.literal("threads.respondToRequest"), params: z.object({ threadId: z.string().min(1), requestId: z.string().min(1), optionId: z.string().optional() }) }),
   z.object({ id, method: z.literal("threads.setConfigOption"), params: z.object({ threadId: z.string().min(1), configId: z.string().min(1), value: z.union([z.string(), z.boolean()]) }) }),
-  z.object({ id, method: z.literal("runtime.configDefaults"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional() }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("runtime.configDefaults"), params: z.object({ provider: activeProvider.default("kimi"), instanceId: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/i).optional() }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("checkpoints.list"), params: z.object({ threadId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("checkpoints.revert"), params: z.object({ threadId: z.string().min(1), turnId: z.string().min(1) }) }),
   z.object({ id, method: z.literal("checkpoints.review"), params: z.object({ threadId: z.string().min(1), turnId: z.string().min(1) }) }),
@@ -128,7 +126,7 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("remote.configure"), params: z.object({ enabled: z.boolean(), bind: z.enum(["127.0.0.1", "0.0.0.0"]), port: z.number().int().min(1024).max(65_535) }) }),
   z.object({ id, method: z.literal("remote.createPairing"), params: z.object({}).default({}) }),
   z.object({ id, method: z.literal("remote.revokeDevice"), params: z.object({ deviceId: z.string().uuid() }) }),
-  z.object({ id, method: z.literal("capabilities.list"), params: z.object({ provider: z.enum(["kimi", "codex", "claude", "cursor", "opencode"]).default("kimi"), cwd: z.string().min(1).optional() }).default({ provider: "kimi" }) }),
+  z.object({ id, method: z.literal("capabilities.list"), params: z.object({ provider: activeProvider.default("kimi"), cwd: z.string().min(1).optional() }).default({ provider: "kimi" }) }),
   z.object({ id, method: z.literal("skills.install"), params: z.object({ cwd: z.string().min(1), source: z.string().min(1) }) }),
 ]);
 const persistedQueueSchema = z.record(z.string(), z.array(z.object({
@@ -208,7 +206,6 @@ let configDefaultsLive = false;
 let updateLease: UpdateLease | undefined;
 let pendingSendAdmissions = 0;
 const auth = new AuthService(runtimeBinaryDescription(), process.env.KIMI_CODE_HOME, (event) => void handleAuthEvent(event));
-const providerAuth = new ProviderAuthService((event) => void handleProviderAuthEvent(event));
 
 await engine.open();
 await loadQueues();
@@ -291,6 +288,7 @@ async function publicProviderInstances(): Promise<Array<{ id: string; name: stri
 }
 
 async function ensureRuntime(provider: ProviderId = "kimi", instanceId?: string): Promise<AgentRuntime> {
+  assertKimiProvider(provider);
   const key = runtimeKey(provider, instanceId);
   const current = runtimes.get(key);
   if (current?.isOpen()) return current;
@@ -301,18 +299,18 @@ async function ensureRuntime(provider: ProviderId = "kimi", instanceId?: string)
   return starting;
 }
 
-async function startRuntime(provider: ProviderId, instanceId?: string): Promise<AgentRuntime> {
+async function startRuntime(provider: "kimi", instanceId?: string): Promise<AgentRuntime> {
   const key = runtimeKey(provider, instanceId);
   const instance = providerInstance(provider, instanceId);
   const stale = runtimes.get(key);
   runtimes.delete(key);
   initializeResults.delete(key);
-  if (provider === "kimi") configDefaultsLive = false;
+  configDefaultsLive = false;
   await stale?.close();
   const currentFile = fileURLToPath(import.meta.url);
-  const useFake = provider === "kimi" && process.env.KIMI_FAKE === "1";
+  const useFake = process.env.KIMI_FAKE === "1";
   const fakePath = join(dirname(currentFile), currentFile.endsWith(".ts") ? "fake-acp.ts" : "fake-acp.js");
-  let client: AgentRuntime | undefined;
+  let client: AgentRuntime;
   const runtimeEvents = {
     onEvent: async (event: RuntimeEvent) => {
       try {
@@ -328,23 +326,18 @@ async function startRuntime(provider: ProviderId, instanceId?: string): Promise<
       if (runtimes.get(key) !== client) return;
       runtimes.delete(key);
       initializeResults.delete(key);
-      if (provider === "kimi") configDefaultsLive = false;
+      configDefaultsLive = false;
       sessionResumes.clear();
     },
   };
-  if (provider === "codex") {
-    client = new CodexRuntime({ binary: requireProviderBinary("codex", instance?.binary), ...(instance ? { env: instance.environment } : {}), ...runtimeEvents });
-  } else if (provider === "claude") {
-    client = new ClaudeRuntime({ binary: requireProviderBinary("claude", instance?.binary), ...(instance ? { env: instance.environment } : {}), ...runtimeEvents });
-  } else if (provider === "kimi" || provider === "cursor" || provider === "opencode") {
-    const wslRuntime = instance?.wsl;
-    client = new AcpClient({
-      binary: useFake ? process.execPath : wslRuntime ? wsl.binary : requireProviderBinary(provider, instance?.binary),
-      args: useFake ? (currentFile.endsWith(".ts") ? ["--import", "tsx", fakePath] : [fakePath]) : wslRuntime ? ["--distribution", wslRuntime.distribution, "--exec", wslRuntime.binary, "acp"] : ["acp"],
-      ...(instance ? { env: instance.environment } : {}),
-      ...(wslRuntime ? { cwdToAgent: (path: string) => wsl.toLinux(wslRuntime.distribution, path), pathFromAgent: (path: string) => wsl.toWindows(wslRuntime.distribution, path) } : {}),
-      ...(provider === "kimi" && !wslRuntime ? { kimiCodeHome: kimiHome } : {}),
-      ...(provider === "kimi" && !wslRuntime ? { mcpServers: async (workspace: string) => {
+  const wslRuntime = instance?.wsl;
+  client = new AcpClient({
+    binary: useFake ? process.execPath : wslRuntime ? wsl.binary : requireProviderBinary(provider, instance?.binary),
+    args: useFake ? (currentFile.endsWith(".ts") ? ["--import", "tsx", fakePath] : [fakePath]) : wslRuntime ? ["--distribution", wslRuntime.distribution, "--exec", wslRuntime.binary, "acp"] : ["acp"],
+    ...(instance ? { env: instance.environment } : {}),
+    ...(wslRuntime ? { cwdToAgent: (path: string) => wsl.toLinux(wslRuntime.distribution, path), pathFromAgent: (path: string) => wsl.toWindows(wslRuntime.distribution, path) } : {}),
+    ...(!wslRuntime ? { kimiCodeHome: kimiHome } : {}),
+    ...(!wslRuntime ? { mcpServers: async (workspace: string) => {
       const configured = await readKimiMcpServers(kimiHome);
       return [
         createDesktopPreviewMcpServer(
@@ -355,11 +348,9 @@ async function startRuntime(provider: ProviderId, instanceId?: string): Promise<
         ),
         ...configured.filter((server) => server.name !== desktopPreviewMcpName),
       ];
-      } } : {}),
-      ...runtimeEvents,
-    });
-  }
-  if (!client) throw new Error(`Unsupported provider ${provider}`);
+    } } : {}),
+    ...runtimeEvents,
+  });
   try {
     initializeResults.set(key, await client.start());
     runtimes.set(key, client);
@@ -470,18 +461,17 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "auth.beginLogin") {
-      reply(socket, request.id, request.params.provider === "kimi" ? auth.beginLogin() : providerAuth.beginLogin(request.params.provider));
+      reply(socket, request.id, auth.beginLogin());
       return;
     }
     if (request.method === "auth.cancel") {
-      if (request.params.provider === "kimi") auth.cancel();
-      else providerAuth.cancel(request.params.provider);
-      reply(socket, request.id, request.params.provider === "kimi" ? auth.status() : await providerAuth.status(request.params.provider));
+      auth.cancel();
+      reply(socket, request.id, auth.status());
       return;
     }
     if (request.method === "auth.logout") {
-      await resetRuntime(request.params.provider);
-      reply(socket, request.id, request.params.provider === "kimi" ? auth.logout() : await providerAuth.logout(request.params.provider));
+      await resetRuntime();
+      reply(socket, request.id, auth.logout());
       return;
     }
     if (request.method === "preview.agentCommand") {
@@ -605,6 +595,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     if (request.method === "schedules.create") {
       const target = engine.thread(request.params.threadId);
       if (!target || target.archivedAt) throw new Error("Choose an active chat for this schedule");
+      assertKimiProvider(target.provider);
       const permission = target.configOptions.find((option) => option.id.toLowerCase() === "mode" || option.category?.toLowerCase() === "mode")?.currentValue;
       const schedule = await schedules.create({
         ...request.params,
@@ -616,6 +607,12 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     }
     if (request.method === "schedules.update") {
       const { id: scheduleId, name, text, recurrence, nextRunAt, enabled } = request.params;
+      if (enabled) {
+        const schedule = schedules.get(scheduleId);
+        const target = schedule ? engine.thread(schedule.threadId) : undefined;
+        if (!schedule || !target) throw new Error("The scheduled chat is unavailable");
+        assertKimiProvider(target.provider);
+      }
       const patch = {
         ...(name !== undefined ? { name } : {}), ...(text !== undefined ? { text } : {}),
         ...(recurrence !== undefined ? { recurrence } : {}), ...(nextRunAt !== undefined ? { nextRunAt } : {}),
@@ -665,24 +662,20 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "capabilities.list") {
-      const descriptor = providerDescriptors().find((provider) => provider.id === request.params.provider)!;
-      const capabilities = request.params.provider === "kimi" ? await readKimiCapabilities(kimiHome, request.params.cwd) : {
-        plugins: [], mcpServers: [], skills: [], agents: [], roots: {}, warnings: [], updatedAt: new Date().toISOString(),
-      };
-      const mcpServers = request.params.provider === "kimi" ? [{
+      const descriptor = providerDescriptors()[0]!;
+      const capabilities = await readKimiCapabilities(kimiHome, request.params.cwd);
+      const mcpServers = [{
         name: desktopPreviewMcpName,
         transport: "stdio" as const,
         target: "Built into Kimi Code",
         needsAuthorization: false,
         connectable: true,
-      }, ...capabilities.mcpServers.filter((server) => server.name !== desktopPreviewMcpName)] : capabilities.mcpServers;
-      reply(socket, request.id, { provider: request.params.provider, support: descriptor.capabilities, ...capabilities, mcpServers });
+      }, ...capabilities.mcpServers.filter((server) => server.name !== desktopPreviewMcpName)];
+      reply(socket, request.id, { provider: "kimi", support: descriptor.capabilities, ...capabilities, mcpServers });
       return;
     }
     if (request.method === "providers.list") {
-      const providers = await Promise.all(providerDescriptors().map(async (provider) => provider.id === "kimi"
-        ? { ...provider, provider: "kimi" as const, ...auth.status(), runtimeReady: providerRuntimeReady("kimi") }
-        : { ...provider, ...await providerAuth.status(provider.id), runtimeReady: providerRuntimeReady(provider.id) }));
+      const providers = providerDescriptors().map((provider) => ({ ...provider, provider: "kimi" as const, ...auth.status(), runtimeReady: providerRuntimeReady("kimi") }));
       const instances = await publicProviderInstances();
       reply(socket, request.id, { providers, instances });
       return;
@@ -696,11 +689,11 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       const cached = await configDefaults.load();
       const fromThreads = engine.threads().filter((thread) => thread.provider === provider && thread.instanceId === request.params.instanceId).map((thread) => thread.configOptions).find((options) => options.length);
       const fallback = cached ?? fromThreads ?? [];
-      if (provider === "kimi" && configDefaultsLive) {
+      if (configDefaultsLive) {
         reply(socket, request.id, { configOptions: fallback });
         return;
       }
-      if (provider === "kimi" && process.env.KIMI_FAKE !== "1" && !auth.status().authenticated) {
+      if (process.env.KIMI_FAKE !== "1" && !auth.status().authenticated) {
         reply(socket, request.id, { configOptions: fallback });
         return;
       }
@@ -708,7 +701,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
         const acp = await ensureRuntime(provider, request.params.instanceId);
         await mkdir(configProbeCwd, { recursive: true });
         const probed = (await acp.newSession(configProbeCwd)).configOptions ?? [];
-        if (provider === "kimi") await rememberLiveConfigOptions(probed);
+        await rememberLiveConfigOptions(probed);
         reply(socket, request.id, { configOptions: probed });
       } catch {
         reply(socket, request.id, { configOptions: fallback });
@@ -810,6 +803,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
     const thread = engine.thread(request.params.threadId);
     if (!thread) throw new Error(`Unknown thread ${request.params.threadId}`);
     if (request.method === "threads.createSide") {
+      assertKimiProvider(thread.provider);
       const acp = await ensureRuntime(thread.provider, thread.instanceId);
       const session = await acp.newSession(thread.cwd);
       let configOptions = session.configOptions ?? [];
@@ -869,6 +863,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "checkpoints.revert") {
+      assertKimiProvider(thread.provider);
       if (thread.revertedParts.some((part) => part.turnId === request.params.turnId)) throw new Error("This turn was partially reverted; review its remaining hunks instead");
       const before = thread.checkpoints.find((checkpoint) => checkpoint.turnId === request.params.turnId && checkpoint.phase === "before");
       const after = thread.checkpoints.findLast((checkpoint) => checkpoint.turnId === request.params.turnId && checkpoint.phase === "after");
@@ -880,6 +875,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "threads.sendTurn") {
+      assertKimiProvider(thread.provider);
       if (thread.archivedAt) throw new Error("Restore this chat before sending another task");
       await waitForSessionConfig(thread.sessionId);
       const existingQueue = turnQueues.get(thread.threadId) ?? [];
@@ -916,6 +912,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "threads.updateQueuedTurn") {
+      assertKimiProvider(thread.provider);
       const queue = turnQueues.get(thread.threadId) ?? [];
       const index = queue.findIndex((item) => item.queuedId === request.params.queuedId);
       if (index < 0) throw new Error("Queued prompt no longer exists");
@@ -928,6 +925,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "threads.steerQueuedTurn") {
+      assertKimiProvider(thread.provider);
       const queue = turnQueues.get(thread.threadId) ?? [];
       const index = queue.findIndex((item) => item.queuedId === request.params.queuedId);
       if (index < 0) throw new Error("Queued prompt no longer exists");
@@ -975,6 +973,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "checkpoints.revertPart") {
+      assertKimiProvider(thread.provider);
       if (thread.running) throw new Error("Stop the active task before reverting reviewed changes");
       const before = thread.checkpoints.find((checkpoint) => checkpoint.turnId === request.params.turnId && checkpoint.phase === "before");
       const after = thread.checkpoints.findLast((checkpoint) => checkpoint.turnId === request.params.turnId && checkpoint.phase === "after");
@@ -999,6 +998,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "subagents.inspect") {
+      assertKimiProvider(thread.provider);
       if (!isLinkedSubagent(thread, request.params.agentThreadId)) throw new Error("Subagent thread is not linked to this Kimi Code chat");
       const runtime = await ensureRuntime(thread.provider, thread.instanceId);
       if (!runtime.inspectSubagent) throw new Error(`${providerName(thread.provider)} does not expose inspectable subagent transcripts`);
@@ -1006,6 +1006,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "subagents.stop") {
+      assertKimiProvider(thread.provider);
       if (!isLinkedSubagent(thread, request.params.agentThreadId)) throw new Error("Subagent thread is not linked to this Kimi Code chat");
       const runtime = await ensureRuntime(thread.provider, thread.instanceId);
       if (!runtime.stopSubagent) throw new Error(`${providerName(thread.provider)} does not support stopping an individual subagent`);
@@ -1030,6 +1031,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       return;
     }
     if (request.method === "threads.respondToRequest") {
+      assertKimiProvider(thread.provider);
       const acp = await ensureRuntime(thread.provider, thread.instanceId);
       await engine.append(thread.threadId, { type: "ApprovalResolved", payload: request.params.optionId ? { requestId: request.params.requestId, optionId: request.params.optionId } : { requestId: request.params.requestId } });
       acp.respondToPermission(request.params.requestId, request.params.optionId);
@@ -1066,6 +1068,7 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       reply(socket, request.id, {});
       return;
     }
+    assertKimiProvider(thread.provider);
     const configOptions = await serializeSessionConfig(thread.sessionId, async () => {
       const acp = await ensureRuntime(thread.provider, thread.instanceId);
       const current = engine.thread(thread.threadId);
@@ -1184,6 +1187,7 @@ async function runDueSchedules(): Promise<void> {
 async function enqueueScheduledTurn(schedule: Schedule): Promise<void> {
   const thread = engine.thread(schedule.threadId);
   if (!thread || thread.archivedAt) throw new Error("The scheduled chat is unavailable or archived");
+  assertKimiProvider(thread.provider);
   if (thread.provider !== schedule.provider || thread.instanceId !== schedule.instanceId || thread.cwd !== schedule.cwd) {
     throw new Error("The scheduled chat target changed; recreate the schedule before running it");
   }
@@ -1209,7 +1213,7 @@ async function runNextQueued(threadId: string): Promise<void> {
   if (queueAdmissions.has(threadId)) return;
   const thread = engine.thread(threadId);
   const queue = turnQueues.get(threadId) ?? [];
-  if (!thread || thread.running || !queue.length) {
+  if (!thread || thread.provider !== "kimi" || thread.running || !queue.length) {
     if (!queue.length) clearBackgroundReportRetry(threadId);
     return;
   }
@@ -1254,6 +1258,7 @@ async function startQueuedTurn(threadId: string, admission: QueueAdmission): Pro
   const { queued } = admission;
   const pendingThread = engine.thread(threadId);
   if (!pendingThread) throw new Error(`Unknown thread ${threadId}`);
+  assertKimiProvider(pendingThread.provider);
   const turnId = crypto.randomUUID();
   admission.turnId = turnId;
   await engine.append(threadId, { type: "TurnPhaseChanged", payload: { phase: "preparing", turnId, queuedId: queued.queuedId } });
@@ -1427,7 +1432,7 @@ async function registerBackgroundTasks(threadId: string, sessionId: string, turn
 }
 
 function pendingBackgroundTasks(): PendingBackgroundTask[] {
-  return engine.threads().flatMap((thread) => thread.backgroundTasks
+  return engine.threads().filter((thread) => thread.provider === "kimi").flatMap((thread) => thread.backgroundTasks
     .filter((task) => task.status === "running" && !task.reportQueued)
     .map((task) => ({
       threadId: thread.threadId,
@@ -1455,7 +1460,7 @@ async function finishBackgroundTask(pending: PendingBackgroundTask, result: Back
 }
 
 async function queueFinishedBackgroundTaskReports(): Promise<void> {
-  for (const thread of engine.threads()) {
+  for (const thread of engine.threads().filter((candidate) => candidate.provider === "kimi")) {
     for (const task of thread.backgroundTasks.filter((candidate) => candidate.status !== "running"
       && !candidate.reportDeliveredAt
       && !candidate.reportCancelledAt)) {
@@ -1477,7 +1482,7 @@ async function queueBackgroundTaskReport(
 ): Promise<void> {
   const thread = engine.thread(threadId);
   const task = thread?.backgroundTasks.find((candidate) => candidate.taskId === taskId);
-  if (!thread || !task || task.status === "running" || task.reportDeliveredAt || task.reportCancelledAt) return;
+  if (!thread || thread.provider !== "kimi" || !task || task.status === "running" || task.reportDeliveredAt || task.reportCancelledAt) return;
   if ((task.reportAttemptCount ?? 0) >= maxBackgroundReportAttempts) {
     await failBackgroundTaskReport(threadId, task.queuedId, task.reportLastError ?? "The report turn was interrupted before it completed");
     return;
@@ -1899,7 +1904,6 @@ async function captureCheckpoint(threadId: string, turnId: string, phase: Checkp
 
 async function shutdown(): Promise<void> {
   auth.close();
-  providerAuth.close();
   await terminal.close();
   backgroundTasks.close();
   for (const threadId of backgroundReportRetryTimers.keys()) clearBackgroundReportRetry(threadId);
@@ -1938,7 +1942,7 @@ async function loadQueues(): Promise<void> {
     if (!loaded.value) return;
     for (const [threadId, queued] of Object.entries(loaded.value)) {
       const thread = engine.thread(threadId);
-      if (!thread || !queued.length) continue;
+      if (!thread || thread.provider !== "kimi" || !queued.length) continue;
       const hydrated = queued
         .map((item) => ({ ...item, origin: item.origin ?? "user", images: [] }))
         .filter((item) => {
@@ -1951,11 +1955,6 @@ async function loadQueues(): Promise<void> {
   } catch (error) {
     console.error(`[queue] Pending queue recovery failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-}
-
-async function handleProviderAuthEvent(event: ProviderAuthEvent): Promise<void> {
-  if (event.type === "complete") await resetRuntime(event.provider);
-  pushAll("provider.authStatus", { ...await providerAuth.status(event.provider), event });
 }
 
 function persistQueues(): Promise<void> {
