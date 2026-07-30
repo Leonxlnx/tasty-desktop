@@ -8,6 +8,7 @@ Explain the problem and the smallest reason this change is needed.
 
 ## Validation
 
+- [ ] `pnpm check:public`
 - [ ] `pnpm typecheck`
 - [ ] `pnpm test`
 - [ ] `pnpm build:services`
