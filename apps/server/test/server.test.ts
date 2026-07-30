@@ -8,6 +8,7 @@ import { WebSocket, type RawData } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { EventStore } from "../src/event-store.js";
 import { ScheduleStore } from "../src/schedule-store.js";
+import { findGitBinary } from "../src/checkpoint-reactor.js";
 
 const exec = promisify(execFile);
 
@@ -1221,6 +1222,56 @@ describe("orchestration server", () => {
     const providersListed = waitFor(socket, messages, (message) => message.id === 5);
     socket.send(JSON.stringify({ id: 5, method: "providers.list", params: {} }));
     expect(((await providersListed).result as { providers: Array<{ id: string }> }).providers.map((provider) => provider.id)).toEqual(["kimi"]);
+    socket.close();
+  });
+
+  it("routes safe remote and local branch operations", async () => {
+    const serverPath = join(dirname(fileURLToPath(import.meta.url)), "../src/server.ts");
+    const dataHome = await mkdtemp(join(tmpdir(), "kimi-server-git-"));
+    const workspace = await mkdtemp(join(tmpdir(), "kimi-server-git-workspace-"));
+    const remote = await mkdtemp(join(tmpdir(), "kimi-server-git-remote-"));
+    const git = findGitBinary();
+    await exec(git, ["-C", workspace, "init"]);
+    await exec(git, ["-C", workspace, "config", "user.name", "Test"]);
+    await exec(git, ["-C", workspace, "config", "user.email", "test@example.invalid"]);
+    await writeFile(join(workspace, "tracked.txt"), "base\n", "utf8");
+    await exec(git, ["-C", workspace, "add", "."]);
+    await exec(git, ["-C", workspace, "commit", "-m", "base"]);
+    const initial = (await exec(git, ["-C", workspace, "branch", "--show-current"])).stdout.trim();
+    await exec(git, ["-C", remote, "init", "--bare"]);
+    await exec(git, ["-C", workspace, "remote", "add", "origin", remote]);
+    await exec(git, ["-C", workspace, "push", "origin", initial]);
+    await exec(git, ["-C", workspace, "branch", "remote-only"]);
+    await exec(git, ["-C", workspace, "push", "origin", "remote-only"]);
+    await exec(git, ["-C", workspace, "branch", "-D", "remote-only"]);
+
+    await launchServer(serverPath, "45148", dataHome, children);
+    const messages: Array<Record<string, unknown>> = [];
+    const socket = await connect("45148", messages);
+
+    const fetched = waitFor(socket, messages, (message) => message.id === 1);
+    socket.send(JSON.stringify({ id: 1, method: "git.fetch", params: { cwd: workspace, remote: "origin" } }));
+    expect(((await fetched).result as { remoteBranches: Array<{ fullName: string }> }).remoteBranches).toContainEqual(expect.objectContaining({ fullName: "origin/remote-only" }));
+
+    const checkedOut = waitFor(socket, messages, (message) => message.id === 2);
+    socket.send(JSON.stringify({ id: 2, method: "git.checkoutRemoteBranch", params: { cwd: workspace, remote: "origin", branch: "remote-only", localBranch: "feature/tracked" } }));
+    expect((await checkedOut).result).toMatchObject({ branch: "feature/tracked", upstream: "origin/remote-only" });
+
+    const renamed = waitFor(socket, messages, (message) => message.id === 3);
+    socket.send(JSON.stringify({ id: 3, method: "git.renameBranch", params: { cwd: workspace, branch: "feature/tracked", newBranch: "feature/renamed" } }));
+    expect((await renamed).result).toMatchObject({ current: "feature/renamed" });
+
+    const switched = waitFor(socket, messages, (message) => message.id === 4);
+    socket.send(JSON.stringify({ id: 4, method: "git.switchBranch", params: { cwd: workspace, branch: initial } }));
+    expect((await switched).result).toMatchObject({ branch: initial });
+
+    const deleted = waitFor(socket, messages, (message) => message.id === 5);
+    socket.send(JSON.stringify({ id: 5, method: "git.deleteBranch", params: { cwd: workspace, branch: "feature/renamed" } }));
+    expect(((await deleted).result as { branches: string[] }).branches).not.toContain("feature/renamed");
+
+    const rejected = waitFor(socket, messages, (message) => message.id === 6);
+    socket.send(JSON.stringify({ id: 6, method: "git.fetch", params: { cwd: workspace, remote: "missing" } }));
+    expect((await rejected).error).toMatchObject({ message: expect.stringMatching(/existing Git remote/i) });
     socket.close();
   });
 

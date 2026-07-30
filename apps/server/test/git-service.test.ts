@@ -58,9 +58,10 @@ describe("GitService", () => {
     })]);
   });
 
-  it("creates, switches, and publishes branches to an explicit remote", async () => {
-    const root = await mkdtemp(join(tmpdir(), "tasty-git-branches-"));
-    const remote = await mkdtemp(join(tmpdir(), "tasty-git-remote-"));
+  it("manages local and tracking branches without ignoring the selected remote", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kimi-git-branches-"));
+    const remote = await mkdtemp(join(tmpdir(), "kimi-git-remote-"));
+    const backup = await mkdtemp(join(tmpdir(), "kimi-git-backup-"));
     const git = findGitBinary();
     await exec(git, ["-C", root, "init"]);
     await exec(git, ["-C", root, "config", "user.name", "Test"]);
@@ -69,15 +70,62 @@ describe("GitService", () => {
     await exec(git, ["-C", root, "add", "."]);
     await exec(git, ["-C", root, "commit", "-m", "base"]);
     await exec(git, ["-C", remote, "init", "--bare"]);
+    await exec(git, ["-C", backup, "init", "--bare"]);
     await exec(git, ["-C", root, "remote", "add", "origin", remote]);
+    await exec(git, ["-C", root, "remote", "add", "backup", backup]);
 
     const service = new GitService(git);
     const initial = await service.status(root);
-    expect((await service.createBranch(root, "feature/safe")).branch).toBe("feature/safe");
-    expect((await service.repository(root)).branches).toContain("feature/safe");
+    expect((await service.push(root, "origin")).upstream).toBe(`origin/${initial.branch}`);
+    await exec(git, ["-C", root, "branch", "remote-only"]);
+    await exec(git, ["-C", root, "push", "origin", "remote-only"]);
+    await exec(git, ["-C", root, "branch", "-D", "remote-only"]);
+    await exec(git, ["-C", root, "branch", "stale"]);
+    await exec(git, ["-C", root, "push", "origin", "stale"]);
+    await exec(git, ["-C", root, "branch", "-D", "stale"]);
+    await exec(git, ["--git-dir", remote, "update-ref", "-d", "refs/heads/stale"]);
+
+    const repository = await service.fetch(root, "origin");
+    expect(repository).toMatchObject({ current: initial.branch, detached: false, unborn: false, upstream: `origin/${initial.branch}` });
+    expect(repository.localBranches).toContainEqual(expect.objectContaining({ name: initial.branch, current: true, upstream: `origin/${initial.branch}`, ahead: 0, behind: 0 }));
+    expect(repository.remoteBranches).toContainEqual({ name: "remote-only", fullName: "origin/remote-only", remote: "origin" });
+    expect(repository.remoteBranches.some((branch) => branch.name === "stale")).toBe(false);
+
+    await exec(git, ["-C", root, "branch", "origin/remote-only"]);
+    expect((await service.checkoutRemoteBranch(root, "origin", "remote-only", "feature/tracked")).upstream).toMatch(/origin\/remote-only$/);
+    expect((await service.renameBranch(root, "feature/tracked", "feature/renamed")).current).toBe("feature/renamed");
     expect((await service.switchBranch(root, initial.branch)).branch).toBe(initial.branch);
-    expect((await service.push(root)).upstream).toBe(`origin/${initial.branch}`);
+    expect((await service.deleteBranch(root, "feature/renamed")).branches).not.toContain("feature/renamed");
+
+    await service.push(root, "backup");
+    expect((await exec(git, ["--git-dir", backup, "show-ref", "--verify", `refs/heads/${initial.branch}`])).stdout).toContain(initial.branch);
+    await exec(git, ["-C", root, "fetch", "backup"]);
+    await exec(git, ["-C", root, "branch", "--set-upstream-to", `backup/${initial.branch}`]);
+    await expect(service.checkoutRemoteBranch(root, "origin", "missing")).rejects.toThrow("existing remote branch");
+    await exec(git, ["-C", root, "remote", "remove", "origin"]);
+    await service.push(root);
     await expect(service.switchBranch(root, "missing")).rejects.toThrow("existing local branch");
+    await expect(service.fetch(root, "missing")).rejects.toThrow("existing Git remote");
+    await expect(service.fetch(root, "--all")).rejects.toThrow("Invalid Git remote name");
+
+    expect((await service.createBranch(root, "feature/unmerged")).branch).toBe("feature/unmerged");
+    await writeFile(join(root, "unmerged.txt"), "not merged\n", "utf8");
+    await exec(git, ["-C", root, "add", "."]);
+    await exec(git, ["-C", root, "commit", "-m", "unmerged"]);
+    await service.switchBranch(root, initial.branch);
+    await expect(service.deleteBranch(root, "feature/unmerged")).rejects.toThrow("not fully merged");
+    expect((await service.repository(root)).branches).toContain("feature/unmerged");
+  });
+
+  it("represents and safely renames an unborn branch", async () => {
+    expect(parseStatus("C:\\repo", "# branch.oid (initial)\0# branch.head main\0")).toMatchObject({ branch: "main", unborn: true });
+    const root = await mkdtemp(join(tmpdir(), "kimi-git-unborn-"));
+    const git = findGitBinary();
+    await exec(git, ["-C", root, "init", "-b", "main"]);
+    const service = new GitService(git);
+    expect(await service.repository(root)).toMatchObject({ current: "main", unborn: true, branches: ["main"] });
+    expect(await service.renameBranch(root, "main", "next")).toMatchObject({ current: "next", unborn: true, branches: ["next"] });
+    await expect(service.push(root)).rejects.toThrow("first commit");
   });
 
   it("accepts only explicit HTTPS or SSH clone URLs", () => {

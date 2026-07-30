@@ -18,13 +18,36 @@ export type GitFile = {
 export type GitStatus = {
   root: string;
   branch: string;
+  unborn: boolean;
   upstream?: string;
   ahead: number;
   behind: number;
   files: GitFile[];
 };
 
-export type GitRepository = { current: string; branches: string[]; remotes: Array<{ name: string; url: string }> };
+export type GitLocalBranch = {
+  name: string;
+  current: boolean;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  upstreamGone: boolean;
+};
+
+export type GitRemoteBranch = { name: string; fullName: string; remote: string };
+
+export type GitRepository = {
+  current: string;
+  detached: boolean;
+  unborn: boolean;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  branches: string[];
+  localBranches: GitLocalBranch[];
+  remoteBranches: GitRemoteBranch[];
+  remotes: Array<{ name: string; url: string }>;
+};
 
 export class GitService {
   readonly #git: string;
@@ -75,16 +98,43 @@ export class GitService {
 
   async repository(cwd: string): Promise<GitRepository> {
     const status = await this.status(cwd);
-    const branches = (await this.#run(status.root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])).split(/\r?\n/).filter(Boolean);
     const remoteLines = (await this.#run(status.root, ["remote", "-v"])).split(/\r?\n/).filter((line) => line.endsWith(" (fetch)"));
+    const remotes = remoteLines.flatMap((line) => {
+      const match = /^(\S+)\s+(.+)\s+\(fetch\)$/.exec(line);
+      return match ? [{ name: match[1]!, url: match[2]! }] : [];
+    });
+    const localBranches = parseLocalBranches(await this.#run(status.root, [
+      "for-each-ref",
+      "--format=%(refname:short)%09%(upstream:short)%09%(upstream:track,nobracket)",
+      "refs/heads",
+    ]), status.branch);
+    if (status.unborn && !localBranches.some((branch) => branch.name === status.branch)) {
+      localBranches.unshift({ name: status.branch, current: true, ahead: 0, behind: 0, upstreamGone: false });
+    }
+    const remoteBranches = parseRemoteBranches(await this.#run(status.root, [
+      "for-each-ref",
+      "--format=%(refname:short)%09%(symref)",
+      "refs/remotes",
+    ]), remotes.map((remote) => remote.name));
     return {
       current: status.branch,
-      branches,
-      remotes: remoteLines.flatMap((line) => {
-        const match = /^(\S+)\s+(.+)\s+\(fetch\)$/.exec(line);
-        return match ? [{ name: match[1]!, url: match[2]! }] : [];
-      }),
+      detached: status.branch === "HEAD" || status.branch === "(detached)",
+      unborn: status.unborn,
+      ...(status.upstream ? { upstream: status.upstream } : {}),
+      ahead: status.ahead,
+      behind: status.behind,
+      branches: localBranches.map((branch) => branch.name),
+      localBranches,
+      remoteBranches,
+      remotes,
     };
+  }
+
+  async fetch(cwd: string, remote: string): Promise<GitRepository> {
+    const status = await this.status(cwd);
+    await this.#requireRemote(status.root, remote);
+    await this.#run(status.root, ["fetch", "--prune", remote]);
+    return this.repository(status.root);
   }
 
   async createBranch(cwd: string, branch: string): Promise<GitStatus> {
@@ -97,20 +147,64 @@ export class GitService {
   async switchBranch(cwd: string, branch: string): Promise<GitStatus> {
     const status = await this.status(cwd);
     await this.#validateBranch(status.root, branch);
-    const branches = (await this.repository(status.root)).branches;
-    if (!branches.includes(branch)) throw new Error("Choose an existing local branch");
+    if (!await this.#hasRef(status.root, `refs/heads/${branch}`)) throw new Error("Choose an existing local branch");
     await this.#run(status.root, ["switch", branch]);
     return this.status(status.root);
   }
 
-  async push(cwd: string, remote = "origin"): Promise<GitStatus> {
+  async checkoutRemoteBranch(cwd: string, remote: string, branch: string, localBranch = branch): Promise<GitStatus> {
     const status = await this.status(cwd);
-    requireRemoteName(remote);
+    await this.#requireRemote(status.root, remote);
+    await this.#validateBranch(status.root, branch);
+    await this.#validateBranch(status.root, localBranch);
+    if (await this.#hasRef(status.root, `refs/heads/${localBranch}`)) throw new Error("Choose a new local branch name");
+    if (!await this.#hasRef(status.root, `refs/remotes/${remote}/${branch}`)) throw new Error(`Fetch ${remote} or choose an existing remote branch`);
+    await this.#run(status.root, ["switch", "--track", "-c", localBranch, `refs/remotes/${remote}/${branch}`]);
+    await this.#run(status.root, ["config", `branch.${localBranch}.remote`, remote]);
+    await this.#run(status.root, ["config", `branch.${localBranch}.merge`, `refs/heads/${branch}`]);
+    return this.status(status.root);
+  }
+
+  async renameBranch(cwd: string, branch: string, newBranch: string): Promise<GitRepository> {
+    const status = await this.status(cwd);
+    await this.#validateBranch(status.root, branch);
+    await this.#validateBranch(status.root, newBranch);
+    if (status.unborn && status.branch === branch) {
+      await this.#run(status.root, ["branch", "-m", newBranch]);
+      return this.repository(status.root);
+    }
+    if (!await this.#hasRef(status.root, `refs/heads/${branch}`)) throw new Error("Choose an existing local branch");
+    if (await this.#hasRef(status.root, `refs/heads/${newBranch}`)) throw new Error("A local branch already uses that name");
+    await this.#run(status.root, ["branch", "-m", branch, newBranch]);
+    return this.repository(status.root);
+  }
+
+  async deleteBranch(cwd: string, branch: string): Promise<GitRepository> {
+    const status = await this.status(cwd);
+    await this.#validateBranch(status.root, branch);
+    if (status.branch === branch) throw new Error("Switch branches before deleting the current branch");
+    if (!await this.#hasRef(status.root, `refs/heads/${branch}`)) throw new Error("Choose an existing local branch");
+    try {
+      await this.#run(status.root, ["branch", "-d", branch]);
+    } catch (error) {
+      if ((error as Error).message.includes("not fully merged")) throw new Error("Git refused to delete this branch because it is not fully merged");
+      throw error;
+    }
+    return this.repository(status.root);
+  }
+
+  async push(cwd: string, remote?: string): Promise<GitStatus> {
+    const status = await this.status(cwd);
+    if (status.unborn) throw new Error("Create the first commit before pushing");
     if (status.branch === "HEAD" || status.branch === "(detached)") throw new Error("Create or switch to a branch before pushing");
-    if (status.upstream) await this.#run(status.root, ["push"]);
-    else {
-      await this.#run(status.root, ["remote", "get-url", remote]);
-      await this.#run(status.root, ["push", "--set-upstream", remote, status.branch]);
+    if (!remote && status.upstream) {
+      await this.#run(status.root, ["push"]);
+    } else {
+      const target = remote ?? "origin";
+      await this.#requireRemote(status.root, target);
+      await this.#run(status.root, status.upstream
+        ? ["push", target, status.branch]
+        : ["push", "--set-upstream", target, status.branch]);
     }
     return this.status(status.root);
   }
@@ -166,13 +260,37 @@ export class GitService {
   }
 
   async #validateBranch(cwd: string, branch: string): Promise<void> {
-    if (!branch.trim() || branch.startsWith("-") || branch.length > 200) throw new Error("Enter a valid branch name");
+    if (!branch.trim() || branch !== branch.trim() || branch.startsWith("-") || branch.includes("@{") || branch === "HEAD" || branch.length > 200) throw new Error("Enter a valid branch name");
     await this.#run(cwd, ["check-ref-format", "--branch", branch]);
   }
 
+  async #requireRemote(cwd: string, remote: string): Promise<void> {
+    requireRemoteName(remote);
+    try {
+      await this.#run(cwd, ["remote", "get-url", remote]);
+    } catch (error) {
+      if ((error as Error).message.includes("Git is not available")) throw error;
+      throw new Error("Choose an existing Git remote");
+    }
+  }
+
+  async #hasRef(cwd: string, ref: string): Promise<boolean> {
+    return (await this.#run(cwd, ["for-each-ref", "--format=%(refname)", ref])) === ref;
+  }
+
   async #run(cwd: string, args: string[], trim = true): Promise<string> {
-    const result = await exec(this.#git, ["-C", resolve(cwd), ...args], { windowsHide: true, maxBuffer: 100 * 1024 * 1024 });
-    return trim ? result.stdout.trim() : result.stdout;
+    try {
+      const result = await exec(this.#git, ["-C", resolve(cwd), ...args], { windowsHide: true, maxBuffer: 100 * 1024 * 1024 });
+      return trim ? result.stdout.trim() : result.stdout;
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException & { stderr?: string; stdout?: string | Buffer };
+      if (failure.code === "ENOENT") throw new Error("Git is not available on this computer");
+      const lines = String(failure.stderr ?? "").trim().split(/\r?\n/).filter(Boolean);
+      const detail = (lines.find((line) => /^(?:fatal|error):/i.test(line)) ?? lines.find((line) => !/^hint:/i.test(line)) ?? lines.at(-1))?.replace(/^(?:fatal|error):\s*/i, "");
+      if (!detail) throw error;
+      const normalized = Object.assign(new Error(detail), { code: failure.code, stdout: failure.stdout });
+      throw normalized;
+    }
   }
 
   async #runAllowOne(cwd: string, args: string[]): Promise<string> {
@@ -201,20 +319,22 @@ export function requireRemoteUrl(url: string): void {
 }
 
 function requireRemoteName(remote: string): void {
-  if (!/^[a-zA-Z0-9_.-]+$/.test(remote)) throw new Error("Invalid Git remote name");
+  if (remote.startsWith("-") || !/^[a-zA-Z0-9_.-]+$/.test(remote)) throw new Error("Invalid Git remote name");
 }
 
 export function parseStatus(root: string, output: string): GitStatus {
   const records = output.split("\0").filter(Boolean);
   const files: GitFile[] = [];
   let branch = "HEAD";
+  let unborn = false;
   let upstream: string | undefined;
   let ahead = 0;
   let behind = 0;
 
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index]!;
-    if (record.startsWith("# branch.head ")) branch = record.slice(14);
+    if (record === "# branch.oid (initial)") unborn = true;
+    else if (record.startsWith("# branch.head ")) branch = record.slice(14);
     else if (record.startsWith("# branch.upstream ")) upstream = record.slice(18);
     else if (record.startsWith("# branch.ab ")) {
       const match = /\+(\d+) -(\d+)/.exec(record);
@@ -234,7 +354,31 @@ export function parseStatus(root: string, output: string): GitStatus {
       files.push(fileStatus(record.slice(2), "??", true));
     }
   }
-  return { root: resolve(root), branch, ...(upstream ? { upstream } : {}), ahead, behind, files };
+  return { root: resolve(root), branch, unborn, ...(upstream ? { upstream } : {}), ahead, behind, files };
+}
+
+function parseLocalBranches(output: string, current: string): GitLocalBranch[] {
+  return output.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [name = "", upstream = "", track = ""] = line.split("\t");
+    return {
+      name,
+      current: name === current,
+      ...(upstream ? { upstream } : {}),
+      ahead: Number(/ahead (\d+)/.exec(track)?.[1] ?? 0),
+      behind: Number(/behind (\d+)/.exec(track)?.[1] ?? 0),
+      upstreamGone: track === "gone",
+    };
+  });
+}
+
+function parseRemoteBranches(output: string, remotes: string[]): GitRemoteBranch[] {
+  const sortedRemotes = [...remotes].sort((left, right) => right.length - left.length);
+  return output.split(/\r?\n/).filter(Boolean).flatMap((line) => {
+    const [fullName = "", symref = ""] = line.split("\t");
+    if (symref) return [];
+    const remote = sortedRemotes.find((name) => fullName.startsWith(`${name}/`));
+    return remote ? [{ name: fullName.slice(remote.length + 1), fullName, remote }] : [];
+  });
 }
 
 function fileStatus(path: string, xy: string, untracked: boolean, originalPath?: string): GitFile {

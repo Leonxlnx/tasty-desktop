@@ -88,9 +88,13 @@ const requestSchema = z.discriminatedUnion("method", [
   z.object({ id, method: z.literal("git.unstage"), params: z.object({ cwd: z.string().min(1), paths: z.array(z.string().min(1)).min(1).max(500) }) }),
   z.object({ id, method: z.literal("git.commit"), params: z.object({ cwd: z.string().min(1), message: z.string().trim().min(1).max(2000) }) }),
   z.object({ id, method: z.literal("git.repository"), params: z.object({ cwd: z.string().min(1) }) }),
+  z.object({ id, method: z.literal("git.fetch"), params: z.object({ cwd: z.string().min(1), remote: z.string().trim().min(1).max(100) }) }),
   z.object({ id, method: z.literal("git.createBranch"), params: z.object({ cwd: z.string().min(1), branch: z.string().trim().min(1).max(200) }) }),
   z.object({ id, method: z.literal("git.switchBranch"), params: z.object({ cwd: z.string().min(1), branch: z.string().trim().min(1).max(200) }) }),
-  z.object({ id, method: z.literal("git.push"), params: z.object({ cwd: z.string().min(1), remote: z.string().trim().min(1).max(100).default("origin") }) }),
+  z.object({ id, method: z.literal("git.checkoutRemoteBranch"), params: z.object({ cwd: z.string().min(1), remote: z.string().trim().min(1).max(100), branch: z.string().trim().min(1).max(200), localBranch: z.string().trim().min(1).max(200).optional() }) }),
+  z.object({ id, method: z.literal("git.renameBranch"), params: z.object({ cwd: z.string().min(1), branch: z.string().trim().min(1).max(200), newBranch: z.string().trim().min(1).max(200) }) }),
+  z.object({ id, method: z.literal("git.deleteBranch"), params: z.object({ cwd: z.string().min(1), branch: z.string().trim().min(1).max(200) }) }),
+  z.object({ id, method: z.literal("git.push"), params: z.object({ cwd: z.string().min(1), remote: z.string().trim().min(1).max(100).optional() }) }),
   z.object({ id, method: z.literal("git.pull"), params: z.object({ cwd: z.string().min(1) }) }),
   z.object({ id, method: z.literal("git.clone"), params: z.object({ url: z.string().trim().min(1).max(2048), destination: z.string().min(1).max(32768) }) }),
   z.object({ id, method: z.literal("git.publish"), params: z.object({ cwd: z.string().min(1), name: z.string().trim().min(1).max(200), visibility: z.enum(["private", "public"]) }) }),
@@ -520,12 +524,28 @@ async function handle(socket: WebSocket, input: unknown): Promise<void> {
       reply(socket, request.id, await git.repository(request.params.cwd));
       return;
     }
+    if (request.method === "git.fetch") {
+      reply(socket, request.id, await git.fetch(request.params.cwd, request.params.remote));
+      return;
+    }
     if (request.method === "git.createBranch") {
       reply(socket, request.id, await git.createBranch(request.params.cwd, request.params.branch));
       return;
     }
     if (request.method === "git.switchBranch") {
       reply(socket, request.id, await git.switchBranch(request.params.cwd, request.params.branch));
+      return;
+    }
+    if (request.method === "git.checkoutRemoteBranch") {
+      reply(socket, request.id, await git.checkoutRemoteBranch(request.params.cwd, request.params.remote, request.params.branch, request.params.localBranch));
+      return;
+    }
+    if (request.method === "git.renameBranch") {
+      reply(socket, request.id, await git.renameBranch(request.params.cwd, request.params.branch, request.params.newBranch));
+      return;
+    }
+    if (request.method === "git.deleteBranch") {
+      reply(socket, request.id, await git.deleteBranch(request.params.cwd, request.params.branch));
       return;
     }
     if (request.method === "git.push") {
