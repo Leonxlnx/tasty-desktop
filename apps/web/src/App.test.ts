@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiRuntimes, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, joinLocalPath, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, parseProjectScripts, preferredInitialThreadId, presentDiagnostic, profileConfigUpdates, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, repositoryNameFromUrl, reviewCommentKey, reviewFeedbackPrompt, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldShowRuntimePicker, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, terminalContext, thinkingEffortLabel, threadCanRun, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
+import { ActivityTimeline, activityPreview, applyDraftConfig, applyEvents, classifyGitError, clampPanelWidth, compactToolPreview, ComposerConfig, composerCanSubmit, composerPrimaryAction, composerTrigger, configTargetKey, contextPercent, dedupeActivityEntries, draftConfigOverrides, editorUrl, effectiveRailWidth, extractLocalPaths, filterByTitle, filterKimiRuntimes, filterKimiSkills, filterRuntimeSessions, findLocalPreviewUrl, floatingMenuPosition, gitDiffLineKind, gitFileActions, gitFileGroup, gitPathBatches, groupProjects, hasBlockingWork, isAppMenuOpenKey, isNearScrollBottom, isYoloChoice, joinLocalPath, keybindingConflicts, latestTimelineItemId, localServerUrl, matchesShortcut, modeDescription, moveSuggestionIndex, normalizeAvailableCommands, normalizeLocalPreviewUrl, normalizeThread, parseHarnessCommand, parseProjectScripts, preferredGitRemote, preferredInitialThreadId, presentDiagnostic, profileConfigUpdates, projectTurns, promptShortcutMode, providerUsable, railForStandaloneChat, reasoningStrength, recentTurns, reorderPaths, repositoryNameFromUrl, reviewCommentKey, reviewFeedbackPrompt, serverWebSocketUrl, shortcutFromEvent, shouldAcknowledgeYolo, shouldScheduleRuntimeRecovery, shouldShowRuntimePicker, shouldSubmitPrompt, showSidebarUpdate, skillComposerInsertion, skillInstallDialogFromRequest, subagentRuns, summarizeDiff, terminalContext, thinkingEffortLabel, threadCanRun, threadTreeOrder, toggleComposerTrigger, turnAssistantMessages, updatePercent, visibleQueuedPrompts, workspaceForView, workspaceName, workspaceRelativePath, workspaceRequestMatches } from "./App";
 
 describe("global commands", () => {
   it("captures configurable shortcuts and disables conflicts", () => {
@@ -26,6 +26,29 @@ describe("global commands", () => {
     expect(repositoryNameFromUrl("git@github.com:example/tasty.git")).toBe("tasty");
     expect(repositoryNameFromUrl("C:\\private\\repo")).toBeUndefined();
     expect(joinLocalPath("E:\\code\\", "tasty")).toBe("E:\\code\\tasty");
+  });
+});
+
+describe("Git workspace rail", () => {
+  it("keeps both actions for files with staged and unstaged changes", () => {
+    expect(gitFileActions({ staged: true, unstaged: true })).toEqual(["stage", "unstage"]);
+    expect(gitPathBatches(Array.from({ length: 501 }, (_, index) => String(index))).map((batch) => batch.length)).toEqual([500, 1]);
+    expect(["DD", "AU", "UD", "UA", "DU", "AA", "UU"].map((status) => gitFileGroup({ staged: true, indexStatus: status[0]!, worktreeStatus: status[1]! }))).toEqual(Array(7).fill("conflicts"));
+    expect(gitFileGroup({ staged: true, indexStatus: "M", worktreeStatus: "." })).toBe("staged");
+  });
+
+  it("keeps a valid remote selection and otherwise prefers origin", () => {
+    const remotes = [{ name: "backup" }, { name: "origin" }];
+    expect(preferredGitRemote(remotes, "backup")).toBe("backup");
+    expect(preferredGitRemote(remotes, "missing")).toBe("origin");
+    expect(preferredGitRemote(remotes, "missing", "backup/main")).toBe("backup");
+    expect(preferredGitRemote([{ name: "upstream" }], "")).toBe("upstream");
+  });
+
+  it("classifies inline failures and unified diff lines", () => {
+    expect(classifyGitError(new Error("fatal: Authentication failed")).kind).toBe("authentication");
+    expect(classifyGitError(new Error("branch is not fully merged")).kind).toBe("conflict");
+    expect(["+++ b/a.ts", "+added", "-removed", "@@ -1 +1 @@", " same"].map(gitDiffLineKind)).toEqual(["meta", "added", "removed", "hunk", "context"]);
   });
 });
 

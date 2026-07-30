@@ -38,8 +38,18 @@ type BackgroundTask = {
   reportDeliveredAt?: string; reportCancelledAt?: string;
 };
 type GitFile = { path: string; originalPath?: string; staged: boolean; unstaged: boolean; untracked: boolean; indexStatus: string; worktreeStatus: string };
-type GitStatus = { root: string; branch: string; upstream?: string; ahead: number; behind: number; files: GitFile[] };
-type GitRepository = { current: string; branches: string[]; remotes: Array<{ name: string; url: string }> };
+type GitStatus = { root: string; branch: string; unborn?: boolean; upstream?: string; ahead: number; behind: number; files: GitFile[] };
+type GitLocalBranch = { name: string; current: boolean; upstream?: string; ahead: number; behind: number; upstreamGone: boolean };
+type GitRemoteBranch = { name: string; fullName: string; remote: string };
+type GitRepository = {
+  current: string; detached: boolean; unborn: boolean; upstream?: string; ahead: number; behind: number; branches: string[];
+  localBranches: GitLocalBranch[]; remoteBranches: GitRemoteBranch[]; remotes: Array<{ name: string; url: string }>;
+};
+export type GitInlineError = { kind: "not-repository" | "unavailable" | "authentication" | "conflict" | "network" | "unknown"; title: string; detail: string };
+type GitBranchAction =
+  | { kind: "rename"; branch: string; value: string }
+  | { kind: "delete"; branch: string }
+  | { kind: "track"; remote: string; branch: string; value: string };
 type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: NonNullable<Usage["tokens"]> };
 type ActivityEntry = { id: string; turnId: string; kind: "thought" | "tool"; status: "pending" | "in_progress" | "completed" | "failed"; text: string; toolCallId?: string; seq: number; updatedSeq?: number; createdAt: string; updatedAt: string };
 type QueuedPrompt = { queuedId: string; text: string; mode: "queue" | "steer"; createdAt: string; images: Array<{ name: string; mimeType: string }>; origin?: "user" | "background_task" };
@@ -341,6 +351,47 @@ export function workspaceRequestMatches(requested: string, current: string | und
   return Boolean(current && samePath(requested, current));
 }
 
+export function gitFileGroup(file: Pick<GitFile, "staged" | "indexStatus" | "worktreeStatus">): "conflicts" | "staged" | "changes" {
+  const status = `${file.indexStatus}${file.worktreeStatus}`;
+  if (["DD", "AU", "UD", "UA", "DU", "AA", "UU"].includes(status)) return "conflicts";
+  return file.staged ? "staged" : "changes";
+}
+
+export function gitFileActions(file: Pick<GitFile, "staged" | "unstaged">): Array<"stage" | "unstage"> {
+  return [...(file.unstaged ? ["stage" as const] : []), ...(file.staged ? ["unstage" as const] : [])];
+}
+
+export function gitPathBatches(paths: string[]): string[][] {
+  return Array.from({ length: Math.ceil(paths.length / 500) }, (_, index) => paths.slice(index * 500, (index + 1) * 500));
+}
+
+export function preferredGitRemote(remotes: Array<{ name: string }>, selected: string, upstream?: string): string {
+  return remotes.some((remote) => remote.name === selected)
+    ? selected
+    : remotes.find((remote) => upstream === remote.name || upstream?.startsWith(`${remote.name}/`))?.name
+      ?? remotes.find((remote) => remote.name === "origin")?.name
+      ?? remotes[0]?.name
+      ?? "";
+}
+
+export function gitDiffLineKind(line: string): "added" | "removed" | "hunk" | "meta" | "context" {
+  if (line.startsWith("+++ ") || line.startsWith("--- ") || line.startsWith("diff --git ") || line.startsWith("index ")) return "meta";
+  if (line.startsWith("+")) return "added";
+  if (line.startsWith("-")) return "removed";
+  if (line.startsWith("@@")) return "hunk";
+  return "context";
+}
+
+export function classifyGitError(error: unknown): GitInlineError {
+  const detail = (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/i, "").trim() || "Git could not complete the request.";
+  if (/not a git repository/i.test(detail)) return { kind: "not-repository", title: "No Git repository here", detail };
+  if (/not available|not recognized|cannot find.*git|ENOENT/i.test(detail)) return { kind: "unavailable", title: "Git is not available", detail: "Install Git for Windows, then reopen this workspace." };
+  if (/authentication|permission denied|could not read username|terminal prompts disabled|publickey/i.test(detail)) return { kind: "authentication", title: "Git authentication failed", detail };
+  if (/conflict|would be overwritten|not fully merged|unmerged|resolve your current index/i.test(detail)) return { kind: "conflict", title: "Git needs your attention", detail };
+  if (/unable to access|could not resolve host|network|timed out|connection.*(?:failed|reset|closed)/i.test(detail)) return { kind: "network", title: "Git network request failed", detail };
+  return { kind: "unknown", title: "Git request failed", detail };
+}
+
 export function skillInstallDialogFromRequest(value: unknown): ({ kind: "install-skill" } & SkillInstallRequest) | undefined {
   if (!isRecordValue(value)
     || typeof value.cwd !== "string"
@@ -450,6 +501,11 @@ export function App() {
   const [commitMessage, setCommitMessage] = useState("");
   const [gitBusy, setGitBusy] = useState(false);
   const [gitRepository, setGitRepository] = useState<GitRepository>();
+  const [gitError, setGitError] = useState<GitInlineError>();
+  const [gitRemote, setGitRemote] = useState("");
+  const [gitBranchQuery, setGitBranchQuery] = useState("");
+  const [gitBranchAction, setGitBranchAction] = useState<GitBranchAction>();
+  const previousGitTurn = useRef<{ threadId: string | undefined; busy: boolean }>({ threadId: undefined, busy: false });
   const [branchDraft, setBranchDraft] = useState("");
   const [publishName, setPublishName] = useState("");
   const [publishVisibility, setPublishVisibility] = useState<"private" | "public">("private");
@@ -514,6 +570,16 @@ export function App() {
   const composerSubmitReady = runtimeReady && composerCanSubmit(navView, composerTargetKind, configMutationPending);
   const activeThreadBusy = activeThread ? isThreadBusy(activeThread) : false;
   const primaryComposerAction = composerPrimaryAction(activeThreadBusy);
+  const selectedGitRemote = preferredGitRemote(gitRepository?.remotes ?? [], gitRemote, gitRepository?.upstream);
+  const gitFileSections = useMemo(() => {
+    const files = gitStatus?.files ?? [];
+    return (["conflicts", "staged", "changes"] as const).map((id) => ({ id, files: files.filter((file) => gitFileGroup(file) === id) })).filter((section) => section.files.length);
+  }, [gitStatus?.files]);
+  const gitStagedPaths = useMemo(() => gitStatus?.files.filter((file) => file.staged).map((file) => file.path) ?? [], [gitStatus?.files]);
+  const gitUnstagedPaths = useMemo(() => gitStatus?.files.filter((file) => file.unstaged).map((file) => file.path) ?? [], [gitStatus?.files]);
+  const normalizedGitBranchQuery = gitBranchQuery.trim().toLowerCase();
+  const visibleLocalBranches = (gitRepository?.localBranches ?? []).filter((branch) => !normalizedGitBranchQuery || `${branch.name} ${branch.upstream ?? ""}`.toLowerCase().includes(normalizedGitBranchQuery));
+  const visibleRemoteBranches = (gitRepository?.remoteBranches ?? []).filter((branch) => branch.remote === selectedGitRemote && (!normalizedGitBranchQuery || branch.fullName.toLowerCase().includes(normalizedGitBranchQuery)));
   const layoutSidebarWidth = preferences.sidebarCollapsed ? collapsedSidebarWidth : preferences.sidebarWidth;
   const renderedRailWidth = effectiveRailWidth(preferences.railWidth, viewportWidth, layoutSidebarWidth);
   const previewPanelMode = renderedRailWidth >= 1_080 ? "Wide" : renderedRailWidth >= 760 ? "Desktop" : "Compact";
@@ -948,6 +1014,10 @@ export function App() {
     setGitRepository(undefined);
     setGitStatusCwd(undefined);
     setGitDiff(undefined);
+    setGitError(undefined);
+    setGitRemote("");
+    setGitBranchQuery("");
+    setGitBranchAction(undefined);
     setCheckpointReview(undefined);
     setReviewComments({});
     setPendingReviewRevert(undefined);
@@ -1011,6 +1081,7 @@ export function App() {
     if (!workspaceCwd) return;
     const requestedCwd = workspaceCwd;
     setGitBusy(true);
+    setGitError(undefined);
     try {
       const [status, repository] = await Promise.all([
         call("git.status", { cwd: requestedCwd }) as Promise<GitStatus>,
@@ -1025,15 +1096,22 @@ export function App() {
       setGitStatus(undefined);
       setGitRepository(undefined);
       setGitStatusCwd(undefined);
-      setDiagnostic(error instanceof Error ? error.message : String(error));
+      const presented = classifyGitError(error);
+      setGitError(presented.kind === "not-repository" ? undefined : presented);
     } finally {
       if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitBusy(false);
     }
-  }, [call, setDiagnostic, workspaceCwd]);
+  }, [call, workspaceCwd]);
 
   useEffect(() => {
     if (railView === "git") void refreshGit();
   }, [railView, refreshGit]);
+
+  useEffect(() => {
+    const previous = previousGitTurn.current;
+    previousGitTurn.current = { threadId: activeThread?.threadId, busy: activeThreadBusy };
+    if (railView === "git" && previous.threadId === activeThread?.threadId && previous.busy && !activeThreadBusy) void refreshGit();
+  }, [activeThread?.threadId, activeThreadBusy, railView, refreshGit]);
 
   useEffect(() => {
     if (connection !== "connected" || !auth?.authenticated) return;
@@ -1312,6 +1390,10 @@ export function App() {
     setGitRepository(undefined);
     setGitStatusCwd(undefined);
     setGitDiff(undefined);
+    setGitError(undefined);
+    setGitRemote("");
+    setGitBranchQuery("");
+    setGitBranchAction(undefined);
     setCommitMessage("");
     setGitBusy(false);
     setPreviewUrl(undefined);
@@ -1787,27 +1869,32 @@ export function App() {
 
   async function openGitDiff(path: string, targetCwd = workspaceCwd) {
     if (!targetCwd || !gitStatusCwd || !workspaceRequestMatches(targetCwd, gitStatusCwd)) return;
+    setGitError(undefined);
     try {
       const diff = await call("git.diff", { cwd: targetCwd, path }) as { path: string; diff: string };
       if (workspaceRequestMatches(targetCwd, currentWorkspaceCwd.current)) setGitDiff(diff);
     } catch (error) {
-      if (workspaceRequestMatches(targetCwd, currentWorkspaceCwd.current)) setDiagnostic(error instanceof Error ? error.message : String(error));
+      if (workspaceRequestMatches(targetCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
     }
   }
 
-  async function changeGitStage(file: GitFile) {
-    if (!workspaceCwd || !gitStatusCwd || !workspaceRequestMatches(workspaceCwd, gitStatusCwd)) return;
+  async function changeGitStage(method: "git.stage" | "git.unstage", paths: string[]) {
+    if (!workspaceCwd || !gitStatusCwd || !workspaceRequestMatches(workspaceCwd, gitStatusCwd) || !paths.length) return;
     const requestedCwd = workspaceCwd;
     setGitBusy(true);
+    setGitError(undefined);
     try {
-      const method = file.staged ? "git.unstage" : "git.stage";
-      const status = await call(method, { cwd: requestedCwd, paths: [file.path] }) as GitStatus;
-      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
-      setGitStatus(status);
-      setGitStatusCwd(requestedCwd);
-      if (gitDiff?.path === file.path) await openGitDiff(file.path, requestedCwd);
+      let status: GitStatus | undefined;
+      for (const batch of gitPathBatches(paths)) {
+        status = await call(method, { cwd: requestedCwd, paths: batch }) as GitStatus;
+        if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+        setGitStatus(status);
+        setGitStatusCwd(requestedCwd);
+      }
+      if (!status) return;
+      if (gitDiff && paths.includes(gitDiff.path)) await openGitDiff(gitDiff.path, requestedCwd);
     } catch (error) {
-      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setDiagnostic(error instanceof Error ? error.message : String(error));
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
     } finally {
       if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitBusy(false);
     }
@@ -1818,61 +1905,109 @@ export function App() {
     const requestedCwd = workspaceCwd;
     const message = commitMessage.trim();
     setGitBusy(true);
+    setGitError(undefined);
     try {
       const result = await call("git.commit", { cwd: requestedCwd, message }) as { commit: string; status: GitStatus };
       if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      const repository = await call("git.repository", { cwd: requestedCwd }) as GitRepository;
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
       setGitStatus(result.status);
       setGitStatusCwd(requestedCwd);
+      setGitRepository(repository);
       setGitDiff(undefined);
       setCommitMessage("");
       setDiagnostic(`Committed ${result.commit}`);
     } catch (error) {
-      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setDiagnostic(error instanceof Error ? error.message : String(error));
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
     } finally {
       if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitBusy(false);
     }
   }
 
-  async function updateGit(method: "git.createBranch" | "git.switchBranch" | "git.push" | "git.pull", params: Record<string, unknown>) {
+  async function updateGit(method: "git.fetch" | "git.createBranch" | "git.switchBranch" | "git.checkoutRemoteBranch" | "git.renameBranch" | "git.deleteBranch" | "git.push" | "git.pull", params: Record<string, unknown>, success?: string) {
     if (!workspaceCwd) return;
+    const requestedCwd = workspaceCwd;
     setGitBusy(true);
+    setGitError(undefined);
     try {
-      const status = await call(method, { cwd: workspaceCwd, ...params }) as GitStatus;
+      await call(method, { cwd: requestedCwd, ...params });
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      const [status, repository] = await Promise.all([
+        call("git.status", { cwd: requestedCwd }) as Promise<GitStatus>,
+        call("git.repository", { cwd: requestedCwd }) as Promise<GitRepository>,
+      ]);
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
       setGitStatus(status);
-      setGitStatusCwd(workspaceCwd);
-      setGitRepository(await call("git.repository", { cwd: workspaceCwd }) as GitRepository);
+      setGitStatusCwd(requestedCwd);
+      setGitRepository(repository);
+      setGitDiff(undefined);
       setBranchDraft("");
+      setGitBranchAction(undefined);
+      if (success) setDiagnostic(success);
     } catch (error) {
-      setDiagnostic(error instanceof Error ? error.message : String(error));
-    } finally { setGitBusy(false); }
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
+    } finally {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitBusy(false);
+    }
+  }
+
+  async function confirmGitBranchAction() {
+    if (!gitBranchAction) return;
+    if (gitBranchAction.kind === "rename") {
+      const next = gitBranchAction.value.trim();
+      if (next && next !== gitBranchAction.branch) await updateGit("git.renameBranch", { branch: gitBranchAction.branch, newBranch: next }, `Renamed ${gitBranchAction.branch} to ${next}.`);
+      return;
+    }
+    if (gitBranchAction.kind === "delete") {
+      await updateGit("git.deleteBranch", { branch: gitBranchAction.branch }, `Deleted local branch ${gitBranchAction.branch}.`);
+      return;
+    }
+    const localBranch = gitBranchAction.value.trim();
+    if (localBranch) await updateGit("git.checkoutRemoteBranch", { remote: gitBranchAction.remote, branch: gitBranchAction.branch, localBranch }, `Tracking ${gitBranchAction.remote}/${gitBranchAction.branch} as ${localBranch}.`);
   }
 
   async function publishGit() {
     if (!workspaceCwd || !publishName.trim()) return;
+    const requestedCwd = workspaceCwd;
     setGitBusy(true);
+    setGitError(undefined);
     try {
-      const status = await call("git.publish", { cwd: workspaceCwd, name: publishName.trim(), visibility: publishVisibility }) as GitStatus;
+      const status = await call("git.publish", { cwd: requestedCwd, name: publishName.trim(), visibility: publishVisibility }) as GitStatus;
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      const repository = await call("git.repository", { cwd: requestedCwd }) as GitRepository;
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
       setGitStatus(status);
-      setGitRepository(await call("git.repository", { cwd: workspaceCwd }) as GitRepository);
+      setGitStatusCwd(requestedCwd);
+      setGitRepository(repository);
       setDiagnostic(`Published ${publishName.trim()} as a ${publishVisibility} repository.`);
-    } catch (error) { setDiagnostic(error instanceof Error ? error.message : String(error)); }
-    finally { setGitBusy(false); }
+    } catch (error) {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
+    } finally {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitBusy(false);
+    }
   }
 
   async function createGitPullRequest() {
     if (!workspaceCwd || !pullRequest.title.trim()) return;
+    const requestedCwd = workspaceCwd;
     setGitBusy(true);
+    setGitError(undefined);
     try {
-      const result = await call("git.createPullRequest", { cwd: workspaceCwd, ...pullRequest, title: pullRequest.title.trim() }) as { url: string };
+      const result = await call("git.createPullRequest", { cwd: requestedCwd, ...pullRequest, title: pullRequest.title.trim() }) as { url: string };
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
       setDiagnostic(`Pull request created: ${result.url}`);
       await openExternalLink(result.url);
-    } catch (error) { setDiagnostic(error instanceof Error ? error.message : String(error)); }
-    finally { setGitBusy(false); }
+    } catch (error) {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
+    } finally {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitBusy(false);
+    }
   }
 
   async function cloneGitRepository() {
     const name = repositoryNameFromUrl(cloneUrl);
-    if (!name) { setDiagnostic("Enter a valid HTTPS or SSH repository URL."); return; }
+    if (!name) { setGitError({ kind: "unknown", title: "Clone URL is invalid", detail: "Enter an HTTPS or SSH repository URL." }); return; }
+    setGitError(undefined);
     try {
       if (!isTauri()) throw new Error("Clone destination selection is available in the desktop app");
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -1886,7 +2021,7 @@ export function App() {
       setNavView("projects");
       setCloneUrl("");
       setDiagnostic(`Cloned ${name}.`);
-    } catch (error) { setDiagnostic(error instanceof Error ? error.message : String(error)); }
+    } catch (error) { setGitError(classifyGitError(error)); }
     finally { setGitBusy(false); }
   }
 
@@ -2585,18 +2720,44 @@ export function App() {
           {railView === "git" && <>
             <div className="rail-contextbar"><span><GitBranch /> {checkpointReview ? "Review turn changes" : gitStatus?.branch ?? "Git changes"}</span>{checkpointReview ? <button className="rail-icon" type="button" aria-label="Close turn review" onClick={() => setCheckpointReview(undefined)}><X /></button> : <button className="rail-icon" type="button" aria-label="Refresh Git status" disabled={gitBusy} onClick={() => void refreshGit()}><ArrowsClockwise /></button>}</div>
             {checkpointReview ? <CheckpointReviewPanel review={checkpointReview} comments={reviewComments} revertedParts={activeThread?.revertedParts ?? []} busy={gitBusy} pending={pendingReviewRevert} onComment={(key, value) => setReviewComments((current) => ({ ...current, [key]: value }))} onRequestRevert={setPendingReviewRevert} onConfirmRevert={revertCheckpointPart} onCancelRevert={() => setPendingReviewRevert(undefined)} onAddFeedback={addReviewFeedbackToPrompt} /> : <>{selectedFile && <section className="git-file-preview file-preview"><div><h2>{selectedFile.path}</h2><button type="button" aria-label="Close file preview" onClick={() => setSelectedFile(undefined)}><X /></button></div><pre>{selectedFile.content}</pre></section>}
+            {gitError && <div className={`git-inline-error ${gitError.kind}`} role="alert"><WarningCircle /><span><strong>{gitError.title}</strong><small>{gitError.detail}</small></span><button type="button" aria-label="Dismiss Git error" onClick={() => setGitError(undefined)}><X /></button></div>}
             {gitStatus ? <>
-              {gitRepository && <section className="git-repository"><div className="git-branch-row"><select aria-label="Current Git branch" value={gitRepository.current} disabled={gitBusy} onChange={(event) => void updateGit("git.switchBranch", { branch: event.target.value })}>{gitRepository.branches.map((branch) => <option value={branch} key={branch}>{branch}</option>)}</select><button className="secondary" type="button" disabled={gitBusy} onClick={() => void updateGit("git.push", {})}><ArrowUp /> Push</button><button className="secondary" type="button" disabled={gitBusy || !gitStatus.upstream} onClick={() => void updateGit("git.pull", {})}><DownloadSimple /> Pull</button></div><div className="git-new-branch"><input value={branchDraft} onChange={(event) => setBranchDraft(event.target.value)} placeholder="new/branch-name" aria-label="New branch name" spellCheck={false} /><button type="button" disabled={gitBusy || !branchDraft.trim()} onClick={() => void updateGit("git.createBranch", { branch: branchDraft.trim() })}><Plus /> Create</button></div></section>}
-              <div className="git-summary"><span>{gitStatus.files.length ? `${gitStatus.files.length} changed` : "Working tree clean"}</span>{gitStatus.upstream && <small>{gitStatus.ahead ? `↑${gitStatus.ahead}` : ""}{gitStatus.behind ? ` ↓${gitStatus.behind}` : ""} {gitStatus.upstream}</small>}</div>
-              <section className="git-files" aria-label="Changed files">
-                {gitStatus.files.map((file) => <div className={`git-file ${gitDiff?.path === file.path ? "active" : ""}`} key={file.path}><button type="button" onClick={() => void openGitDiff(file.path)}><span className="git-file-status">{file.untracked ? "U" : `${file.indexStatus.replace(".", "")}${file.worktreeStatus.replace(".", "")}`}</span><span title={file.path}>{file.path}</span></button><button type="button" disabled={gitBusy} onClick={() => void changeGitStage(file)}>{file.staged ? "Unstage" : "Stage"}</button></div>)}
-                {!gitStatus.files.length && <div className="git-empty"><Check /> No local changes</div>}
-              </section>
+              {gitRepository && <section className="git-repository">
+                <div className="git-current-branch"><GitBranch /><span><strong>{gitRepository.current}</strong><small>{gitRepository.detached ? "Detached HEAD" : gitRepository.upstream ?? (gitRepository.unborn ? "No commits yet" : "Local branch")}</small></span>{(gitRepository.ahead > 0 || gitRepository.behind > 0) && <em>↑{gitRepository.ahead} ↓{gitRepository.behind}</em>}</div>
+                {gitRepository.remotes.length > 0 && <div className="git-network-row">
+                  <select aria-label="Git remote" value={selectedGitRemote} disabled={gitBusy} onChange={(event) => setGitRemote(event.target.value)}>{gitRepository.remotes.map((remote) => <option value={remote.name} key={remote.name}>{remote.name}</option>)}</select>
+                  <button className="secondary" type="button" aria-label={`Fetch ${selectedGitRemote}`} disabled={gitBusy || !selectedGitRemote} onClick={() => void updateGit("git.fetch", { remote: selectedGitRemote }, `Fetched ${selectedGitRemote}.`)}><ArrowsClockwise /><span>Fetch</span></button>
+                  <button className="secondary" type="button" aria-label={`Push to ${selectedGitRemote}`} disabled={gitBusy || !selectedGitRemote || gitRepository.unborn} onClick={() => void updateGit("git.push", { remote: selectedGitRemote }, `Pushed ${gitRepository.current} to ${selectedGitRemote}.`)}><ArrowUp /><span>Push</span></button>
+                  <button className="secondary" type="button" aria-label={`Pull from ${gitStatus.upstream ?? "upstream"}`} disabled={gitBusy || !gitStatus.upstream} onClick={() => void updateGit("git.pull", {}, `Pulled ${gitStatus.upstream ?? "upstream"}.`)}><DownloadSimple /><span>Pull</span></button>
+                </div>}
+                <details className="git-branches">
+                  <summary><span>Manage branches</span><small>{gitRepository.localBranches.length} local · {gitRepository.remoteBranches.length} remote</small></summary>
+                  <div className="git-branches-body">
+                    <label className="git-branch-search"><MagnifyingGlass /><input value={gitBranchQuery} onChange={(event) => setGitBranchQuery(event.target.value)} placeholder="Filter branches" aria-label="Filter Git branches" /></label>
+                    <div className="git-new-branch"><input value={branchDraft} onChange={(event) => setBranchDraft(event.target.value)} placeholder="new/branch-name" aria-label="New branch name" spellCheck={false} /><button type="button" disabled={gitBusy || !branchDraft.trim()} onClick={() => void updateGit("git.createBranch", { branch: branchDraft.trim() }, `Created ${branchDraft.trim()}.`)}><Plus /> Create</button></div>
+                    <section className="git-branch-list" aria-label="Local branches"><header><span>Local</span><small>{visibleLocalBranches.length}</small></header>{visibleLocalBranches.map((branch) => <div className={branch.current ? "current" : ""} key={branch.name}>
+                      <button className="git-branch-name" type="button" disabled={gitBusy || branch.current} onClick={() => void updateGit("git.switchBranch", { branch: branch.name }, `Switched to ${branch.name}.`)}><Circle weight={branch.current ? "fill" : "regular"} /><span><strong>{branch.name}</strong><small>{branch.current ? "Current" : branch.upstreamGone ? "Upstream gone" : branch.upstream ?? "Local"}{branch.ahead || branch.behind ? ` · ↑${branch.ahead} ↓${branch.behind}` : ""}</small></span></button>
+                      <div><button type="button" disabled={gitBusy} aria-label={`Rename ${branch.name}`} title="Rename branch" onClick={() => setGitBranchAction({ kind: "rename", branch: branch.name, value: branch.name })}><PencilSimple /></button>{!branch.current && <button type="button" disabled={gitBusy} aria-label={`Delete ${branch.name}`} title="Delete branch" onClick={() => setGitBranchAction({ kind: "delete", branch: branch.name })}><Trash /></button>}</div>
+                    </div>)}{!visibleLocalBranches.length && <p>No matching local branches.</p>}</section>
+                    {selectedGitRemote && <section className="git-branch-list remote" aria-label={`${selectedGitRemote} remote branches`}><header><span>{selectedGitRemote}</span><small>{visibleRemoteBranches.length}</small></header>{visibleRemoteBranches.map((branch) => { const exists = gitRepository.localBranches.some((local) => local.name === branch.name); return <div key={branch.fullName}><span className="git-branch-name"><GitBranch /><span><strong>{branch.name}</strong><small>{branch.fullName}</small></span></span><div><button type="button" disabled={gitBusy || exists} aria-label={exists ? `${branch.name} already exists locally` : `Track ${branch.fullName}`} title={exists ? "Local branch already exists" : "Create tracking branch"} onClick={() => setGitBranchAction({ kind: "track", remote: branch.remote, branch: branch.name, value: branch.name })}><DownloadSimple /></button></div></div>; })}{!visibleRemoteBranches.length && <p>No matching remote branches.</p>}</section>}
+                    {gitBranchAction && <div className={`git-branch-action ${gitBranchAction.kind}`} role="group" aria-label={`${gitBranchAction.kind} branch`}>
+                      <span><strong>{gitBranchAction.kind === "rename" ? "Rename local branch" : gitBranchAction.kind === "delete" ? "Delete local branch?" : `Track ${gitBranchAction.remote}/${gitBranchAction.branch}`}</strong><small>{gitBranchAction.kind === "delete" ? "Git will refuse if it is current or not fully merged." : ""}</small></span>
+                      {gitBranchAction.kind !== "delete" && <input aria-label={gitBranchAction.kind === "rename" ? "Renamed branch" : "Local tracking branch"} value={gitBranchAction.value} onChange={(event) => setGitBranchAction({ ...gitBranchAction, value: event.target.value })} spellCheck={false} />}
+                      <div><button className="secondary" type="button" disabled={gitBusy} onClick={() => setGitBranchAction(undefined)}>Cancel</button><button className={gitBranchAction.kind === "delete" ? "danger" : "primary"} type="button" disabled={gitBusy || (gitBranchAction.kind !== "delete" && (!gitBranchAction.value.trim() || (gitBranchAction.kind === "rename" && gitBranchAction.value.trim() === gitBranchAction.branch)))} onClick={() => void confirmGitBranchAction()}>{gitBranchAction.kind === "delete" ? "Delete" : gitBranchAction.kind === "rename" ? "Rename" : "Track"}</button></div>
+                    </div>}
+                  </div>
+                </details>
+              </section>}
+              <div className="git-summary"><span>{gitStatus.files.length ? `${gitStatus.files.length} changed` : "Working tree clean"}</span><div>{gitUnstagedPaths.length > 0 && <button type="button" disabled={gitBusy} onClick={() => void changeGitStage("git.stage", gitUnstagedPaths)}>Stage all</button>}{gitStagedPaths.length > 0 && <button type="button" disabled={gitBusy} onClick={() => void changeGitStage("git.unstage", gitStagedPaths)}>Unstage all</button>}{gitStatus.upstream && <small>{gitStatus.ahead ? `↑${gitStatus.ahead}` : ""}{gitStatus.behind ? ` ↓${gitStatus.behind}` : ""} {gitStatus.upstream}</small>}</div></div>
+              {gitFileSections.map((section) => <section className={`git-file-group ${section.id}`} aria-label={`${section.id} files`} key={section.id}><header><span>{section.id === "conflicts" ? "Conflicts" : section.id === "staged" ? "Staged changes" : "Changes"}</span><small>{section.files.length}</small></header><div className="git-files">
+                {section.files.map((file) => <div className={`git-file ${gitDiff?.path === file.path ? "active" : ""}`} key={file.path}><button type="button" onClick={() => void openGitDiff(file.path)}><span className="git-file-status">{section.id === "conflicts" ? "!" : file.untracked ? "U" : `${file.indexStatus.replace(".", "")}${file.worktreeStatus.replace(".", "")}`}</span><span title={file.path}>{file.path}</span></button><div className="git-file-actions">{gitFileActions(file).map((action) => <button type="button" disabled={gitBusy} key={action} onClick={() => void changeGitStage(action === "stage" ? "git.stage" : "git.unstage", [file.path])}>{action === "stage" ? "Stage" : "Unstage"}</button>)}</div></div>)}
+              </div></section>)}
+              {!gitStatus.files.length && <div className="git-empty"><Check /> No local changes</div>}
               <section className="git-commit"><label htmlFor="commit-message">Commit message</label><textarea id="commit-message" value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe this change" /><button className="primary" type="button" disabled={gitBusy || !commitMessage.trim() || !gitStatus.files.some((file) => file.staged)} onClick={() => void commitGit()}><GitCommit /> Commit staged</button></section>
               {gitRepository && !gitRepository.remotes.length && <details className="git-network-action"><summary>Publish repository</summary><div><input value={publishName} onChange={(event) => setPublishName(event.target.value)} placeholder="owner/repository" aria-label="GitHub repository name" /><select value={publishVisibility} onChange={(event) => setPublishVisibility(event.target.value as "private" | "public")} aria-label="Repository visibility"><option value="private">Private</option><option value="public">Public</option></select><button type="button" disabled={gitBusy || !publishName.trim()} onClick={() => void publishGit()}>Publish with GitHub CLI</button><small>This creates a remote repository and pushes the current branch. GitHub CLI sign-in is required.</small></div></details>}
               {gitStatus.upstream && <details className="git-network-action"><summary>Create pull request</summary><div><input value={pullRequest.title} onChange={(event) => setPullRequest((current) => ({ ...current, title: event.target.value }))} placeholder="Pull request title" aria-label="Pull request title" /><textarea value={pullRequest.body} onChange={(event) => setPullRequest((current) => ({ ...current, body: event.target.value }))} placeholder="Summary and test plan" aria-label="Pull request description" /><label><input type="checkbox" checked={pullRequest.draft} onChange={(event) => setPullRequest((current) => ({ ...current, draft: event.target.checked }))} /> Create as draft</label><button type="button" disabled={gitBusy || !pullRequest.title.trim()} onClick={() => void createGitPullRequest()}>Create with GitHub CLI</button></div></details>}
-              {gitDiff && <section className="git-diff"><div><strong>{gitDiff.path}</strong><button type="button" onClick={() => setGitDiff(undefined)} aria-label="Close diff"><X /></button></div><pre>{gitDiff.diff || "No textual diff available."}</pre></section>}
-            </> : <div className="git-clone"><GitBranch /><strong>{gitBusy ? "Reading repository…" : "No Git repository here"}</strong><span>Clone an HTTPS or SSH repository into a folder you choose.</span><input value={cloneUrl} onChange={(event) => setCloneUrl(event.target.value)} placeholder="https://github.com/owner/repo.git" aria-label="Repository clone URL" spellCheck={false} /><button className="primary" type="button" disabled={gitBusy || !repositoryNameFromUrl(cloneUrl)} onClick={() => void cloneGitRepository()}><DownloadSimple /> Clone repository</button></div>}</>}
+              {gitDiff && <section className="git-diff"><div><strong>{gitDiff.path}</strong><button type="button" onClick={() => setGitDiff(undefined)} aria-label="Close diff"><X /></button></div><pre>{(gitDiff.diff || "No textual diff available.").split("\n").map((line, index) => <span className={gitDiffLineKind(line)} key={`${index}-${line}`}>{line || " "}</span>)}</pre></section>}
+            </> : gitError ? <div className="git-clone"><WarningCircle /><strong>Git status unavailable</strong><span>Resolve the issue above, then retry.</span><button className="primary" type="button" disabled={gitBusy} onClick={() => void refreshGit()}><ArrowsClockwise /> Retry</button></div> : <div className="git-clone"><GitBranch /><strong>{gitBusy ? "Reading repository…" : "No Git repository here"}</strong><span>Clone an HTTPS or SSH repository into a folder you choose.</span><input value={cloneUrl} onChange={(event) => setCloneUrl(event.target.value)} placeholder="https://github.com/owner/repo.git" aria-label="Repository clone URL" spellCheck={false} /><button className="primary" type="button" disabled={gitBusy || !repositoryNameFromUrl(cloneUrl)} onClick={() => void cloneGitRepository()}><DownloadSimple /> Clone repository</button></div>}</>}
           </>}
 
           {railView === "terminal" && <>
