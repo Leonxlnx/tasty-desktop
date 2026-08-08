@@ -1,0 +1,487 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated stable release tag on main (for example v0.12.0)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: windows-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      sha: ${{ steps.release.outputs.sha }}
+      tag_object: ${{ steps.release.outputs.tag_object }}
+      pub_date: ${{ steps.release.outputs.pub_date }}
+    steps:
+      - name: Require the canonical default-branch workflow
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'Leonxlnx/kimi-code-desktop') { throw "Canonical repository required: $env:GITHUB_REPOSITORY" }
+          if ($env:GITHUB_REF -cne 'refs/heads/main') { throw "Run this workflow from main, not $env:GITHUB_REF" }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+      - name: Authorize the immutable release identity
+        id: release
+        shell: pwsh
+        env:
+          UPDATER_FEED_MODE: ${{ vars.UPDATER_FEED_MODE }}
+          LEGACY_FEED_REPOSITORY: ${{ vars.LEGACY_FEED_REPOSITORY }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: >-
+          node scripts/release-feed.mjs authorize
+          --repository "$env:GITHUB_REPOSITORY"
+          --mode "$env:UPDATER_FEED_MODE"
+          --legacy-repository "$env:LEGACY_FEED_REPOSITORY"
+          --default-branch main
+          --tag "$env:RELEASE_TAG"
+          --github-output "$env:GITHUB_OUTPUT"
+      - name: Verify release metadata at the authorized commit
+        run: node scripts/check-release-version.mjs "${{ steps.release.outputs.tag }}"
+      - name: Verify release-feed policy tests
+        run: node --test scripts/release-feed.test.mjs
+
+  build:
+    needs: authorize
+    runs-on: windows-latest
+    environment: release-signing
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          version: 10.13.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
+        with:
+          toolchain: stable
+      - name: Reauthorize before selecting or signing release assets
+        env:
+          UPDATER_FEED_MODE: ${{ vars.UPDATER_FEED_MODE }}
+          LEGACY_FEED_REPOSITORY: ${{ vars.LEGACY_FEED_REPOSITORY }}
+        run: >-
+          node scripts/release-feed.mjs authorize
+          --repository "$env:GITHUB_REPOSITORY"
+          --mode "$env:UPDATER_FEED_MODE"
+          --legacy-repository "$env:LEGACY_FEED_REPOSITORY"
+          --default-branch main
+          --tag "${{ needs.authorize.outputs.tag }}"
+          --expected-sha "${{ needs.authorize.outputs.sha }}"
+          --expected-tag-object "${{ needs.authorize.outputs.tag_object }}"
+      - name: Reuse an existing immutable four-asset release
+        id: authoritative
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ needs.authorize.outputs.tag }}'
+          $version = '${{ needs.authorize.outputs.version }}'
+          $installerName = "Kimi-Code-$version-x64-setup.exe"
+          $expectedNames = @($installerName, "$installerName.sig", 'latest.json', 'SHA256SUMS.txt') | Sort-Object
+          $encodedTag = [Uri]::EscapeDataString($tag)
+          $headers = @{ Accept = 'application/vnd.github+json'; Authorization = "Bearer $env:GH_TOKEN"; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $response = Invoke-WebRequest "https://api.github.com/repos/Leonxlnx/kimi-code-desktop/releases/tags/$encodedTag" -Headers $headers -SkipHttpErrorCheck
+          if ($response.StatusCode -eq 404) {
+            'release_exists=false' >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          if ($response.StatusCode -ne 200) { throw "GitHub Release lookup returned HTTP $($response.StatusCode)" }
+          $release = $response.Content | ConvertFrom-Json
+          $publishedNames = @($release.assets | ForEach-Object name | Sort-Object)
+          if ($release.draft -or $release.prerelease -or @(Compare-Object $expectedNames $publishedNames -CaseSensitive).Count -ne 0) {
+            throw "Existing GitHub Release $tag is not the expected immutable four-asset release"
+          }
+          New-Item -ItemType Directory -Path update-site -Force | Out-Null
+          gh release download $tag --repo Leonxlnx/kimi-code-desktop --dir update-site
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the existing GitHub Release' }
+          node scripts/release-feed.mjs verify-directory --directory update-site --version $version --tag $tag --repository Leonxlnx/kimi-code-desktop --pub-date '${{ needs.authorize.outputs.pub_date }}'
+          $installer = Join-Path update-site $installerName
+          $signaturePath = "$installer.sig"
+          $updaterKey = (Get-Content 'apps/desktop/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).plugins.updater.pubkey
+          $signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+          $decodedKey = Join-Path $env:RUNNER_TEMP 'existing-kimi-code-updater.pub'
+          $decodedSignature = Join-Path $env:RUNNER_TEMP 'existing-kimi-code-installer.minisig'
+          [IO.File]::WriteAllBytes($decodedKey, [Convert]::FromBase64String($updaterKey))
+          [IO.File]::WriteAllBytes($decodedSignature, [Convert]::FromBase64String($signature))
+          cargo run --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --example verify_updater_signature -- $installer $decodedSignature $decodedKey
+          if ($LASTEXITCODE -ne 0) { throw 'Existing updater signature verification failed' }
+          'release_exists=true' >> $env:GITHUB_OUTPUT
+      - name: Install locked dependencies
+        if: steps.authoritative.outputs.release_exists != 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Verify source, tests, licenses, and release metadata
+        if: steps.authoritative.outputs.release_exists != 'true'
+        run: >-
+          pnpm check:public &&
+          node scripts/check-release-version.mjs "${{ needs.authorize.outputs.tag }}" &&
+          node --test scripts/release-feed.test.mjs &&
+          pnpm typecheck &&
+          pnpm test &&
+          pnpm check:licenses
+      - name: Build updater-signed NSIS installer
+        if: steps.authoritative.outputs.release_exists != 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm bundle
+      - name: Verify signature and prepare deterministic four-asset feed
+        if: steps.authoritative.outputs.release_exists != 'true'
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem 'apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($installers.Count)" }
+          $installer = $installers[0]
+          $signaturePath = "$($installer.FullName).sig"
+          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) { throw 'Updater signature was not produced' }
+          $updaterKey = (Get-Content 'apps/desktop/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).plugins.updater.pubkey
+          $signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+          $decodedKey = Join-Path $env:RUNNER_TEMP 'kimi-code-updater.pub'
+          $decodedSignature = Join-Path $env:RUNNER_TEMP 'kimi-code-installer.minisig'
+          [IO.File]::WriteAllBytes($decodedKey, [Convert]::FromBase64String($updaterKey))
+          [IO.File]::WriteAllBytes($decodedSignature, [Convert]::FromBase64String($signature))
+          cargo run --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --example verify_updater_signature -- $installer.FullName $decodedSignature $decodedKey
+          if ($LASTEXITCODE -ne 0) { throw 'Updater signature verification failed' }
+          node scripts/release-feed.mjs prepare --directory update-site --installer "$($installer.FullName)" --signature "$signaturePath" --version "${{ needs.authorize.outputs.version }}" --tag "${{ needs.authorize.outputs.tag }}" --repository "Leonxlnx/kimi-code-desktop" --pub-date "${{ needs.authorize.outputs.pub_date }}"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-release-${{ needs.authorize.outputs.tag }}
+          path: update-site/
+          if-no-files-found: error
+          retention-days: 7
+
+  preflight-feeds:
+    needs: [authorize, build]
+    runs-on: windows-latest
+    environment: legacy-update-feed
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+      - name: Reauthorize before requesting a cross-repository token
+        working-directory: source
+        env:
+          UPDATER_FEED_MODE: ${{ vars.UPDATER_FEED_MODE }}
+          LEGACY_FEED_REPOSITORY: ${{ vars.LEGACY_FEED_REPOSITORY }}
+        run: >-
+          node scripts/release-feed.mjs authorize
+          --repository "$env:GITHUB_REPOSITORY"
+          --mode "$env:UPDATER_FEED_MODE"
+          --legacy-repository "$env:LEGACY_FEED_REPOSITORY"
+          --default-branch main
+          --tag "${{ needs.authorize.outputs.tag }}"
+          --expected-sha "${{ needs.authorize.outputs.sha }}"
+          --expected-tag-object "${{ needs.authorize.outputs.tag_object }}"
+      - name: Create short-lived legacy feed read token
+        id: legacy-token
+        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        with:
+          app-id: ${{ vars.LEGACY_FEED_APP_ID }}
+          private-key: ${{ secrets.LEGACY_FEED_APP_PRIVATE_KEY }}
+          owner: Leonxlnx
+          repositories: Leonxlnx.github.io
+          permission-contents: read
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Leonxlnx/kimi-code-desktop
+          ref: gh-pages
+          fetch-depth: 1
+          persist-credentials: false
+          path: current-feed
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Leonxlnx/Leonxlnx.github.io
+          ref: main
+          token: ${{ steps.legacy-token.outputs.token }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: legacy-site
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: windows-release-${{ needs.authorize.outputs.tag }}
+          path: update-site
+      - name: Preflight both feeds before any release mutation
+        working-directory: source
+        shell: pwsh
+        run: |
+          node scripts/release-feed.mjs check-advance --current-directory ../current-feed --next-directory ../update-site --version "${{ needs.authorize.outputs.version }}" --tag "${{ needs.authorize.outputs.tag }}" --repository "Leonxlnx/kimi-code-desktop" --pub-date "${{ needs.authorize.outputs.pub_date }}"
+          node scripts/release-feed.mjs check-advance --current-directory ../legacy-site/tasty-desktop --next-directory ../update-site --version "${{ needs.authorize.outputs.version }}" --tag "${{ needs.authorize.outputs.tag }}" --repository "Leonxlnx/kimi-code-desktop" --pub-date "${{ needs.authorize.outputs.pub_date }}"
+
+  publish-release:
+    needs: [authorize, build, preflight-feeds]
+    runs-on: windows-latest
+    environment: release-signing
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: windows-release-${{ needs.authorize.outputs.tag }}
+          path: update-site
+      - name: Reauthorize and publish one immutable four-asset release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATER_FEED_MODE: ${{ vars.UPDATER_FEED_MODE }}
+          LEGACY_FEED_REPOSITORY: ${{ vars.LEGACY_FEED_REPOSITORY }}
+        run: |
+          node scripts/release-feed.mjs authorize --repository "$env:GITHUB_REPOSITORY" --mode "$env:UPDATER_FEED_MODE" --legacy-repository "$env:LEGACY_FEED_REPOSITORY" --default-branch main --tag "${{ needs.authorize.outputs.tag }}" --expected-sha "${{ needs.authorize.outputs.sha }}" --expected-tag-object "${{ needs.authorize.outputs.tag_object }}"
+          node scripts/release-feed.mjs verify-directory --directory update-site --version "${{ needs.authorize.outputs.version }}" --tag "${{ needs.authorize.outputs.tag }}" --repository "Leonxlnx/kimi-code-desktop" --pub-date "${{ needs.authorize.outputs.pub_date }}"
+          $expected = @(Get-ChildItem update-site -File | Sort-Object Name)
+          if ($expected.Count -ne 4) { throw 'Release staging no longer contains exactly four files' }
+          $tag = '${{ needs.authorize.outputs.tag }}'
+          $encodedTag = [Uri]::EscapeDataString($tag)
+          $headers = @{ Accept = 'application/vnd.github+json'; Authorization = "Bearer $env:GH_TOKEN"; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $response = Invoke-WebRequest "https://api.github.com/repos/Leonxlnx/kimi-code-desktop/releases/tags/$encodedTag" -Headers $headers -SkipHttpErrorCheck
+          if ($response.StatusCode -eq 404) {
+            $assets = @($expected | ForEach-Object FullName)
+            gh release create $tag @assets --repo Leonxlnx/kimi-code-desktop --verify-tag --notes-file "docs/releases/$tag.md" --title $tag
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed' }
+          } elseif ($response.StatusCode -eq 200) {
+            $release = $response.Content | ConvertFrom-Json
+            $publishedNames = @($release.assets | ForEach-Object name | Sort-Object)
+            $expectedNames = @($expected | ForEach-Object Name)
+            if ($release.draft -or $release.prerelease -or @(Compare-Object $expectedNames $publishedNames -CaseSensitive).Count -ne 0) {
+              throw "Existing GitHub Release $tag is not the expected immutable four-asset release"
+            }
+          } else {
+            throw "GitHub Release preflight returned HTTP $($response.StatusCode)"
+          }
+          $published = Join-Path $env:RUNNER_TEMP 'published-release-assets'
+          New-Item -ItemType Directory -Path $published -Force | Out-Null
+          gh release download $tag --repo Leonxlnx/kimi-code-desktop --dir $published
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the published GitHub Release' }
+          foreach ($asset in $expected) {
+            $remoteAsset = Join-Path $published $asset.Name
+            if (-not (Test-Path -LiteralPath $remoteAsset -PathType Leaf) -or (Get-FileHash $asset.FullName -Algorithm SHA256).Hash -cne (Get-FileHash $remoteAsset -Algorithm SHA256).Hash) {
+              throw "Published release asset drift detected: $($asset.Name)"
+            }
+          }
+
+  publish-current-feed:
+    needs: [authorize, build, preflight-feeds, publish-release]
+    runs-on: windows-latest
+    environment: release-signing
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Leonxlnx/kimi-code-desktop
+          ref: gh-pages
+          fetch-depth: 1
+          persist-credentials: false
+          path: current-feed
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: windows-release-${{ needs.authorize.outputs.tag }}
+          path: update-site
+      - name: Fast-forward the canonical feed without persisting credentials
+        working-directory: source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATER_FEED_MODE: ${{ vars.UPDATER_FEED_MODE }}
+          LEGACY_FEED_REPOSITORY: ${{ vars.LEGACY_FEED_REPOSITORY }}
+        run: |
+          node scripts/release-feed.mjs authorize --repository "$env:GITHUB_REPOSITORY" --mode "$env:UPDATER_FEED_MODE" --legacy-repository "$env:LEGACY_FEED_REPOSITORY" --default-branch main --tag "${{ needs.authorize.outputs.tag }}" --expected-sha "${{ needs.authorize.outputs.sha }}" --expected-tag-object "${{ needs.authorize.outputs.tag_object }}"
+          Push-Location ../current-feed
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:GH_TOKEN"))
+          Pop-Location
+          $env:GIT_CONFIG_COUNT = '1'
+          $env:GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader'
+          $env:GIT_CONFIG_VALUE_0 = "AUTHORIZATION: basic $basic"
+          try {
+            node scripts/release-feed.mjs publish --repository-directory ../current-feed --source-directory ../update-site --expected-remote-repository Leonxlnx/kimi-code-desktop --branch gh-pages --version "${{ needs.authorize.outputs.version }}" --tag "${{ needs.authorize.outputs.tag }}" --repository Leonxlnx/kimi-code-desktop --pub-date "${{ needs.authorize.outputs.pub_date }}"
+          } finally {
+            Remove-Item Env:GIT_CONFIG_COUNT, Env:GIT_CONFIG_KEY_0, Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
+          }
+
+  deploy-canonical-pages:
+    needs: [authorize, publish-current-feed]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Leonxlnx/kimi-code-desktop
+          ref: gh-pages
+          persist-credentials: false
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: .
+      - name: Deploy the canonical Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+
+  publish-legacy-feed:
+    needs: [authorize, build, preflight-feeds, publish-release, publish-current-feed]
+    runs-on: windows-latest
+    environment: legacy-update-feed
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+      - name: Reauthorize before requesting the legacy write token
+        working-directory: source
+        env:
+          UPDATER_FEED_MODE: ${{ vars.UPDATER_FEED_MODE }}
+          LEGACY_FEED_REPOSITORY: ${{ vars.LEGACY_FEED_REPOSITORY }}
+        run: >-
+          node scripts/release-feed.mjs authorize
+          --repository "$env:GITHUB_REPOSITORY"
+          --mode "$env:UPDATER_FEED_MODE"
+          --legacy-repository "$env:LEGACY_FEED_REPOSITORY"
+          --default-branch main
+          --tag "${{ needs.authorize.outputs.tag }}"
+          --expected-sha "${{ needs.authorize.outputs.sha }}"
+          --expected-tag-object "${{ needs.authorize.outputs.tag_object }}"
+      - name: Create short-lived path publisher token
+        id: legacy-token
+        uses: actions/create-github-app-token@67018539274d69449ef7c02e8e71183d1719ab42 # v2.1.4
+        with:
+          app-id: ${{ vars.LEGACY_FEED_APP_ID }}
+          private-key: ${{ secrets.LEGACY_FEED_APP_PRIVATE_KEY }}
+          owner: Leonxlnx
+          repositories: Leonxlnx.github.io
+          permission-contents: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: Leonxlnx/Leonxlnx.github.io
+          ref: main
+          token: ${{ steps.legacy-token.outputs.token }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: legacy-site
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: windows-release-${{ needs.authorize.outputs.tag }}
+          path: update-site
+      - name: Fast-forward only the tasty-desktop compatibility path
+        working-directory: source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.legacy-token.outputs.token }}
+        run: |
+          Push-Location ../legacy-site
+          git config user.name kimi-code-legacy-feed[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$env:GH_TOKEN"))
+          Pop-Location
+          $env:GIT_CONFIG_COUNT = '1'
+          $env:GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader'
+          $env:GIT_CONFIG_VALUE_0 = "AUTHORIZATION: basic $basic"
+          try {
+            node scripts/release-feed.mjs publish --repository-directory ../legacy-site --source-directory ../update-site --expected-remote-repository Leonxlnx/Leonxlnx.github.io --branch main --feed-path tasty-desktop --version "${{ needs.authorize.outputs.version }}" --tag "${{ needs.authorize.outputs.tag }}" --repository Leonxlnx/kimi-code-desktop --pub-date "${{ needs.authorize.outputs.pub_date }}"
+          } finally {
+            Remove-Item Env:GIT_CONFIG_COUNT, Env:GIT_CONFIG_KEY_0, Env:GIT_CONFIG_VALUE_0 -ErrorAction SilentlyContinue
+          }
+
+  verify-publication:
+    needs: [authorize, build, publish-release, publish-current-feed, deploy-canonical-pages, publish-legacy-feed]
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.22.2
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: windows-release-${{ needs.authorize.outputs.tag }}
+          path: update-site
+      - name: Reauthorize before final public verification
+        env:
+          UPDATER_FEED_MODE: ${{ vars.UPDATER_FEED_MODE }}
+          LEGACY_FEED_REPOSITORY: ${{ vars.LEGACY_FEED_REPOSITORY }}
+        run: >-
+          node scripts/release-feed.mjs authorize
+          --repository "$env:GITHUB_REPOSITORY"
+          --mode "$env:UPDATER_FEED_MODE"
+          --legacy-repository "$env:LEGACY_FEED_REPOSITORY"
+          --default-branch main
+          --tag "${{ needs.authorize.outputs.tag }}"
+          --expected-sha "${{ needs.authorize.outputs.sha }}"
+          --expected-tag-object "${{ needs.authorize.outputs.tag_object }}"
+      - name: Verify both exact public feed endpoints byte-for-byte
+        run: >-
+          node scripts/release-feed.mjs verify-published
+          --directory update-site
+          --version "${{ needs.authorize.outputs.version }}"
+          --tag "${{ needs.authorize.outputs.tag }}"
+          --repository Leonxlnx/kimi-code-desktop
+          --pub-date "${{ needs.authorize.outputs.pub_date }}"
+          --nonce "${{ github.run_id }}-${{ github.run_attempt }}"
+          --endpoint https://leonxlnx.github.io/kimi-code-desktop/latest.json
+          --endpoint https://leonxlnx.github.io/tasty-desktop/latest.json

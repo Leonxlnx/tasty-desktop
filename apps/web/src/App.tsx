@@ -1,0 +1,6600 @@
+import { lazy, memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Archive, ArrowCounterClockwise, ArrowSquareOut, ArrowsClockwise, ArrowUp, Brain, Browser, Broom, Bug, CaretDown, CaretRight, ChatCircleDots, Check, Circle, Clock, Copy, CornersIn, CornersOut, Cpu, DeviceMobile, DotsThree, DownloadSimple, FileText, FolderOpen, FolderSimple, Gauge, GearSix, GitBranch, GitCommit, Hammer, ImageSquare, Info, MagnifyingGlass, Minus, Palette, PaperPlaneRight, Paperclip, PencilSimple, PlugsConnected, Plus, Robot, ShieldCheck, SidebarSimple, SignIn, SignOut, SlidersHorizontal, Square, Stop, TerminalWindow, Trash, UserCircle, WarningCircle, X } from "@phosphor-icons/react";
+import { createPortal } from "react-dom";
+import { ConnectionSupervisor, DeliveryUncertainError, RequestNotSentError, type ConnectionState, type ServerMessage } from "./connection";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import type { Update } from "@tauri-apps/plugin-updater";
+
+type Message = { turnId: string; role: "user" | "assistant" | "thought"; text: string; seq?: number; updatedSeq?: number; origin?: "user" | "background_task"; resources?: string[]; images?: Array<{ name: string; mimeType: string }> };
+type ConfigOption = { id: string; name: string; category?: string; type?: string; currentValue: string | boolean; options?: Array<{ value: string; name: string }> };
+type AvailableCommand = { name: string; description: string; input?: { hint?: string } | null };
+type ToolContent = { type: string; path?: string; oldText?: string; newText?: string; content?: { type: string; text?: string } };
+type Tool = { toolCallId: string; turnId?: string; title?: string; status?: string; content?: ToolContent[]; locations?: Array<{ path: string; line?: number }>; rawInput?: unknown; rawOutput?: unknown };
+type Approval = { requestId: string; turnId?: string; title: string; kind?: "permission" | "question" | "plan_review"; options: Array<{ optionId: string; name: string; kind: string }> };
+type Checkpoint = { turnId: string; phase: string; ref: string; commit: string; root: string; diff?: string };
+type RevertedCheckpointPart = { turnId: string; path: string; hunkIndex?: number; revertedAt: string };
+type CheckpointReviewHunk = { index: number; header: string; lines: string[] };
+type CheckpointReviewFile = { path: string; binary: boolean; canRevertHunks: boolean; hunks: CheckpointReviewHunk[] };
+type CheckpointReview = { turnId: string; files: CheckpointReviewFile[] };
+type PendingImage = { name: string; mimeType: string; data: string };
+type ComposerDraftState = { text: string; images: PendingImage[] };
+type Usage = { context?: { used: number; size: number; cost?: { amount: number; currency: string } }; tokens?: { totalTokens: number; inputTokens: number; outputTokens: number; thoughtTokens?: number; cachedReadTokens?: number; cachedWriteTokens?: number } };
+type KimiQuotaRow = { label: string; used: number; limit: number; remaining: number; resetTime?: string; resetHint?: string };
+type KimiQuota = { summary?: KimiQuotaRow; limits: KimiQuotaRow[]; parallel?: number; planType?: string; updatedAt?: string; stale?: boolean };
+type KimiPlugin = { name: string; version: string; description: string; toolCount: number };
+type KimiMcpServer = { name: string; transport: "http" | "stdio" | "unknown"; target: string; needsAuthorization: boolean; connectable: boolean; projectScoped?: true };
+export type ProjectMcpStatus = "required" | "approved" | "changed" | "invalid" | "unsupported";
+type ProjectMcp = { fingerprint: string | null; status: ProjectMcpStatus; approvable: boolean };
+type KimiSkill = { name: string; description: string; scope: "user" | "project"; source: "kimi" | "agents"; path: string; modelInvocable: boolean; hasSubSkills: boolean };
+type KimiAgent = { name: "coder" | "explore" | "plan"; description: string; access: string; supportsBackground: boolean };
+type ProviderCapabilitySupport = { models: boolean; reasoning: boolean; permissions: boolean; commands: boolean; images: boolean; quota: boolean; skills: "native" | "none"; mcp: "native" | "runtime" | "none"; plugins: "native" | "none"; subagents: { activity: boolean; inspect: boolean; stop: boolean; steer: boolean } };
+const MarkdownTextContent = lazy(() => import("./MarkdownText"));
+type KimiCapabilities = { provider: ProviderId; support: ProviderCapabilitySupport; plugins: KimiPlugin[]; mcpServers: KimiMcpServer[]; projectMcp?: ProjectMcp; skills: KimiSkill[]; agents: KimiAgent[]; roots: Partial<{ plugins: string; mcp: string; skills: string }>; warnings: string[]; updatedAt: string };
+type CapabilityTarget = { cwd?: string; instanceId?: string };
+type CapabilitySnapshot = CapabilityTarget & { data: KimiCapabilities };
+type CapabilityTab = "profiles" | "skills" | "plugins" | "mcp" | "agents";
+type AgentProfile = { id: string; name: string; provider: ProviderId; prompt: string; model?: string; reasoning?: string; permission?: string };
+type SubagentRun = { id: string; type: string; description: string; status: "running" | "completed" | "failed"; background: boolean; agentId?: string; detail?: string; threadIds?: string[]; output?: string };
+type SubagentInspection = { threadId: string; title: string; role?: string; status: string; turns: Array<{ turnId: string; status: string; durationMs?: number; items: Array<{ id: string; kind: "message" | "reasoning" | "action"; title: string; text?: string; status?: string }> }> };
+type BackgroundTask = {
+  taskId: string; queuedId: string; turnId: string; description: string;
+  status: "running" | "completed" | "failed" | "killed" | "lost" | "expired" | "timed_out";
+  registeredAt: string; updatedAt: string; endedAt?: number; exitCode?: number | null; reportQueued: boolean;
+  reportDeliveredAt?: string; reportCancelledAt?: string;
+};
+type GitFile = { path: string; originalPath?: string; staged: boolean; unstaged: boolean; untracked: boolean; indexStatus: string; worktreeStatus: string };
+type GitStatus = { root: string; branch: string; unborn?: boolean; upstream?: string; ahead: number; behind: number; files: GitFile[] };
+type GitLocalBranch = { name: string; current: boolean; upstream?: string; ahead: number; behind: number; upstreamGone: boolean };
+type GitRemoteBranch = { name: string; fullName: string; remote: string };
+type GitRepository = {
+  current: string; detached: boolean; unborn: boolean; upstream?: string; ahead: number; behind: number; branches: string[];
+  localBranches: GitLocalBranch[]; remoteBranches: GitRemoteBranch[]; remotes: Array<{ name: string; url: string }>;
+};
+export type GitInlineError = { kind: "not-repository" | "unavailable" | "authentication" | "conflict" | "network" | "unknown"; title: string; detail: string };
+type GitBranchAction =
+  | { kind: "rename"; branch: string; value: string }
+  | { kind: "delete"; branch: string }
+  | { kind: "track"; remote: string; branch: string; value: string };
+type ProgressiveLimitState = { scope: string; limit: number };
+export const gitChangedFilePageSize = 60;
+export const gitBranchPageSize = 60;
+type TurnRecord = { turnId: string; startedAt: string; completedAt?: string; stopReason?: string; error?: string; usage?: NonNullable<Usage["tokens"]> };
+type ActivityEntry = { id: string; turnId: string; kind: "thought" | "tool"; status: "pending" | "in_progress" | "completed" | "failed"; text: string; toolCallId?: string; seq: number; updatedSeq?: number; createdAt: string; updatedAt: string };
+type QueuedPrompt = { queuedId: string; text: string; mode: "queue" | "steer"; createdAt: string; images: Array<{ name: string; mimeType: string }>; origin?: "user" | "background_task" };
+type DesktopPreviewCommand = { action: "open" | "resize"; url?: string; panelWidth?: number; viewportWidth?: number; viewportHeight?: number };
+type SkillInstallRequest = { cwd: string; source: string; name: string };
+type ProviderId = "kimi" | "codex" | "claude" | "cursor" | "opencode";
+type TurnPhase = "idle" | "preparing" | "running" | "stopping" | "checkpointing" | "blocked" | "failed";
+type TurnLifecycle = { phase: TurnPhase; updatedAt: string; turnId?: string; queuedId?: string; error?: string };
+type ThreadGoal = { objective: string; updatedAt: string };
+type Thread = {
+  threadId: string; sessionId: string; provider: ProviderId; instanceId?: string; parentThreadId?: string; goal?: ThreadGoal; cwd: string; worktree?: { sourceCwd: string; branch: string }; kind: "project" | "chat"; title: string; createdAt: string; updatedAt: string; archivedAt?: string; running: boolean;
+  activeTurnId: string | undefined; stopReason: string | undefined; lifecycle: TurnLifecycle; turns: TurnRecord[]; messages: Message[]; plan: Array<{ content: string; status: string }>;
+  activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; configOptions: ConfigOption[]; commands: AvailableCommand[]; modeId: string | undefined; checkpoints: Checkpoint[]; revertedParts: RevertedCheckpointPart[]; backgroundTasks: BackgroundTask[]; usage?: Usage; queue: QueuedPrompt[];
+};
+type StoredEvent = { threadId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string };
+type RuntimeSession = { sessionId: string; cwd: string; kind?: "project" | "chat"; title?: string; updatedAt?: string };
+type AuthState = {
+  installed: boolean; authenticated: boolean; loginRunning: boolean; installRunning: boolean; installMode: "manual"; installUrl: string; home: string;
+  event?: { type: "progress" | "complete"; operation: "login" | "logout"; message: string; url?: string; code?: string; success?: boolean };
+};
+type ProviderState = {
+  id: ProviderId; provider: ProviderId; name: string; protocol: "acp" | "app-server" | "stream-json"; installed: boolean;
+  authenticated: boolean | null; loginRunning: boolean; runtimeReady: boolean; installUrl: string; account?: string; message?: string;
+  event?: AuthState["event"];
+  capabilities?: ProviderCapabilitySupport;
+};
+type ProviderInstance = { id: string; name: string; provider: ProviderId; installed: boolean; runtimeReady?: boolean; environment?: string };
+type WslEnvironment = { name: string; system: boolean; healthy: boolean; message?: string };
+type RemoteConfig = { enabled: boolean; bind: "127.0.0.1" | "0.0.0.0"; port: number };
+type RemoteDevice = { id: string; name: string; createdAt: string; lastSeenAt?: string; revokedAt?: string };
+type RemoteStatus = { config: RemoteConfig; devices: RemoteDevice[]; audit: Array<{ id: string; at: string; action: string; deviceId?: string; detail?: string }>; listening: boolean; addresses: string[] };
+type RemotePairing = { code: string; expiresAt: string };
+type Schedule = { id: string; name: string; threadId: string; text: string; provider: ProviderId; recurrence: "once" | "daily" | "weekly"; nextRunAt: string; enabled: boolean; lastRunAt?: string; lastResult?: string };
+type Preferences = {
+  density: "comfortable" | "compact";
+  sendKey: "enter" | "ctrl-enter";
+  workspace: string;
+  onboardingDone: boolean;
+  sidebarCollapsed: boolean;
+  projects: string[];
+  zoom: number;
+  theme: "system" | "dark" | "light";
+  font: "system" | "humanist" | "mono";
+  fontSize: number;
+  accent: "neutral" | "blue" | "violet" | "teal";
+  paletteVersion: 4;
+  sidebarSide: "left" | "right";
+  railSide: "left" | "right";
+  sidebarWidth: number;
+  railWidth: number;
+  projectAliases: Record<string, string>;
+  hiddenProjects: string[];
+  hiddenSessions: string[];
+  composerConfig: Record<string, string>;
+  yoloAcknowledged: boolean;
+  provider: ProviderId;
+  providerInstances: Partial<Record<ProviderId, string>>;
+  editor: "system" | "vscode" | "cursor";
+  keybindings: Record<KeybindingAction, string>;
+  agentProfiles: AgentProfile[];
+};
+type ProjectGroup = { cwd: string; name: string; threads: Thread[]; runtimeSessions: RuntimeSession[] };
+type DraftChat = { kind: "project" | "chat"; cwd?: string; isolate?: boolean };
+type ConfigTarget =
+  | { key: string; kind: "thread"; threadId: string }
+  | { key: string; kind: "draft"; draft: DraftChat };
+type ConfigUpdate = { targetKey: string; configId: string; requestId: number };
+type UpdateStatus = { phase: "idle" | "checking" | "current" | "available" | "downloading" | "installing" | "error"; version?: string; currentVersion?: string; percent?: number; message?: string };
+type UpdateAttempt = { update: Update; prepared: boolean; cancelled: boolean; resourceClosed: boolean; cleanup?: Promise<void> | undefined };
+export type RailView = "preview" | "terminal" | "changes" | "git" | "agents";
+type GitLoadState = "idle" | "loading" | "ready" | "not-repository" | "error";
+type AppMenu = "file" | "edit" | "view" | "help";
+type SettingsCategory = "general" | "appearance" | "layout" | "account" | "environments" | "remote" | "automations" | "usage" | "updates" | "diagnostics" | "about";
+type KeybindingAction = "palette" | "newChat" | "openFolder" | "toggleSidebar" | "terminal" | "settings";
+type ProjectScript = { name: string; command: string };
+type TerminalSessionInfo = { sessionId: string; cwd: string; shell: string };
+type TerminalEvent = { sessionId: string; type: "stdout" | "stderr" | "exit"; text?: string; code?: number | null };
+type TerminalEntry = { id: number; kind: "command" | "stdout" | "stderr" | "system"; text: string };
+type TerminalTab = { tabId: string; cwd: string; name: string; session?: TerminalSessionInfo | undefined; entries: TerminalEntry[]; command: string; starting: boolean; startError?: string | undefined };
+type ItemMenu = { kind: "project"; id: string } | { kind: "thread"; id: string } | { kind: "session"; id: string };
+type ManageDialog =
+  | { kind: "rename-project"; cwd: string; name: string }
+  | { kind: "remove-project"; cwd: string; name: string }
+  | { kind: "remove-runtime-session"; sessionId: string; name: string }
+  | { kind: "delete-project-chats"; cwd: string; name: string; threadIds: string[]; sessionIds: string[] }
+  | { kind: "rename-thread"; threadId: string; name: string }
+  | { kind: "delete-thread"; threadId: string; sessionId: string; name: string }
+  | { kind: "install-skill"; cwd: string; source: string; name: string }
+  | { kind: "approve-project-mcp"; cwd: string; instanceId?: string; fingerprint: string; name: string }
+  | { kind: "revoke-project-mcp"; cwd: string; instanceId?: string; name: string };
+const preferenceKey = "kimi-code-desktop.preferences.v1";
+const terminalLayoutKey = "kimi-code-desktop.terminal-layout.v1";
+const legacyTerminalLayoutKey = "tasty.terminal-layout.v1";
+const draftCreationRecoveryStorageKey = "kimi-code-desktop.creation-recovery.v1";
+const sideCreationRecoveryStorageKey = "kimi-code-desktop.side-creation-recovery.v1";
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const defaultPreferences: Preferences = {
+  density: "comfortable", sendKey: "enter", workspace: "", onboardingDone: false, sidebarCollapsed: false, projects: [], zoom: 1,
+  theme: "system", font: "system", fontSize: 15, accent: "neutral", paletteVersion: 4, sidebarSide: "left", railSide: "right", sidebarWidth: 272, railWidth: 420,
+  projectAliases: {}, hiddenProjects: [], hiddenSessions: [], composerConfig: {}, yoloAcknowledged: false, provider: "kimi", providerInstances: {}, editor: "system",
+  keybindings: { palette: "Ctrl+K", newChat: "Ctrl+N", openFolder: "Ctrl+O", toggleSidebar: "Ctrl+B", terminal: "Ctrl+J", settings: "Ctrl+," }, agentProfiles: [],
+};
+const keybindingActions: Array<{ id: KeybindingAction; label: string }> = [
+  { id: "palette", label: "Command palette" }, { id: "newChat", label: "New chat" }, { id: "openFolder", label: "Open folder" },
+  { id: "toggleSidebar", label: "Toggle sidebar" }, { id: "terminal", label: "Toggle terminal" }, { id: "settings", label: "Open settings" },
+];
+const collapsedSidebarWidth = 60;
+const responsiveSidebarBreakpoint = 680;
+const initialTurnWindow = 30;
+const maxImageBytes = 20_000_000;
+const terminalMaxEntries = 500;
+const terminalMaxChars = 500_000;
+const terminalFlushFallbackMs = 100;
+const updateDownloadTimeoutMs = 2 * 60_000;
+let terminalEntryId = 0;
+const fallbackCommands: AvailableCommand[] = [
+  { name: "goal", description: "Set, replace, or clear the goal for this chat." },
+  { name: "side", description: "Create a side chat with the same Kimi runtime and workspace." },
+  { name: "compact", description: "Compact the current agent session context." },
+  { name: "status", description: "Show the current session and runtime status." },
+  { name: "usage", description: "Show subscription usage reported by Kimi." },
+  { name: "mcp", description: "Show MCP servers and tools available to Kimi." },
+  { name: "tasks", description: "Show tasks managed by the current session." },
+  { name: "help", description: "Show Kimi commands and input help." },
+  { name: "mcp-config", description: "Configure MCP servers for Kimi Code." },
+  { name: "update-config", description: "Review or update Kimi Code configuration." },
+  { name: "check-kimi-code-docs", description: "Check the official Kimi Code documentation." },
+  { name: "custom-theme", description: "Create or update a Kimi Code theme." },
+  { name: "sub-skill", description: "Create or work with a reusable Kimi skill." },
+  { name: "sub-skill.review", description: "Review a Kimi skill." },
+  { name: "sub-skill.consolidate", description: "Consolidate related Kimi skills." },
+];
+
+function terminalEntry(kind: TerminalEntry["kind"], text: string): TerminalEntry {
+  return { id: ++terminalEntryId, kind, text: text.slice(-terminalMaxChars) };
+}
+
+export function appendTerminalEntries(entries: TerminalEntry[], additions: TerminalEntry[], maxEntries = terminalMaxEntries, maxChars = terminalMaxChars): TerminalEntry[] {
+  const next = [...entries];
+  for (const addition of additions) {
+    if (!addition.text) continue;
+    const previous = next.at(-1);
+    if ((addition.kind === "stdout" || addition.kind === "stderr") && previous?.kind === addition.kind) {
+      next[next.length - 1] = { ...previous, text: `${previous.text}${addition.text}`.slice(-maxChars) };
+    } else {
+      next.push({ ...addition, text: addition.text.slice(-maxChars) });
+    }
+  }
+  let start = next.length;
+  let characters = 0;
+  while (start > 0 && next.length - start < maxEntries) {
+    const entry = next[start - 1]!;
+    const remaining = maxChars - characters;
+    if (entry.text.length > remaining) {
+      if (remaining > 0) {
+        start -= 1;
+        next[start] = { ...entry, text: entry.text.slice(-remaining) };
+      }
+      break;
+    }
+    start -= 1;
+    characters += entry.text.length;
+  }
+  return next.slice(start);
+}
+
+export function applyTerminalOutputBatch(tabs: TerminalTab[], events: TerminalEvent[]): TerminalTab[] {
+  if (!events.length) return tabs;
+  const bySession = new Map<string, TerminalEvent[]>();
+  for (const event of events) {
+    const current = bySession.get(event.sessionId);
+    if (current) current.push(event);
+    else bySession.set(event.sessionId, [event]);
+  }
+  return tabs.map((tab) => {
+    if (!tab.session) return tab;
+    const output = bySession.get(tab.session.sessionId);
+    if (!output?.length) return tab;
+    const additions = output.flatMap((event) => {
+      const text = event.type === "exit" ? `Process exited${event.code == null ? "" : ` with code ${event.code}`}\n` : cleanTerminalOutput(event.text ?? "");
+      return text ? [terminalEntry(event.type === "exit" ? "system" : event.type, text)] : [];
+    });
+    return {
+      ...tab,
+      ...(output.some((event) => event.type === "exit") ? { session: undefined, startError: "Terminal exited. Restart to open a new shell." } : {}),
+      entries: appendTerminalEntries(tab.entries, additions),
+    };
+  });
+}
+
+export function terminalCanAutoStart(tab: Pick<TerminalTab, "session" | "starting" | "startError">): boolean {
+  return !tab.session && !tab.starting && !tab.startError;
+}
+
+export function claimTerminalStart(starts: Set<string>, tabId: string, tab: Pick<TerminalTab, "session" | "starting" | "startError">): boolean {
+  if (!terminalCanAutoStart(tab) || starts.has(tabId)) return false;
+  starts.add(tabId);
+  return true;
+}
+
+export function createFrameBatcher<T>(
+  apply: (events: T[]) => void,
+  requestFrame: (callback: FrameRequestCallback) => number = window.requestAnimationFrame.bind(window),
+  cancelFrame: (handle: number) => void = window.cancelAnimationFrame.bind(window),
+  setFallback: (callback: () => void) => number = (callback) => window.setTimeout(callback, terminalFlushFallbackMs),
+  clearFallback: (handle: number) => void = window.clearTimeout.bind(window),
+) {
+  const pending: T[] = [];
+  let frame: number | undefined;
+  let fallback: number | undefined;
+  const flush = () => {
+    if (frame !== undefined) cancelFrame(frame);
+    if (fallback !== undefined) clearFallback(fallback);
+    frame = undefined;
+    fallback = undefined;
+    const events = pending.splice(0);
+    if (events.length) apply(events);
+  };
+  return {
+    push(event: T) {
+      pending.push(event);
+      if (frame !== undefined || fallback !== undefined) return;
+      frame = requestFrame(flush);
+      fallback = setFallback(flush);
+    },
+    flush,
+  };
+}
+
+export function createTerminalOutputBatcher(
+  apply: (events: TerminalEvent[]) => void,
+  requestFrame?: (callback: FrameRequestCallback) => number,
+  cancelFrame?: (handle: number) => void,
+  setFallback?: (callback: () => void) => number,
+  clearFallback?: (handle: number) => void,
+) {
+  return createFrameBatcher(apply, requestFrame, cancelFrame, setFallback, clearFallback);
+}
+
+export function createLatestFrameBatcher<T>(
+  apply: (value: T) => void,
+  requestFrame: (callback: FrameRequestCallback) => number = window.requestAnimationFrame.bind(window),
+  cancelFrame: (handle: number) => void = window.cancelAnimationFrame.bind(window),
+) {
+  let latest!: T;
+  let pending = false;
+  let frame: number | undefined;
+  const write = () => {
+    frame = undefined;
+    if (!pending) return;
+    pending = false;
+    apply(latest);
+  };
+  return {
+    push(value: T) {
+      latest = value;
+      pending = true;
+      if (frame === undefined) frame = requestFrame(write);
+    },
+    flush() {
+      if (frame !== undefined) cancelFrame(frame);
+      frame = undefined;
+      write();
+    },
+  };
+}
+
+export function onceForPointer(pointerId: number, action: () => void) {
+  let finished = false;
+  return (event: Pick<PointerEvent, "pointerId">) => {
+    if (finished || event.pointerId !== pointerId) return;
+    finished = true;
+    action();
+  };
+}
+
+function createTerminalTab(cwd: string, index: number): TerminalTab {
+  return { tabId: globalThis.crypto?.randomUUID?.() ?? `terminal-${Date.now()}-${index}`, cwd, name: `Terminal ${index}`, entries: [], command: "", starting: false };
+}
+
+function loadTerminalLayout(): TerminalTab[] {
+  if (typeof localStorage === "undefined") return [];
+  try {
+    const stored = localStorage.getItem(terminalLayoutKey) ?? localStorage.getItem(legacyTerminalLayoutKey) ?? "[]";
+    const parsed = JSON.parse(stored) as Array<Partial<TerminalTab>>;
+    return parsed.slice(-12).flatMap((tab) => typeof tab.tabId === "string" && typeof tab.cwd === "string" && typeof tab.name === "string"
+      ? [{ tabId: tab.tabId, cwd: tab.cwd, name: tab.name, entries: [], command: "", starting: false }]
+      : []);
+  } catch { return []; }
+}
+
+function saveTerminalLayout(tabs: TerminalTab[]): void {
+  if (typeof localStorage === "undefined") return;
+  try { localStorage.setItem(terminalLayoutKey, JSON.stringify(tabs.slice(-12).map(({ tabId, cwd, name }) => ({ tabId, cwd, name })))); } catch { /* keep terminal state in memory */ }
+}
+
+export function terminalContext(entries: TerminalEntry[], maxCharacters = 4_000): string {
+  const output = entries.map((entry) => entry.text).join("").trim().slice(-maxCharacters);
+  return output ? `<terminal_context>\n${output}\n</terminal_context>\n` : "";
+}
+
+function cleanTerminalOutput(text: string): string {
+  return text
+    .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, "")
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\r(?!\n)/g, "\n");
+}
+
+export function shouldSubmitPrompt(event: { key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }, sendKey: Preferences["sendKey"]): boolean {
+  return promptShortcutMode(event, sendKey, false) !== undefined;
+}
+
+export function promptShortcutMode(event: { key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }, sendKey: Preferences["sendKey"], running: boolean): "queue" | "steer" | undefined {
+  if (event.key !== "Enter" || event.shiftKey) return undefined;
+  if (running) return event.ctrlKey || event.metaKey ? "steer" : "queue";
+  return sendKey === "enter" || event.ctrlKey || event.metaKey ? "queue" : undefined;
+}
+
+export type ComposerPrimaryAction = "send" | "stop";
+
+export function composerPrimaryAction(running: boolean): ComposerPrimaryAction {
+  return running ? "stop" : "send";
+}
+
+function composerPrimaryLabel(action: ComposerPrimaryAction): string {
+  if (action === "stop") return "Stop task and clear queue";
+  return "Send task";
+}
+
+export function presentDiagnostic(message: string): string | undefined {
+  const normalized = message.trim();
+  if (!normalized || /\bspawn\b.*\bEPERM\b/i.test(normalized)) return undefined;
+  if (/\bspawn\b.*\bENOENT\b/i.test(normalized)) return "A required local tool was not found. Check the Kimi CLI in Settings.";
+  if (/\bspawn\b.*\bEACCES\b/i.test(normalized)) return "Windows denied access to a required local tool. Check its permissions, then try again.";
+  return /ACP connection closed|Server disconnected|Server is not connected/i.test(normalized)
+    ? "Agent runtime disconnected. Reconnecting without stopping active work."
+    : normalized.replace(/^Error:\s*/i, "");
+}
+
+export function shortcutFromEvent(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }): string | undefined {
+  const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  if (["Control", "Meta", "Alt", "Shift"].includes(key)) return undefined;
+  const modifiers = [event.ctrlKey || event.metaKey ? "Ctrl" : "", event.altKey ? "Alt" : "", event.shiftKey ? "Shift" : ""].filter(Boolean);
+  return modifiers.length ? [...modifiers, key === " " ? "Space" : key].join("+") : undefined;
+}
+
+export function matchesShortcut(event: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }, shortcut: string): boolean {
+  return shortcutFromEvent(event)?.toLowerCase() === shortcut.toLowerCase();
+}
+
+export function keybindingConflicts(keybindings: Record<KeybindingAction, string>): Set<KeybindingAction> {
+  const owners = new Map<string, KeybindingAction[]>();
+  for (const { id } of keybindingActions) owners.set(keybindings[id].toLowerCase(), [...owners.get(keybindings[id].toLowerCase()) ?? [], id]);
+  return new Set([...owners.values()].filter((actions) => actions.length > 1).flat());
+}
+
+export function parseProjectScripts(content: string): ProjectScript[] {
+  try {
+    const parsed = JSON.parse(content) as { scripts?: Record<string, unknown> };
+    return Object.entries(parsed.scripts ?? {})
+      .filter((entry): entry is [string, string] => /^[\w:.-]+$/.test(entry[0]) && typeof entry[1] === "string")
+      .map(([name, command]) => ({ name, command }));
+  } catch { return []; }
+}
+
+export function editorUrl(editor: "vscode" | "cursor", path: string): string {
+  return `${editor}://file/${encodeURI(path.replaceAll("\\", "/"))}`;
+}
+
+export function repositoryNameFromUrl(url: string): string | undefined {
+  if (!/^(?:https:\/\/\S+|ssh:\/\/\S+|git@[\w.-]+:\S+)$/.test(url.trim())) return undefined;
+  const name = url.trim().replace(/[\\/]+$/, "").split(/[\\/:]/).at(-1)?.replace(/\.git$/i, "");
+  return name && /^[a-zA-Z0-9_.-]+$/.test(name) ? name : undefined;
+}
+
+export function joinLocalPath(parent: string, child: string): string {
+  return `${parent.replace(/[\\/]+$/, "")}${parent.includes("\\") ? "\\" : "/"}${child}`;
+}
+
+export function shouldScheduleRuntimeRecovery(connection: ConnectionState, scheduled: boolean): boolean {
+  return connection === "reconnecting" && !scheduled;
+}
+
+export function hasBlockingWork(
+  threads: Array<Pick<Thread, "running" | "queue" | "approvals"> & Partial<Pick<Thread, "lifecycle" | "backgroundTasks">>>,
+  draftSending = false,
+): boolean {
+  return draftSending || threads.some((thread) => isThreadBusy(thread)
+    || thread.queue.length > 0
+    || thread.approvals.length > 0
+    || thread.backgroundTasks?.some((task) => task.status === "running"));
+}
+
+export function workspaceHasBlockingWork(
+  threads: Array<Pick<Thread, "cwd" | "kind" | "running" | "queue" | "approvals"> & Partial<Pick<Thread, "lifecycle" | "backgroundTasks">>>,
+  cwd?: string,
+): boolean {
+  return Boolean(cwd) && hasBlockingWork(threads.filter((thread) => thread.kind === "project" && samePath(thread.cwd, cwd!)));
+}
+
+export function isThreadBusy(thread: Pick<Thread, "running"> & Partial<Pick<Thread, "lifecycle">>): boolean {
+  return thread.running || ["preparing", "running", "stopping", "checkpointing"].includes(thread.lifecycle?.phase ?? "idle");
+}
+
+export function configTargetKey(
+  thread: { threadId: string } | undefined,
+  draft: { kind: "project" | "chat"; cwd?: string } | undefined,
+): string | undefined {
+  if (thread) return `thread:${thread.threadId}`;
+  if (!draft) return undefined;
+  return `draft:${JSON.stringify([draft.kind, draft.cwd ?? ""])}`;
+}
+
+export function draftRecoveryKey(draft: DraftChat): string {
+  const cwd = draft.cwd?.replaceAll("\\", "/").replace(/\/+$/, "").toLocaleLowerCase() ?? "";
+  return JSON.stringify([draft.kind, cwd, Boolean(draft.isolate)]);
+}
+
+export function composerDraftTargetKey(target: string | DraftChat | undefined): string | undefined {
+  if (typeof target === "string") return `thread:${target}`;
+  return target ? `draft:${draftRecoveryKey(target)}` : undefined;
+}
+
+export function cacheComposerDraft(
+  drafts: Map<string, ComposerDraftState>,
+  target: string | DraftChat | undefined,
+  draft: ComposerDraftState,
+): void {
+  const key = composerDraftTargetKey(target);
+  if (!key) return;
+  if (!draft.text && !draft.images.length) {
+    drafts.delete(key);
+    return;
+  }
+  drafts.set(key, { text: draft.text, images: [...draft.images] });
+}
+
+export function cachedComposerDraft(
+  drafts: ReadonlyMap<string, ComposerDraftState>,
+  target: string | DraftChat | undefined,
+): ComposerDraftState | undefined {
+  const key = composerDraftTargetKey(target);
+  const draft = key ? drafts.get(key) : undefined;
+  return draft ? { text: draft.text, images: [...draft.images] } : undefined;
+}
+
+export function configTargetsMatch(left: ConfigTarget | undefined, right: ConfigTarget | undefined): boolean {
+  if (!left || !right || left.kind !== right.kind) return left === right;
+  return left.kind === "thread"
+    ? left.threadId === (right as Extract<ConfigTarget, { kind: "thread" }>).threadId
+    : left.draft === (right as Extract<ConfigTarget, { kind: "draft" }>).draft;
+}
+
+export function configDefaultsAreSettled(hasActiveThread: boolean, state: { target: string; settled: boolean }, target: string): boolean {
+  return hasActiveThread || (state.target === target && state.settled);
+}
+
+export function composerTargetRequestMatches(requestedGeneration: number, currentGeneration: number): boolean {
+  return requestedGeneration === currentGeneration;
+}
+
+export function composerTargetMatchesAttempt(current: string | DraftChat | undefined, original: string | DraftChat, createdThreadId?: string): boolean {
+  return current === original || Boolean(createdThreadId && current === createdThreadId);
+}
+
+export function attachmentRequestMatches(requested: number, current: number, requestedTarget: number, currentTarget: number): boolean {
+  return requested === current && composerTargetRequestMatches(requestedTarget, currentTarget);
+}
+
+export function composerCanSubmit(
+  view: "projects" | "chats",
+  targetKind: "project" | "chat" | undefined,
+  configUpdating: boolean,
+): boolean {
+  return !configUpdating && targetKind === (view === "chats" ? "chat" : "project");
+}
+
+export function threadCanRun(thread: Pick<Thread, "provider"> | undefined): boolean {
+  return !thread || thread.provider === "kimi";
+}
+
+export function filterKimiRuntimes<T extends { id?: string; provider?: ProviderId }>(items: T[]): T[] {
+  return items.filter((item) => item.provider === "kimi" || (!item.provider && item.id === "kimi"));
+}
+
+export function preferredInitialThreadId(threads: Array<Pick<Thread, "threadId" | "provider">>): string | undefined {
+  return threads.find((thread) => thread.provider === "kimi")?.threadId ?? threads[0]?.threadId;
+}
+
+export function shouldShowRuntimePicker(instanceIds: string[], selectedInstanceId?: string): boolean {
+  return instanceIds.length > 0 || Boolean(selectedInstanceId);
+}
+
+export function projectMcpAction(status: ProjectMcpStatus, approvable: boolean): { badge: string; kind?: "approve" | "revoke"; label?: string } {
+  if (status === "approved") return { badge: "Approved", kind: "revoke", label: "Revoke" };
+  if (status === "changed") return { badge: "Config changed", ...(approvable ? { kind: "approve" as const, label: "Reapprove" } : {}) };
+  if (status === "required") return { badge: "Approval required", ...(approvable ? { kind: "approve" as const, label: "Approve" } : {}) };
+  return { badge: status === "invalid" ? "Invalid config" : "Unsupported" };
+}
+
+export function mcpServerRowKey(server: { name: string; projectScoped?: true }): string {
+  return `${server.projectScoped ? "project" : "user"}:${server.name}`;
+}
+
+export function projectMcpDialogFromSnapshot(
+  action: "approve" | "revoke",
+  fingerprint: string | undefined,
+  snapshot: (CapabilityTarget & { cwd: string; fingerprint: string | null }) | undefined,
+  current: CapabilityTarget,
+): Extract<ManageDialog, { kind: "approve-project-mcp" | "revoke-project-mcp" }> | undefined {
+  if (!snapshot || !capabilityTargetMatches(snapshot, current)) return undefined;
+  const target = { cwd: snapshot.cwd, ...(snapshot.instanceId ? { instanceId: snapshot.instanceId } : {}), name: "project MCP servers" };
+  if (action === "revoke") return { kind: "revoke-project-mcp", ...target };
+  return fingerprint && fingerprint === snapshot.fingerprint ? { kind: "approve-project-mcp", ...target, fingerprint } : undefined;
+}
+
+function withKimiInstance(instances: Preferences["providerInstances"], instanceId?: string): Preferences["providerInstances"] {
+  const next = { ...instances };
+  if (instanceId) next.kimi = instanceId;
+  else delete next.kimi;
+  return next;
+}
+
+export function workspaceForView(
+  view: "projects" | "chats",
+  active: Pick<Thread, "kind" | "cwd"> | undefined,
+  draft: DraftChat | undefined,
+  fallback: string,
+): string | undefined {
+  if (active) return active.kind === "project" ? active.cwd : undefined;
+  if (draft) return draft.kind === "project" ? draft.cwd : undefined;
+  return view === "projects" ? fallback || undefined : undefined;
+}
+
+export function workspaceRequestMatches(requested: string, current: string | undefined): boolean {
+  return Boolean(current && samePath(requested, current));
+}
+
+export function capabilityTargetMatches(requested: CapabilityTarget, current: CapabilityTarget): boolean {
+  const cwdMatches = requested.cwd === undefined ? current.cwd === undefined : Boolean(current.cwd && samePath(requested.cwd, current.cwd));
+  return cwdMatches && requested.instanceId === current.instanceId;
+}
+
+export function capabilityRequestMatches(requestId: number, latestRequestId: number, requested: CapabilityTarget, current: CapabilityTarget): boolean {
+  return requestId === latestRequestId && capabilityTargetMatches(requested, current);
+}
+
+export function gitFileGroup(file: Pick<GitFile, "staged" | "indexStatus" | "worktreeStatus">): "conflicts" | "staged" | "changes" {
+  const status = `${file.indexStatus}${file.worktreeStatus}`;
+  if (["DD", "AU", "UD", "UA", "DU", "AA", "UU"].includes(status)) return "conflicts";
+  return file.staged ? "staged" : "changes";
+}
+
+export function gitFileActions(file: Pick<GitFile, "staged" | "unstaged">): Array<"stage" | "unstage"> {
+  return [...(file.unstaged ? ["stage" as const] : []), ...(file.staged ? ["unstage" as const] : [])];
+}
+
+export function gitPathBatches(paths: string[]): string[][] {
+  return Array.from({ length: Math.ceil(paths.length / 500) }, (_, index) => paths.slice(index * 500, (index + 1) * 500));
+}
+
+export function progressiveRows<T>(rows: readonly T[], limit: number): T[] {
+  return rows.slice(0, Math.max(0, Math.floor(limit)));
+}
+
+export function nextProgressiveLimit(current: number, total: number, pageSize: number): number {
+  return Math.min(Math.max(0, total), Math.max(0, current) + Math.max(1, pageSize));
+}
+
+export function scopedProgressiveLimit(state: ProgressiveLimitState, scope: string, pageSize: number): number {
+  return state.scope === scope ? state.limit : pageSize;
+}
+
+export function progressiveGroups<K, T>(groups: ReadonlyArray<{ id: K; items: readonly T[] }>, limit: number): Array<{ id: K; items: T[]; total: number }> {
+  let remaining = Math.max(0, Math.floor(limit));
+  return groups.flatMap((group) => {
+    const items = progressiveRows(group.items, remaining);
+    remaining -= items.length;
+    return items.length ? [{ id: group.id, items, total: group.items.length }] : [];
+  });
+}
+
+export function terminalCommandMayMutateGit(command: string): boolean {
+  const gitCommands = /(?:^|[;&|]\s*)(?:&\s*)?git(?:\.exe)?\b(?<arguments>[^\r\n;&|]*)/ig;
+  const optionsWithValues = new Set(["-c", "-C", "--exec-path", "--git-dir", "--namespace", "--work-tree"]);
+  return [...command.matchAll(gitCommands)].some((match) => {
+    const tokens = (match.groups?.arguments ?? "").match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index]!.replace(/^["']|["']$/g, "");
+      if (optionsWithValues.has(token)) {
+        index += 1;
+        continue;
+      }
+      if (token.startsWith("-")) continue;
+      return gitSubcommandMayMutate(token.toLowerCase(), tokens.slice(index + 1).map((item) => item.replace(/^["']|["']$/g, "")));
+    }
+    return false;
+  });
+}
+
+function gitSubcommandMayMutate(subcommand: string, args: string[]): boolean {
+  const alwaysMutating = new Set(["add", "am", "apply", "bisect", "checkout", "cherry-pick", "clean", "clone", "commit", "fetch", "gc", "init", "maintenance", "merge", "mv", "prune", "pull", "push", "rebase", "replace", "reset", "restore", "revert", "rm", "switch", "update-index", "update-ref"]);
+  if (alwaysMutating.has(subcommand)) return true;
+  const flags = new Set(args.filter((argument) => argument.startsWith("-")).map((argument) => argument.split("=")[0]!));
+  const positionals = args.filter((argument) => !argument.startsWith("-"));
+  if (subcommand === "branch") {
+    if (["-d", "-D", "-m", "-M", "-c", "-C", "-u", "--copy", "--create-reflog", "--delete", "--edit-description", "--move", "--set-upstream-to", "--track", "--unset-upstream"].some((flag) => flags.has(flag))) return true;
+    if (["-a", "-r", "-v", "-vv", "--all", "--contains", "--format", "--list", "--merged", "--no-contains", "--no-merged", "--points-at", "--remotes", "--show-current", "--sort"].some((flag) => flags.has(flag))) return false;
+    return positionals.length > 0;
+  }
+  if (subcommand === "remote") return ["add", "rename", "remove", "rm", "set-branches", "set-head", "set-url", "prune", "update"].includes(positionals[0] ?? "");
+  if (subcommand === "config") {
+    if (["get", "get-all", "get-color", "get-colorbool", "get-regexp", "get-urlmatch", "list"].includes(positionals[0] ?? "")) return false;
+    if (["edit", "remove-section", "rename-section", "set", "unset"].includes(positionals[0] ?? "")) return true;
+    if (["--add", "--edit", "--remove-section", "--rename-section", "--replace-all", "--unset", "--unset-all"].some((flag) => flags.has(flag))) return true;
+    if (["--get", "--get-all", "--get-color", "--get-colorbool", "--get-regexp", "--get-urlmatch", "--list", "--name-only", "--show-origin", "--show-scope"].some((flag) => flags.has(flag))) return false;
+    return positionals.length >= 2;
+  }
+  if (subcommand === "stash") return !["list", "show"].includes(positionals[0] ?? "");
+  if (subcommand === "worktree") return ["add", "lock", "move", "prune", "remove", "repair", "unlock"].includes(positionals[0] ?? "");
+  if (subcommand === "tag") {
+    if (["-d", "-a", "-s", "-u", "--annotate", "--delete", "--force", "--local-user", "--sign"].some((flag) => flags.has(flag))) return true;
+    if (["-l", "-n", "-v", "--contains", "--format", "--list", "--merged", "--no-contains", "--no-merged", "--points-at", "--sort", "--verify"].some((flag) => flags.has(flag) || flag === "-n" && [...flags].some((value) => /^-n\d+$/.test(value)))) return false;
+    return positionals.length > 0;
+  }
+  if (subcommand === "notes") return ["add", "append", "copy", "edit", "merge", "prune", "remove"].includes(positionals[0] ?? "");
+  if (subcommand === "sparse-checkout") return ["add", "disable", "init", "reapply", "set"].includes(positionals[0] ?? "");
+  if (subcommand === "submodule") return ["absorbgitdirs", "add", "deinit", "set-branch", "set-url", "sync", "update"].includes(positionals[0] ?? "");
+  return false;
+}
+
+export function updateTerminalGitMutationTracking(sessions: Set<string>, sessionId: string, command: string): boolean {
+  sessions.delete(sessionId);
+  if (!terminalCommandMayMutateGit(command)) return false;
+  sessions.add(sessionId);
+  return true;
+}
+
+export function preferredGitRemote(remotes: Array<{ name: string }>, selected: string, upstream?: string): string {
+  return remotes.some((remote) => remote.name === selected)
+    ? selected
+    : remotes.find((remote) => upstream === remote.name || upstream?.startsWith(`${remote.name}/`))?.name
+      ?? remotes.find((remote) => remote.name === "origin")?.name
+      ?? remotes[0]?.name
+      ?? "";
+}
+
+export function gitDiffLineKind(line: string): "added" | "removed" | "hunk" | "meta" | "context" {
+  if (line.startsWith("+++ ") || line.startsWith("--- ") || line.startsWith("diff --git ") || line.startsWith("index ")) return "meta";
+  if (line.startsWith("+")) return "added";
+  if (line.startsWith("-")) return "removed";
+  if (line.startsWith("@@")) return "hunk";
+  return "context";
+}
+
+export function boundedDiffPreview(diff: string, maxLines = 1_200, maxCharacters = 160_000): { lines: string[]; omittedLines: number } {
+  const lines = diff.split("\n");
+  let characters = 0;
+  let count = 0;
+  while (count < lines.length && count < maxLines && characters + lines[count]!.length + (count ? 1 : 0) <= maxCharacters) {
+    characters += lines[count]!.length + (count ? 1 : 0);
+    count += 1;
+  }
+  return { lines: lines.slice(0, count), omittedLines: lines.length - count };
+}
+
+export function railTabAfter(current: RailView, key: string, workspace: boolean): RailView {
+  const tabs: RailView[] = workspace ? ["preview", "terminal", "changes", "git", "agents"] : ["agents"];
+  const index = Math.max(0, tabs.indexOf(current));
+  if (key === "Home") return tabs[0]!;
+  if (key === "End") return tabs.at(-1)!;
+  if (key === "ArrowLeft") return tabs[(index - 1 + tabs.length) % tabs.length]!;
+  if (key === "ArrowRight") return tabs[(index + 1) % tabs.length]!;
+  return current;
+}
+
+export function gitDetailRequestMatches(requestId: number, latestRequestId: number, requestedCwd: string, currentCwd: string | undefined): boolean {
+  return requestId === latestRequestId && workspaceRequestMatches(requestedCwd, currentCwd);
+}
+
+export function classifyGitError(error: unknown): GitInlineError {
+  const detail = (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/i, "").trim() || "Git could not complete the request.";
+  if (/not a git repository/i.test(detail)) return { kind: "not-repository", title: "No Git repository here", detail };
+  if (/not available|not recognized|cannot find.*git|ENOENT/i.test(detail)) return { kind: "unavailable", title: "Git is not available", detail: "Install Git for Windows, then reopen this workspace." };
+  if (/authentication|permission denied|could not read username|terminal prompts disabled|publickey/i.test(detail)) return { kind: "authentication", title: "Git authentication failed", detail };
+  if (/conflict|would be overwritten|not fully merged|unmerged|resolve your current index/i.test(detail)) return { kind: "conflict", title: "Git needs your attention", detail };
+  if (/unable to access|could not resolve host|network|timed out|connection.*(?:failed|reset|closed)/i.test(detail)) return { kind: "network", title: "Git network request failed", detail };
+  return { kind: "unknown", title: "Git request failed", detail };
+}
+
+export function skillInstallDialogFromRequest(value: unknown): ({ kind: "install-skill" } & SkillInstallRequest) | undefined {
+  if (!isRecordValue(value)
+    || typeof value.cwd !== "string"
+    || typeof value.source !== "string"
+    || typeof value.name !== "string"
+    || !value.name.trim()
+    || !workspaceRelativePath(value.cwd, value.source)) return undefined;
+  return { kind: "install-skill", cwd: value.cwd, source: value.source, name: value.name.trim() };
+}
+
+export function railForStandaloneChat(current: RailView | undefined): RailView | undefined {
+  return current === "agents" ? current : undefined;
+}
+
+export function shouldAcknowledgeYolo(success: boolean, pendingTarget: string, currentTarget: string | undefined): boolean {
+  return success && pendingTarget === currentTarget;
+}
+
+export function showSidebarUpdate(phase: UpdateStatus["phase"]): boolean {
+  return phase === "available" || phase === "downloading" || phase === "installing";
+}
+
+export function updateCanCancel(phase: UpdateStatus["phase"], active: boolean): boolean {
+  return phase === "downloading" && active;
+}
+
+export function releaseUpdateResources(
+  attempt: Pick<UpdateAttempt, "prepared" | "resourceClosed" | "cleanup">,
+  closeResource: () => Promise<unknown>,
+  cancelLease: () => Promise<unknown>,
+): Promise<void> {
+  if (attempt.cleanup) return attempt.cleanup;
+  const operations: Promise<unknown>[] = [];
+  if (!attempt.resourceClosed) operations.push(closeResource().then(() => { attempt.resourceClosed = true; }));
+  if (attempt.prepared) operations.push(cancelLease().then(() => { attempt.prepared = false; }));
+  const cleanup = Promise.allSettled(operations).then((results) => {
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failures.length) throw new Error(failures.map((failure) => failure.reason instanceof Error ? failure.reason.message : String(failure.reason)).join("; "));
+  });
+  const tracked = cleanup.finally(() => { if (attempt.cleanup === tracked) attempt.cleanup = undefined; });
+  attempt.cleanup = tracked;
+  return tracked;
+}
+
+export function subagentCanInspect(advertised: boolean, run: Pick<SubagentRun, "threadIds">): boolean {
+  return advertised && Boolean(run.threadIds?.length);
+}
+
+export function isNearScrollBottom(
+  metrics: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
+  threshold = 72,
+): boolean {
+  return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold;
+}
+
+export function isAppMenuOpenKey(key: string): boolean {
+  return key === "ArrowDown" || key === "Enter" || key === " ";
+}
+
+type TurnSubmissionParams = { threadId: string; text: string; mentions: string[]; images: PendingImage[]; mode: "queue" | "steer"; submissionId: string };
+export type TurnSubmissionReceipt = { params: TurnSubmissionParams; order: number };
+export type ThreadCreationReceipt = { fingerprint: string; params: Record<string, unknown> & { creationId: string } };
+
+export function restoredTurnDraftMatches(restored: Pick<TurnSubmissionParams, "text" | "images">, text: string, images: PendingImage[]): boolean {
+  return restored.text === text && restored.images.length === images.length && restored.images.every((image, index) => {
+    const current = images[index];
+    return current?.name === image.name && current.mimeType === image.mimeType && current.data === image.data;
+  });
+}
+
+export function turnSubmissionAttempt(params: Omit<TurnSubmissionParams, "submissionId">, restored?: TurnSubmissionReceipt, randomUUID: () => string = () => crypto.randomUUID(), order = 0): { params: TurnSubmissionParams; receipt: TurnSubmissionReceipt } {
+  if (restored?.params.threadId === params.threadId && restoredTurnDraftMatches(restored.params, params.text, params.images)) return { params: restored.params, receipt: restored };
+  const attempted = { ...params, submissionId: randomUUID() };
+  return { params: attempted, receipt: { params: attempted, order } };
+}
+
+export function turnSubmissionAfterFailure<T extends TurnSubmissionReceipt>(error: unknown, attempted: T | undefined, restored?: T): T | undefined {
+  if (error instanceof DeliveryUncertainError) return attempted;
+  return error instanceof RequestNotSentError ? restored : undefined;
+}
+
+export function rememberTurnSubmission<T extends TurnSubmissionReceipt>(receipts: Map<string, T>, receipt: T, limit = 8, protectedId?: string): void {
+  receipts.delete(receipt.params.submissionId);
+  receipts.set(receipt.params.submissionId, receipt);
+  while (receipts.size > limit) {
+    const evicted = [...receipts.entries()]
+      .filter(([id]) => id !== protectedId)
+      .sort(([, left], [, right]) => left.order - right.order)[0]?.[0];
+    if (!evicted) break;
+    receipts.delete(evicted);
+  }
+}
+
+export function latestRestoredTurnSubmission<T extends TurnSubmissionReceipt>(receipts: Map<string, T>, threadId: string): T | undefined {
+  let latest: T | undefined;
+  for (const receipt of receipts.values()) {
+    if (receipt.params.threadId === threadId && (!latest || receipt.order >= latest.order)) latest = receipt;
+  }
+  return latest;
+}
+
+export function latestMatchingRestoredTurnSubmission<T extends TurnSubmissionReceipt>(receipts: Map<string, T>, threadId: string, text: string, images: PendingImage[]): T | undefined {
+  let latest: T | undefined;
+  for (const receipt of receipts.values()) {
+    if (receipt.params.threadId === threadId && restoredTurnDraftMatches(receipt.params, text, images) && (!latest || receipt.order >= latest.order)) latest = receipt;
+  }
+  return latest;
+}
+
+export function forgetRestoredTurnSubmission<T extends TurnSubmissionReceipt>(receipts: Map<string, T>, submissionId: string | undefined): void {
+  if (submissionId) receipts.delete(submissionId);
+}
+
+export function forgetThreadTurnSubmissions<T extends TurnSubmissionReceipt>(receipts: Map<string, T>, threadId: string): void {
+  for (const [submissionId, receipt] of receipts) {
+    if (receipt.params.threadId === threadId) receipts.delete(submissionId);
+  }
+}
+
+export function threadCreationFingerprint(params: Record<string, unknown>): string {
+  const ordered = (value: unknown): unknown => Array.isArray(value)
+    ? value.map(ordered)
+    : value && typeof value === "object"
+      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, ordered(entry)]))
+      : value;
+  return JSON.stringify(ordered(params));
+}
+
+export function threadCreationAttempt(params: Record<string, unknown>, restored?: ThreadCreationReceipt, randomUUID: () => string = () => crypto.randomUUID()): ThreadCreationReceipt {
+  const fingerprint = threadCreationFingerprint(params);
+  return restored?.fingerprint === fingerprint ? restored : { fingerprint, params: { ...params, creationId: randomUUID() } };
+}
+
+export function threadCreationAfterFailure(error: unknown, attempted: ThreadCreationReceipt, restored?: ThreadCreationReceipt): ThreadCreationReceipt | undefined {
+  if (error instanceof DeliveryUncertainError) return attempted;
+  return error instanceof RequestNotSentError ? restored : undefined;
+}
+
+export function threadCreationSlotAvailable(receipts: ReadonlyMap<string, ThreadCreationReceipt>, fingerprint: string, limit = 8): boolean {
+  return receipts.has(fingerprint) || receipts.size < limit;
+}
+
+export function threadFromCreationResult(result: unknown): Thread {
+  const rawThread = result && typeof result === "object" && !Array.isArray(result)
+    ? (result as { thread?: unknown }).thread
+    : undefined;
+  if (!rawThread || typeof rawThread !== "object" || Array.isArray(rawThread)) {
+    throw new DeliveryUncertainError("Thread creation response was missing a valid thread");
+  }
+  const candidate = rawThread as Partial<Thread>;
+  if (typeof candidate.threadId !== "string" || !candidate.threadId || typeof candidate.sessionId !== "string" || !candidate.sessionId) {
+    throw new DeliveryUncertainError("Thread creation response was missing a valid thread");
+  }
+  try {
+    return normalizeThread(rawThread as Thread);
+  } catch {
+    throw new DeliveryUncertainError("Thread creation response was missing a valid thread");
+  }
+}
+
+export function sideThreadFromCreationResult(result: unknown, parent: Pick<Thread, "threadId" | "provider" | "kind">): Thread {
+  const side = threadFromCreationResult(result);
+  if (side.parentThreadId !== parent.threadId || side.provider !== parent.provider || side.kind !== parent.kind || parent.provider !== "kimi") {
+    throw new DeliveryUncertainError("Side chat creation response did not match its parent thread");
+  }
+  return side;
+}
+
+type DraftCreationRecoveryStore = {
+  drafts: Map<string, DraftChat>;
+  receipts: WeakMap<DraftChat, Map<string, ThreadCreationReceipt>>;
+};
+type RecoveryStorage = Pick<Storage, "getItem" | "setItem">;
+
+export function loadDraftCreationRecovery(storage: RecoveryStorage | undefined = typeof localStorage === "undefined" ? undefined : localStorage): DraftCreationRecoveryStore {
+  const store: DraftCreationRecoveryStore = { drafts: new Map(), receipts: new WeakMap() };
+  if (!storage) return store;
+  try {
+    const parsed = JSON.parse(storage.getItem(draftCreationRecoveryStorageKey) ?? "null") as { version?: unknown; drafts?: unknown } | null;
+    if (parsed?.version !== 1 || !Array.isArray(parsed.drafts)) return store;
+    for (const entry of parsed.drafts) {
+      if (!entry || typeof entry !== "object") continue;
+      const candidate = entry as { draft?: unknown; receipts?: unknown };
+      if (!candidate.draft || typeof candidate.draft !== "object" || !Array.isArray(candidate.receipts)) continue;
+      const rawDraft = candidate.draft as { kind?: unknown; cwd?: unknown; isolate?: unknown };
+      if (rawDraft.kind !== "chat" && rawDraft.kind !== "project") continue;
+      if (rawDraft.kind === "project" && typeof rawDraft.cwd !== "string") continue;
+      const draft: DraftChat = {
+        kind: rawDraft.kind,
+        ...(typeof rawDraft.cwd === "string" ? { cwd: rawDraft.cwd } : {}),
+        ...(rawDraft.isolate === true ? { isolate: true } : {}),
+      };
+      const receipts = new Map<string, ThreadCreationReceipt>();
+      for (const item of candidate.receipts.slice(0, 8)) {
+        if (!item || typeof item !== "object") continue;
+        const receipt = item as { fingerprint?: unknown; params?: unknown };
+        if (typeof receipt.fingerprint !== "string" || !receipt.params || typeof receipt.params !== "object" || Array.isArray(receipt.params)) continue;
+        const params = receipt.params as Record<string, unknown>;
+        if (typeof params.creationId !== "string") continue;
+        const { creationId: _creationId, ...semanticParams } = params;
+        if (threadCreationFingerprint(semanticParams) !== receipt.fingerprint) continue;
+        receipts.set(receipt.fingerprint, { fingerprint: receipt.fingerprint, params: { ...semanticParams, creationId: params.creationId } });
+      }
+      if (!receipts.size) continue;
+      const key = draftRecoveryKey(draft);
+      store.drafts.set(key, draft);
+      store.receipts.set(draft, receipts);
+    }
+  } catch { /* corrupt recovery data is ignored; the server still rejects conflicting creation IDs */ }
+  return store;
+}
+
+export function saveDraftCreationRecovery(drafts: ReadonlyMap<string, DraftChat>, receiptsByDraft: WeakMap<DraftChat, Map<string, ThreadCreationReceipt>>, storage: RecoveryStorage | undefined = typeof localStorage === "undefined" ? undefined : localStorage): boolean {
+  if (!storage) return false;
+  const entries = [...drafts.values()].flatMap((draft) => {
+    const receipts = receiptsByDraft.get(draft);
+    return receipts?.size ? [{ draft, receipts: [...receipts.values()] }] : [];
+  });
+  try {
+    storage.setItem(draftCreationRecoveryStorageKey, JSON.stringify({ version: 1, drafts: entries }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function loadSideCreationRecovery(storage: RecoveryStorage | undefined = typeof localStorage === "undefined" ? undefined : localStorage): Map<string, ThreadCreationReceipt> {
+  const receipts = new Map<string, ThreadCreationReceipt>();
+  if (!storage) return receipts;
+  try {
+    const parsed = JSON.parse(storage.getItem(sideCreationRecoveryStorageKey) ?? "null") as { version?: unknown; receipts?: unknown } | null;
+    if (parsed?.version !== 1 || !Array.isArray(parsed.receipts)) return receipts;
+    for (const item of parsed.receipts.slice(0, 8)) {
+      if (!item || typeof item !== "object") continue;
+      const candidate = item as { fingerprint?: unknown; params?: unknown };
+      if (typeof candidate.fingerprint !== "string" || !candidate.params || typeof candidate.params !== "object" || Array.isArray(candidate.params)) continue;
+      const params = candidate.params as Record<string, unknown>;
+      if (typeof params.threadId !== "string" || typeof params.creationId !== "string" || !uuidPattern.test(params.creationId) || (params.title !== undefined && typeof params.title !== "string")) continue;
+      const { creationId: _creationId, ...semanticParams } = params;
+      if (threadCreationFingerprint(semanticParams) !== candidate.fingerprint) continue;
+      receipts.set(candidate.fingerprint, { fingerprint: candidate.fingerprint, params: { ...semanticParams, creationId: params.creationId } });
+    }
+  } catch { /* corrupt recovery data is ignored; the server still rejects conflicting creation IDs */ }
+  return receipts;
+}
+
+export function saveSideCreationRecovery(receipts: ReadonlyMap<string, ThreadCreationReceipt>, storage: RecoveryStorage | undefined = typeof localStorage === "undefined" ? undefined : localStorage): boolean {
+  if (!storage) return false;
+  try {
+    storage.setItem(sideCreationRecoveryStorageKey, JSON.stringify({ version: 1, receipts: [...receipts.values()].slice(-8) }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function rememberLocallyRecoveredThread(recovered: Map<string, Thread>, thread: Thread, limit = 32): void {
+  recovered.delete(thread.threadId);
+  recovered.set(thread.threadId, thread);
+  while (recovered.size > limit) recovered.delete(recovered.keys().next().value!);
+}
+
+export function threadListSnapshotIsStable(requestedGeneration: number, currentGeneration: number): boolean {
+  return requestedGeneration === currentGeneration;
+}
+
+export function latestCallbackProxy<TArgs extends unknown[], TResult>(holder: { current: (...args: TArgs) => TResult }): (...args: TArgs) => TResult {
+  return (...args) => holder.current(...args);
+}
+
+function useLatestCallback<TArgs extends unknown[], TResult>(callback: (...args: TArgs) => TResult): (...args: TArgs) => TResult {
+  const latest = useRef(callback);
+  useLayoutEffect(() => { latest.current = callback; }, [callback]);
+  return useMemo(() => latestCallbackProxy(latest), []);
+}
+
+export function App() {
+  const supervisor = useRef<ConnectionSupervisor | undefined>(undefined);
+  const submitMode = useRef<"queue" | "steer">("queue");
+  const serverRestarting = useRef(false);
+  const automaticRestartTimer = useRef<number | undefined>(undefined);
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const composerInput = useRef<HTMLTextAreaElement | null>(null);
+  const composer = useRef<HTMLFormElement | null>(null);
+  const composerTools = useRef<HTMLDivElement | null>(null);
+  const timeline = useRef<HTMLDivElement | null>(null);
+  const conversationStage = useRef<HTMLDivElement | null>(null);
+  const timelinePinned = useRef(true);
+  const terminalEnd = useRef<HTMLDivElement | null>(null);
+  const menuBar = useRef<HTMLElement | null>(null);
+  const menuTriggers = useRef<Partial<Record<AppMenu, HTMLButtonElement | null>>>({});
+  const pendingUpdate = useRef<Update | undefined>(undefined);
+  const updateAttempt = useRef<UpdateAttempt | undefined>(undefined);
+  const updateCheckId = useRef(0);
+  const updateInstallInFlight = useRef(false);
+  const quotaRefreshInFlight = useRef<{ key: string; id: number } | undefined>(undefined);
+  const quotaRefreshRequestId = useRef(0);
+  const configRequestId = useRef(0);
+  const configUpdatesInFlight = useRef(0);
+  const currentConfigTarget = useRef<ConfigTarget | undefined>(undefined);
+  const threadListRequestId = useRef(0);
+  const threadMutationGeneration = useRef(0);
+  const locallyRecoveredThreads = useRef(new Map<string, Thread>());
+  const flushDomainEvents = useRef<() => void>(() => undefined);
+  const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [serverLookupAttempt, setServerLookupAttempt] = useState(0);
+  const [serverLookupError, setServerLookupError] = useState<string>();
+  const [preferences, setPreferences] = useState<Preferences>(loadPreferences);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [showOnboarding, setShowOnboarding] = useState(() => !loadPreferences().onboardingDone);
+  const [cwd, setCwd] = useState(() => loadPreferences().workspace);
+  const [kimiRuntimeReady, setKimiRuntimeReady] = useState(false);
+  const [bootstrapping, setBootstrapping] = useState(true);
+  const [startupDelayed, setStartupDelayed] = useState(false);
+  const [threads, setThreads] = useState<Thread[]>([]);
+  const threadsRef = useRef<Thread[]>([]);
+  const turnProjectionCache = useRef(createTurnProjectionCache());
+  const [runtimeSessions, setRuntimeSessions] = useState<RuntimeSession[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string>();
+  const currentActiveThreadId = useRef<string | undefined>(activeThreadId);
+  currentActiveThreadId.current = activeThreadId;
+  function syncLocallyRecoveredThreads(next: Thread[]): Thread[] {
+    for (const threadId of [...locallyRecoveredThreads.current.keys()]) {
+      const updated = next.find((thread) => thread.threadId === threadId);
+      if (updated) locallyRecoveredThreads.current.set(threadId, updated);
+      else locallyRecoveredThreads.current.delete(threadId);
+    }
+    return next;
+  }
+  function publishThreads(next: Thread[]) {
+    const synchronized = syncLocallyRecoveredThreads(next);
+    threadsRef.current = synchronized;
+    setThreads(synchronized);
+  }
+  function replaceThreads(next: Thread[]) {
+    turnProjectionCache.current.clear();
+    publishThreads(next);
+  }
+  function mutateThreads(update: Thread[] | ((current: Thread[]) => Thread[])) {
+    threadMutationGeneration.current += 1;
+    const current = threadsRef.current;
+    const next = typeof update === "function" ? update(current) : update;
+    reconcileTurnProjectionCache(turnProjectionCache.current, current, next);
+    publishThreads(next);
+  }
+  const [prompt, setPrompt] = useState("");
+  const currentPrompt = useRef(prompt);
+  currentPrompt.current = prompt;
+  const [diagnostics, setDiagnostics] = useState<string[]>([]);
+  const [taskNotice, setTaskNotice] = useState<{ title: string; message: string }>();
+  const [auth, setAuth] = useState<AuthState>();
+  const [providers, setProviders] = useState<ProviderState[]>([]);
+  const [providerInstances, setProviderInstances] = useState<ProviderInstance[]>([]);
+  const [wslEnvironments, setWslEnvironments] = useState<WslEnvironment[]>([]);
+  const [remoteStatus, setRemoteStatus] = useState<RemoteStatus>();
+  const [remotePairing, setRemotePairing] = useState<RemotePairing>();
+  const [remoteBusy, setRemoteBusy] = useState(false);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [schedulesBusy, setSchedulesBusy] = useState(false);
+  const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
+  const [images, setImages] = useState<PendingImage[]>([]);
+  const currentImages = useRef(images);
+  currentImages.current = images;
+  const [draftCreationRecovery] = useState(() => loadDraftCreationRecovery());
+  const [sideCreationRecovery] = useState(() => loadSideCreationRecovery());
+  const restoredTurnSubmissions = useRef(new Map<string, TurnSubmissionReceipt>());
+  const turnSubmissionOrder = useRef(0);
+  const restoredThreadCreations = useRef(draftCreationRecovery.receipts);
+  const recoverableDrafts = useRef(draftCreationRecovery.drafts);
+  const restoredSideCreations = useRef(sideCreationRecovery);
+  const visibleRestoredSubmissionId = useRef<string | undefined>(undefined);
+  const currentComposerTarget = useRef<string | DraftChat | undefined>(undefined);
+  const composerDrafts = useRef(new Map<string, ComposerDraftState>());
+  const composerTargetGeneration = useRef(0);
+  const threadComposerEdits = useRef(new Map<string, number>());
+  const draftComposerEdits = useRef(new WeakMap<DraftChat, number>());
+  const threadConfigEdits = useRef(new Map<string, number>());
+  const attachmentGeneration = useRef(0);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  function composerTargetEditSequence(target: string | DraftChat | undefined): number {
+    if (typeof target === "string") return threadComposerEdits.current.get(target) ?? 0;
+    return target ? draftComposerEdits.current.get(target) ?? 0 : 0;
+  }
+  function markComposerTargetEdited(target: string | DraftChat | undefined) {
+    if (typeof target === "string") threadComposerEdits.current.set(target, (threadComposerEdits.current.get(target) ?? 0) + 1);
+    else if (target) draftComposerEdits.current.set(target, (draftComposerEdits.current.get(target) ?? 0) + 1);
+  }
+  function threadConfigEditSequence(threadId: string): number {
+    return threadConfigEdits.current.get(threadId) ?? 0;
+  }
+  function markThreadConfigEdited(threadId: string) {
+    threadConfigEdits.current.set(threadId, threadConfigEditSequence(threadId) + 1);
+  }
+  function invalidateComposerDraft() {
+    markComposerTargetEdited(currentComposerTarget.current);
+    const visibleId = visibleRestoredSubmissionId.current;
+    const visible = visibleId ? restoredTurnSubmissions.current.get(visibleId) : undefined;
+    if (typeof currentComposerTarget.current === "string" && visible?.params.threadId === currentComposerTarget.current) {
+      forgetRestoredTurnSubmission(restoredTurnSubmissions.current, visibleId);
+    }
+    visibleRestoredSubmissionId.current = undefined;
+  }
+  function applyComposerDraftState(draft: ComposerDraftState) {
+    const next = { text: draft.text, images: [...draft.images] };
+    currentPrompt.current = next.text;
+    currentImages.current = next.images;
+    cacheComposerDraft(composerDrafts.current, currentComposerTarget.current, next);
+    setPrompt(next.text);
+    setImages(next.images);
+  }
+  function setComposerPrompt(value: string | ((current: string) => string)) {
+    const next = typeof value === "function" ? value(currentPrompt.current) : value;
+    currentPrompt.current = next;
+    cacheComposerDraft(composerDrafts.current, currentComposerTarget.current, { text: next, images: currentImages.current });
+    setPrompt(next);
+  }
+  function editPrompt(value: string | ((current: string) => string)) {
+    invalidateComposerDraft();
+    setComposerPrompt(value);
+  }
+  function setComposerImages(value: PendingImage[] | ((current: PendingImage[]) => PendingImage[])) {
+    const next = typeof value === "function" ? value(currentImages.current) : value;
+    currentImages.current = next;
+    cacheComposerDraft(composerDrafts.current, currentComposerTarget.current, { text: currentPrompt.current, images: next });
+    setImages(next);
+  }
+  function editImages(value: PendingImage[] | ((current: PendingImage[]) => PendingImage[])) {
+    invalidateComposerDraft();
+    setComposerImages(value);
+  }
+  function switchComposerTarget(nextTarget: string | DraftChat | undefined) {
+    if (currentComposerTarget.current === nextTarget) return;
+    cacheComposerDraft(composerDrafts.current, currentComposerTarget.current, { text: currentPrompt.current, images: currentImages.current });
+    attachmentGeneration.current += 1;
+    setAttachmentsLoading(false);
+    currentComposerTarget.current = nextTarget;
+    composerTargetGeneration.current += 1;
+    const cached = cachedComposerDraft(composerDrafts.current, nextTarget);
+    const restored = typeof nextTarget === "string"
+      ? cached
+        ? latestMatchingRestoredTurnSubmission(restoredTurnSubmissions.current, nextTarget, cached.text, cached.images)
+        : latestRestoredTurnSubmission(restoredTurnSubmissions.current, nextTarget)
+      : undefined;
+    visibleRestoredSubmissionId.current = restored?.params.submissionId;
+    applyComposerDraftState(cached ?? (restored ? { text: restored.params.text, images: restored.params.images } : { text: "", images: [] }));
+  }
+  const [selectedFile, setSelectedFile] = useState<{ path: string; content: string }>();
+  const [threadFilter, setThreadFilter] = useState("");
+  const [navView, setNavView] = useState<"projects" | "chats">("projects");
+  const [capabilityCenterOpen, setCapabilityCenterOpen] = useState(false);
+  const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>("profiles");
+  const [capabilitySnapshot, setCapabilitySnapshot] = useState<CapabilitySnapshot>();
+  const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
+  const capabilityRefreshRequest = useRef(0);
+  const currentCapabilityTarget = useRef<CapabilityTarget>({});
+  const [profileDraft, setProfileDraft] = useState({ name: "", prompt: "" });
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [railView, setRailView] = useState<RailView>();
+  const currentConnection = useRef(connection);
+  currentConnection.current = connection;
+  const [railHost, setRailHost] = useState<HTMLDivElement | null>(null);
+  const [sidebarHost, setSidebarHost] = useState<HTMLDivElement | null>(null);
+  const [openMenu, setOpenMenu] = useState<AppMenu>();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("general");
+  const [settingsQuery, setSettingsQuery] = useState("");
+  const [gitStatus, setGitStatus] = useState<GitStatus>();
+  const [gitStatusCwd, setGitStatusCwd] = useState<string>();
+  const [gitDiff, setGitDiff] = useState<{ path: string; diff: string }>();
+  const [gitDetailLoading, setGitDetailLoading] = useState<string>();
+  const gitDetailRequest = useRef(0);
+  const [checkpointReview, setCheckpointReview] = useState<CheckpointReview>();
+  const [reviewComments, setReviewComments] = useState<Record<string, string>>({});
+  const [pendingReviewRevert, setPendingReviewRevert] = useState<{ path: string; hunkIndex?: number }>();
+  const [commitMessage, setCommitMessage] = useState("");
+  const [gitRefreshBusy, setGitRefreshBusy] = useState(false);
+  const [gitMutationBusy, setGitMutationBusy] = useState(false);
+  const [gitReviewBusy, setGitReviewBusy] = useState(false);
+  const [gitLoadState, setGitLoadState] = useState<GitLoadState>("idle");
+  const [gitLoadCwd, setGitLoadCwd] = useState<string>();
+  const gitRefreshRequest = useRef(0);
+  const checkpointReviewRequest = useRef(0);
+  const [gitRepository, setGitRepository] = useState<GitRepository>();
+  const [gitError, setGitError] = useState<GitInlineError>();
+  const [gitRemote, setGitRemote] = useState("");
+  const [gitBranchQuery, setGitBranchQuery] = useState("");
+  const [gitBranchAction, setGitBranchAction] = useState<GitBranchAction>();
+  const [gitFileRowLimit, setGitFileRowLimit] = useState(gitChangedFilePageSize);
+  const [gitLocalBranchLimit, setGitLocalBranchLimit] = useState<ProgressiveLimitState>({ scope: "", limit: gitBranchPageSize });
+  const [gitRemoteBranchLimit, setGitRemoteBranchLimit] = useState<ProgressiveLimitState>({ scope: "", limit: gitBranchPageSize });
+  const gitBranchActionTrigger = useRef<HTMLButtonElement | undefined>(undefined);
+  const gitBranchesSummary = useRef<HTMLElement | undefined>(undefined);
+  const gitRefreshTimer = useRef<number | undefined>(undefined);
+  const gitRefreshPending = useRef(false);
+  const gitRefreshCallback = useRef<() => Promise<void>>(async () => undefined);
+  const gitRefreshScheduler = useRef<(delay?: number, targetCwd?: string) => void>(() => undefined);
+  const gitRefreshTargetCwd = useRef<string | undefined>(undefined);
+  const currentGitBusy = useRef(false);
+  const terminalGitMutationSessions = useRef(new Set<string>());
+  const previousGitTurn = useRef<{ threadId: string | undefined; busy: boolean }>({ threadId: undefined, busy: false });
+  const [branchDraft, setBranchDraft] = useState("");
+  const [publishName, setPublishName] = useState("");
+  const [publishVisibility, setPublishVisibility] = useState<"private" | "public">("private");
+  const [pullRequest, setPullRequest] = useState({ title: "", body: "", draft: true });
+  const [cloneUrl, setCloneUrl] = useState("");
+  const [quota, setQuota] = useState<KimiQuota>();
+  const [quotaError, setQuotaError] = useState<string>();
+  const [quotaLoading, setQuotaLoading] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ phase: "idle" });
+  const [updateNotice, setUpdateNotice] = useState<string>();
+  const [updatePreparing, setUpdatePreparing] = useState(false);
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>(loadTerminalLayout);
+  const terminalTabsRef = useRef(terminalTabs);
+  const terminalStarts = useRef(new Set<string>());
+  terminalTabsRef.current = terminalTabs;
+  const [activeTerminalTabId, setActiveTerminalTabId] = useState<string>();
+  const [splitTerminalTabId, setSplitTerminalTabId] = useState<string>();
+  const [terminalHistory, setTerminalHistory] = useState<string[]>([]);
+  const [terminalHistoryIndex, setTerminalHistoryIndex] = useState(-1);
+  const [pendingTerminalCommand, setPendingTerminalCommand] = useState<string>();
+  const [projectScripts, setProjectScripts] = useState<ProjectScript[]>([]);
+  const [previewDraft, setPreviewDraft] = useState("http://localhost:3000");
+  const [previewUrl, setPreviewUrl] = useState<string>();
+  const [previewRevision, setPreviewRevision] = useState(0);
+  const [composerMenuOpen, setComposerMenuOpen] = useState(false);
+  const [itemMenu, setItemMenu] = useState<ItemMenu>();
+  const [manageDialog, setManageDialog] = useState<ManageDialog>();
+  const [draftChat, setDraftChat] = useState<DraftChat>();
+  const currentDraftChat = useRef(draftChat);
+  currentDraftChat.current = draftChat;
+  const [draftSending, setDraftSending] = useState(false);
+  const draftSendingRef = useRef(draftSending);
+  draftSendingRef.current = draftSending;
+  function updateDraftSending(value: boolean) {
+    draftSendingRef.current = value;
+    setDraftSending(value);
+  }
+  const [configDefaults, setConfigDefaults] = useState<ConfigOption[]>([]);
+  const [configDefaultsState, setConfigDefaultsState] = useState({ target: "", settled: false });
+  const [draftConfig, setDraftConfig] = useState<Record<string, string>>({});
+  const [configUpdating, setConfigUpdating] = useState<Record<string, ConfigUpdate>>({});
+  const [yoloConfirm, setYoloConfirm] = useState<{ target: ConfigTarget; configId: string; value: string; busy: boolean }>();
+  const [draggingProject, setDraggingProject] = useState<string>();
+  const [collapsedProjects, setCollapsedProjects] = useState(() => new Set<string>());
+  const [projectReorderAnnouncement, setProjectReorderAnnouncement] = useState("");
+  const [narrowSidebarOpen, setNarrowSidebarOpen] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [visibleTurnLimit, setVisibleTurnLimit] = useState(initialTurnWindow);
+  const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
+
+  const activeThread = threads.find((thread) => thread.threadId === activeThreadId);
+  const composerTarget = activeThread?.threadId ?? draftChat;
+  useLayoutEffect(() => {
+    switchComposerTarget(composerTarget);
+  }, [composerTarget]);
+  const historicalThread = !threadCanRun(activeThread);
+  const providerId = activeThread?.provider ?? "kimi";
+  const instanceId = activeThread?.provider === "kimi" ? activeThread.instanceId : preferences.providerInstances.kimi;
+  const providerState = providers.find((provider) => provider.id === "kimi");
+  const instanceState = providerInstances.find((instance) => instance.id === instanceId && instance.provider === "kimi");
+  const kimiRuntimeAvailable = instanceId ? Boolean(instanceState?.installed) : Boolean(auth?.authenticated && kimiRuntimeReady);
+  const runtimeReady = !historicalThread && kimiRuntimeAvailable;
+  const configDefaultsTarget = JSON.stringify(["kimi", instanceId ?? ""]);
+  const draftConfigSettled = configDefaultsAreSettled(Boolean(activeThread), configDefaultsState, configDefaultsTarget);
+  const promptTrigger = useMemo(() => composerTrigger(prompt), [prompt]);
+  const composerProjectCwd = activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : undefined;
+  const fileSuggestionQuery = promptTrigger?.kind === "file" ? promptTrigger.query : undefined;
+  const configTarget = activeThread
+    ? { key: configTargetKey(activeThread, undefined)!, kind: "thread" as const, threadId: activeThread.threadId }
+    : draftChat
+      ? { key: configTargetKey(undefined, draftChat)!, kind: "draft" as const, draft: draftChat }
+      : undefined;
+  currentConfigTarget.current = configTarget;
+  const agentRuns = useMemo(() => subagentRuns(activeThread), [activeThread]);
+  const composerOptions = useMemo(() => activeThread ? activeThread.configOptions : applyDraftConfig(configDefaults, draftConfig), [activeThread, configDefaults, draftConfig]);
+  const workBlocksUpdate = hasBlockingWork(threads.filter((thread) => thread.provider === "kimi"), draftSending);
+  const updateBlocked = workBlocksUpdate || Object.keys(configUpdating).length > 0;
+  const updateMutationsBlocked = updatePreparing || updateStatus.phase === "downloading" || updateStatus.phase === "installing";
+  const configMutationPending = Object.keys(configUpdating).length > 0;
+  const configBusyId = configTarget ? configUpdating[configTarget.key]?.configId : undefined;
+  const composerTargetKind = activeThread?.kind ?? draftChat?.kind;
+  const composerSubmitReady = runtimeReady && draftConfigSettled && !attachmentsLoading && composerCanSubmit(navView, composerTargetKind, configMutationPending);
+  const activeThreadBusy = activeThread ? isThreadBusy(activeThread) : false;
+  const primaryComposerAction = composerPrimaryAction(activeThreadBusy);
+  const workspaceCwd = workspaceForView(navView, activeThread, draftChat, cwd);
+  const gitStatusCurrent = Boolean(workspaceCwd && gitStatusCwd && workspaceRequestMatches(workspaceCwd, gitStatusCwd));
+  const gitLoadCurrent = Boolean(workspaceCwd && gitLoadCwd && workspaceRequestMatches(workspaceCwd, gitLoadCwd));
+  const visibleGitStatus = gitStatusCurrent ? gitStatus : undefined;
+  const visibleGitRepository = gitStatusCurrent ? gitRepository : undefined;
+  const visibleGitLoadState: GitLoadState = gitLoadCurrent ? gitLoadState : "idle";
+  const visibleGitError = gitLoadCurrent ? gitError : undefined;
+  const gitBusy = gitRefreshBusy || gitMutationBusy || gitReviewBusy;
+  currentGitBusy.current = gitBusy;
+  const gitActivityLabel = gitReviewBusy ? "Loading review…" : gitMutationBusy ? "Updating…" : gitRefreshBusy ? "Refreshing local snapshot…" : visibleGitError ? "Refresh failed" : visibleGitLoadState === "ready" ? "Local snapshot" : "";
+  const selectedGitRemote = preferredGitRemote(visibleGitRepository?.remotes ?? [], gitRemote, visibleGitRepository?.upstream);
+  const gitFileSections = useMemo(() => {
+    const files = visibleGitStatus?.files ?? [];
+    return (["conflicts", "staged", "changes"] as const).map((id) => ({ id, files: files.filter((file) => gitFileGroup(file) === id) })).filter((section) => section.files.length);
+  }, [visibleGitStatus?.files]);
+  const visibleGitFileSections = useMemo(() => progressiveGroups(gitFileSections.map((section) => ({ id: section.id, items: section.files })), gitFileRowLimit), [gitFileRowLimit, gitFileSections]);
+  const visibleGitFileCount = visibleGitFileSections.reduce((total, section) => total + section.items.length, 0);
+  const gitStagedPaths = useMemo(() => visibleGitStatus?.files.filter((file) => file.staged).map((file) => file.path) ?? [], [visibleGitStatus?.files]);
+  const gitUnstagedPaths = useMemo(() => visibleGitStatus?.files.filter((file) => file.unstaged).map((file) => file.path) ?? [], [visibleGitStatus?.files]);
+  const renderedGitDiff = useMemo(() => gitDiff ? boundedDiffPreview(gitDiff.diff || "No textual diff available.") : undefined, [gitDiff]);
+  const gitDetailOpen = Boolean(selectedFile || gitDiff || gitDetailLoading);
+  const normalizedGitBranchQuery = gitBranchQuery.trim().toLowerCase();
+  const localGitBranchScope = normalizedGitBranchQuery;
+  const remoteGitBranchScope = `${selectedGitRemote}\u0000${normalizedGitBranchQuery}`;
+  const filteredLocalBranches = (visibleGitRepository?.localBranches ?? []).filter((branch) => !normalizedGitBranchQuery || `${branch.name} ${branch.upstream ?? ""}`.toLowerCase().includes(normalizedGitBranchQuery));
+  const filteredRemoteBranches = (visibleGitRepository?.remoteBranches ?? []).filter((branch) => branch.remote === selectedGitRemote && (!normalizedGitBranchQuery || branch.fullName.toLowerCase().includes(normalizedGitBranchQuery)));
+  const visibleLocalBranchLimit = scopedProgressiveLimit(gitLocalBranchLimit, localGitBranchScope, gitBranchPageSize);
+  const visibleRemoteBranchLimit = scopedProgressiveLimit(gitRemoteBranchLimit, remoteGitBranchScope, gitBranchPageSize);
+  const visibleLocalBranches = progressiveRows(filteredLocalBranches, visibleLocalBranchLimit);
+  const visibleRemoteBranches = progressiveRows(filteredRemoteBranches, visibleRemoteBranchLimit);
+  const narrowLayout = viewportWidth <= responsiveSidebarBreakpoint;
+  const layoutConversationMinimum = responsiveConversationMinimum(viewportWidth);
+  const layoutSidebarWidth = effectiveSidebarWidth(preferences.sidebarCollapsed, preferences.sidebarWidth, viewportWidth, Boolean(railView), layoutConversationMinimum);
+  const sidebarToggle = sidebarToggleState(preferences.sidebarCollapsed, preferences.sidebarWidth, viewportWidth, narrowSidebarOpen, Boolean(railView));
+  const layoutSidebarCollapsed = sidebarToggle.collapsed;
+  const renderedRailWidth = effectiveRailWidth(preferences.railWidth, viewportWidth, layoutSidebarWidth, layoutConversationMinimum);
+  const railMaximumWidth = effectiveRailWidth(1_200, viewportWidth, layoutSidebarWidth, layoutConversationMinimum);
+  const railMinimumWidth = railMaximumWidth >= 260 ? 260 : 0;
+  const railRendered = Boolean(railView && renderedRailWidth >= 260);
+  const railResizable = railMaximumWidth > railMinimumWidth;
+  const previewPanelMode = renderedRailWidth >= 1_080 ? "Wide" : renderedRailWidth >= 760 ? "Desktop" : "Compact";
+  const terminalSplitAvailable = renderedRailWidth >= 560;
+  function toggleSidebar() {
+    if (narrowLayout) {
+      setNarrowSidebarOpen((current) => !current);
+      return;
+    }
+    if (!sidebarToggle.disabled) setPreferences((current) => ({ ...current, sidebarCollapsed: !current.sidebarCollapsed }));
+  }
+  const setDiagnostic = useCallback((message: string) => {
+    const presented = presentDiagnostic(message);
+    if (presented) setDiagnostics((current) => [...current, presented].slice(-50));
+  }, []);
+  const openExternalLink = useCallback(async (url: string) => {
+    try {
+      await openExternal(url);
+    } catch (error) {
+      setDiagnostic(`Could not open link: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [setDiagnostic]);
+  const revealLocalPath = useCallback(async (path: string) => {
+    try {
+      await revealPath(path);
+    } catch (error) {
+      setDiagnostic(`Could not reveal path: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [setDiagnostic]);
+  const openRuntimeLog = useCallback(async () => {
+    try {
+      const path = await invoke<string>("app_log_path");
+      await revealPath(path);
+    } catch (error) {
+      setDiagnostic(`Could not open runtime log: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [setDiagnostic]);
+  const jumpToLatest = useCallback(() => {
+    const target = timeline.current;
+    if (!target) return;
+    target.scrollTop = target.scrollHeight;
+    timelinePinned.current = true;
+    setShowJumpToLatest(false);
+  }, []);
+  const rememberWorkspace = useCallback((path: string) => {
+    if (!path) return;
+    setPreferences((current) => ({
+      ...current,
+      workspace: path,
+      projects: current.projects.some((project) => samePath(project, path)) ? current.projects : [path, ...current.projects].slice(0, 12),
+      hiddenProjects: current.hiddenProjects.filter((hidden) => !samePath(hidden, path)),
+    }));
+  }, []);
+
+  useEffect(() => { localStorage.setItem(preferenceKey, JSON.stringify(preferences)); }, [preferences]);
+  useEffect(() => {
+    const resize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
+  useEffect(() => {
+    if (!narrowLayout) setNarrowSidebarOpen(false);
+  }, [narrowLayout]);
+  useEffect(() => {
+    if (!narrowSidebarOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNarrowSidebarOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [narrowSidebarOpen]);
+
+  useEffect(() => {
+    const syncVisibility = () => { document.documentElement.dataset.visibility = document.visibilityState; };
+    syncVisibility();
+    document.addEventListener("visibilitychange", syncVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", syncVisibility);
+      delete document.documentElement.dataset.visibility;
+    };
+  }, []);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.theme = preferences.theme;
+    root.dataset.font = preferences.font;
+    root.dataset.accent = preferences.accent;
+    root.style.setProperty("--base-font-size", `${preferences.fontSize}px`);
+  }, [preferences.accent, preferences.font, preferences.fontSize, preferences.theme]);
+
+  useEffect(() => { void applyZoom(preferences.zoom); }, [preferences.zoom]);
+
+  useLayoutEffect(() => {
+    timelinePinned.current = true;
+    setVisibleTurnLimit(initialTurnWindow);
+    setShowJumpToLatest(false);
+    const frame = window.requestAnimationFrame(jumpToLatest);
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeThreadId, jumpToLatest]);
+
+  useLayoutEffect(() => {
+    if (!timelinePinned.current) return;
+    const frame = window.requestAnimationFrame(jumpToLatest);
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeThread?.queue.length, activeThread?.updatedAt, draftSending, jumpToLatest]);
+
+  useLayoutEffect(() => {
+    const scrollTarget = timeline.current;
+    if (!scrollTarget || typeof ResizeObserver === "undefined") return;
+    let frame: number | undefined;
+    const keepLatestVisible = () => {
+      if (!timelinePinned.current) return;
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined;
+        if (timelinePinned.current) jumpToLatest();
+      });
+    };
+    const observer = new ResizeObserver(keepLatestVisible);
+    observer.observe(scrollTarget);
+    if (conversationStage.current) observer.observe(conversationStage.current);
+    if (composer.current) observer.observe(composer.current);
+    return () => {
+      observer.disconnect();
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+    };
+  }, [activeThreadId, activeThread?.turns.length, bootstrapping, capabilityCenterOpen, jumpToLatest, showOnboarding]);
+
+  useEffect(() => { if (!updateBlocked) setUpdateNotice(undefined); }, [updateBlocked]);
+  useLayoutEffect(() => {
+    if (!openMenu) return;
+    const frame = window.requestAnimationFrame(() => {
+      menuBar.current?.querySelector<HTMLElement>(".app-menu.open [role=\"menuitem\"]:not([disabled])")?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [openMenu]);
+
+  useEffect(() => {
+    if (!openMenu) return;
+    const closeMenu = (event: PointerEvent) => {
+      if (!menuBar.current?.contains(event.target as Node)) setOpenMenu(undefined);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      const trigger = menuTriggers.current[openMenu];
+      setOpenMenu(undefined);
+      window.requestAnimationFrame(() => trigger?.focus());
+    };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [openMenu]);
+
+  useEffect(() => {
+    if (!itemMenu) return;
+    const close = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".item-menu-wrap, .item-menu-portal")) setItemMenu(undefined);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setItemMenu(undefined);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [itemMenu]);
+
+  useEffect(() => {
+    if (!composerMenuOpen) return;
+    const close = (event: PointerEvent) => {
+      if (!composerTools.current?.contains(event.target as Node)) setComposerMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setComposerMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [composerMenuOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSettingsOpen(false);
+        setSettingsQuery("");
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSearchOpen(false);
+        setThreadFilter("");
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      returnFocus?.focus();
+    };
+  }, [searchOpen]);
+
+  const checkForUpdates = useCallback(async (manual = false) => {
+    const checkId = ++updateCheckId.current;
+    let checkedUpdate: Update | null | undefined;
+    setUpdateStatus({ phase: "checking" });
+    try {
+      if (!isTauri()) return setUpdateStatus({ phase: "idle" });
+      const { getVersion } = await import("@tauri-apps/api/app");
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const currentVersion = await getVersion();
+      const update = checkedUpdate = await check({ timeout: 30_000 });
+      if (checkId !== updateCheckId.current) {
+        await update?.close();
+        return;
+      }
+      if (pendingUpdate.current && pendingUpdate.current !== update) await pendingUpdate.current.close();
+      if (checkId !== updateCheckId.current) {
+        await update?.close();
+        return;
+      }
+      pendingUpdate.current = update ?? undefined;
+      setUpdateStatus(update ? { phase: "available", version: update.version, currentVersion } : { phase: "current", version: currentVersion, currentVersion });
+    } catch (error) {
+      if (checkedUpdate && pendingUpdate.current !== checkedUpdate) await checkedUpdate.close().catch(() => undefined);
+      if (checkId === updateCheckId.current) setUpdateStatus(manual ? { phase: "error", message: error instanceof Error ? error.message : String(error) } : { phase: "idle" });
+    }
+  }, []);
+
+  useEffect(() => {
+    void checkForUpdates();
+    return () => { updateCheckId.current += 1; void pendingUpdate.current?.close(); };
+  }, [checkForUpdates]);
+
+  useEffect(() => {
+    if (!activeThread?.cwd || activeThread.kind === "chat") return;
+    setCwd(activeThread.cwd);
+    rememberWorkspace(activeThread.cwd);
+  }, [activeThread?.cwd, activeThread?.kind, rememberWorkspace]);
+
+  useEffect(() => {
+    if (activeThreadId && !threads.some((thread) => thread.threadId === activeThreadId)) setActiveThreadId(undefined);
+  }, [activeThreadId, threads]);
+
+  useEffect(() => {
+    setYoloConfirm((pending) => pending && !configTargetsMatch(pending.target, currentConfigTarget.current) ? undefined : pending);
+  }, [activeThread?.threadId, draftChat]);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      const conflicts = keybindingConflicts(preferences.keybindings);
+      const triggered = (action: KeybindingAction) => !conflicts.has(action) && matchesShortcut(event, preferences.keybindings[action]);
+      if (triggered("newChat")) {
+        event.preventDefault();
+        if (draftSendingRef.current) return;
+        if (kimiRuntimeAvailable && (navView === "chats" || cwd)) navView === "chats" ? createStandaloneChat() : createThread(cwd);
+      } else if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        void createAppWindow();
+      } else if (triggered("openFolder")) {
+        event.preventDefault();
+        if (draftSendingRef.current) return;
+        void chooseWorkspace();
+      } else if (triggered("toggleSidebar")) {
+        event.preventDefault();
+        toggleSidebar();
+      } else if (triggered("terminal")) {
+        event.preventDefault();
+        if (workspaceForView(navView, activeThread, draftChat, cwd)) toggleRail("terminal");
+      } else if (triggered("palette")) {
+        event.preventDefault();
+        setSearchOpen(true);
+      } else if (triggered("settings")) {
+        event.preventDefault();
+        setSettingsCategory("general");
+        setSettingsOpen(true);
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "w") {
+        event.preventDefault();
+        void runWindowAction("close");
+      } else if ((event.ctrlKey || event.metaKey) && event.key === "0") {
+        event.preventDefault();
+        setPreferences((current) => ({ ...current, zoom: 1 }));
+      } else if ((event.ctrlKey || event.metaKey) && (event.key === "+" || event.key === "=")) {
+        event.preventDefault();
+        setPreferences((current) => ({ ...current, zoom: clampZoom(current.zoom + .1) }));
+      } else if ((event.ctrlKey || event.metaKey) && event.key === "-") {
+        event.preventDefault();
+        setPreferences((current) => ({ ...current, zoom: clampZoom(current.zoom - .1) }));
+      }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [activeThread, cwd, draftChat, draftSending, kimiRuntimeAvailable, narrowLayout, navView, preferences.keybindings, sidebarToggle.disabled]);
+
+  const call = useCallback((method: string, params: Record<string, unknown> = {}) => supervisor.current?.request(method, params) ?? Promise.reject(new Error("Server is not connected")), []);
+  const callIdempotent = useCallback((method: "threads.create" | "threads.createSide" | "threads.sendTurn", params: Record<string, unknown>) => supervisor.current?.requestIdempotent(method, params) ?? Promise.reject(new RequestNotSentError("Server is not connected")), []);
+  const exportDiagnostics = useCallback(async () => {
+    try {
+      const result = await call("diagnostics.export") as { path: string };
+      setDiagnostic("Support bundle exported. It contains redacted runtime diagnostics, not prompts or credentials.");
+      await revealLocalPath(result.path);
+    } catch (error) {
+      setDiagnostic(`Could not export support bundle: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [call, revealLocalPath, setDiagnostic]);
+  const refreshProviders = useCallback(async () => {
+    const result = await call("providers.list") as { providers: ProviderState[]; instances?: ProviderInstance[] };
+    setProviders(filterKimiRuntimes(result.providers.map((provider) => ({ ...provider, id: normalizeProvider(provider.id ?? provider.provider), provider: normalizeProvider(provider.provider ?? provider.id) }))));
+    const nextInstances = filterKimiRuntimes(result.instances?.map((instance) => ({ ...instance, provider: normalizeProvider(instance.provider) })) ?? []);
+    setProviderInstances(nextInstances);
+    setPreferences((current) => current.providerInstances.kimi && !nextInstances.some((instance) => instance.id === current.providerInstances.kimi)
+      ? { ...current, providerInstances: withKimiInstance(current.providerInstances) }
+      : current);
+  }, [call]);
+  const refreshEnvironments = useCallback(async () => {
+    const result = await call("environments.list") as { environments: WslEnvironment[] };
+    setWslEnvironments(result.environments);
+  }, [call]);
+  const refreshRemote = useCallback(async () => {
+    try { setRemoteStatus(await call("remote.status") as RemoteStatus); }
+    catch (error) { setDiagnostic(`Could not inspect remote access: ${error instanceof Error ? error.message : String(error)}`); }
+  }, [call, setDiagnostic]);
+  const configureRemote = useCallback(async (config: RemoteConfig) => {
+    setRemoteBusy(true);
+    try {
+      setRemoteStatus(await call("remote.configure", config) as RemoteStatus);
+      setRemotePairing(undefined);
+    } catch (error) { setDiagnostic(`Remote access could not be configured: ${error instanceof Error ? error.message : String(error)}`); }
+    finally { setRemoteBusy(false); }
+  }, [call, setDiagnostic]);
+  const createRemotePairing = useCallback(async () => {
+    setRemoteBusy(true);
+    try {
+      const result = await call("remote.createPairing") as RemotePairing & { status: RemoteStatus };
+      setRemotePairing({ code: result.code, expiresAt: result.expiresAt });
+      setRemoteStatus(result.status);
+    } catch (error) { setDiagnostic(`Could not create a pairing code: ${error instanceof Error ? error.message : String(error)}`); }
+    finally { setRemoteBusy(false); }
+  }, [call, setDiagnostic]);
+  const revokeRemoteDevice = useCallback(async (deviceId: string) => {
+    setRemoteBusy(true);
+    try { setRemoteStatus(await call("remote.revokeDevice", { deviceId }) as RemoteStatus); }
+    catch (error) { setDiagnostic(`Could not revoke the remote device: ${error instanceof Error ? error.message : String(error)}`); }
+    finally { setRemoteBusy(false); }
+  }, [call, setDiagnostic]);
+  const refreshSchedules = useCallback(async () => {
+    try { setSchedules((await call("schedules.list") as { schedules: Schedule[] }).schedules); }
+    catch (error) { setDiagnostic(`Could not load schedules: ${error instanceof Error ? error.message : String(error)}`); }
+  }, [call, setDiagnostic]);
+  const createSchedule = useCallback(async (input: { name: string; text: string; recurrence: Schedule["recurrence"]; nextRunAt: string }) => {
+    if (!activeThread || activeThread.provider !== "kimi") throw new Error("Open a Kimi chat before scheduling work");
+    setSchedulesBusy(true);
+    try {
+      await call("schedules.create", { ...input, threadId: activeThread.threadId });
+      await refreshSchedules();
+    } finally { setSchedulesBusy(false); }
+  }, [activeThread, call, refreshSchedules]);
+  const updateSchedule = useCallback(async (id: string, patch: Partial<Pick<Schedule, "enabled" | "name" | "text" | "recurrence" | "nextRunAt">>) => {
+    if (patch.enabled && schedules.find((schedule) => schedule.id === id)?.provider !== "kimi") throw new Error("Historical provider schedules cannot be resumed");
+    setSchedulesBusy(true);
+    try { await call("schedules.update", { id, ...patch }); await refreshSchedules(); }
+    finally { setSchedulesBusy(false); }
+  }, [call, refreshSchedules, schedules]);
+  const deleteSchedule = useCallback(async (id: string) => {
+    setSchedulesBusy(true);
+    try { await call("schedules.delete", { id }); await refreshSchedules(); }
+    finally { setSchedulesBusy(false); }
+  }, [call, refreshSchedules]);
+  const runSchedule = useCallback(async (id: string) => {
+    if (schedules.find((schedule) => schedule.id === id)?.provider !== "kimi") throw new Error("Historical provider schedules cannot be run");
+    setSchedulesBusy(true);
+    try { await call("schedules.run", { id }); await refreshSchedules(); }
+    finally { setSchedulesBusy(false); }
+  }, [call, refreshSchedules, schedules]);
+  const exportSessions = useCallback(async (threadIds?: string[]) => {
+    try {
+      const result = await call("threads.export", threadIds ? { threadIds } : {}) as { path: string; threadCount: number };
+      setDiagnostic(`Exported ${result.threadCount} private chat${result.threadCount === 1 ? "" : "s"}. Review the archive before sharing.`);
+      await revealLocalPath(result.path);
+    } catch (error) { setDiagnostic(`Could not export chats: ${error instanceof Error ? error.message : String(error)}`); }
+  }, [call, revealLocalPath, setDiagnostic]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsCategory !== "environments") return;
+    void refreshEnvironments().catch((error) => setDiagnostic(`Could not inspect WSL environments: ${error instanceof Error ? error.message : String(error)}`));
+  }, [refreshEnvironments, setDiagnostic, settingsCategory, settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsCategory !== "remote") return;
+    void refreshRemote();
+  }, [refreshRemote, settingsCategory, settingsOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsCategory !== "automations") return;
+    void refreshSchedules();
+  }, [refreshSchedules, settingsCategory, settingsOpen]);
+
+  useEffect(() => {
+    if (connection === "connected") void refreshSchedules();
+  }, [connection, refreshSchedules]);
+  const recoverLocalServer = useCallback(async (force = false) => {
+    if (serverRestarting.current) return;
+    serverRestarting.current = true;
+    const hasClient = Boolean(supervisor.current);
+    try {
+      const restarted = await invoke<boolean>("recover_server", { force });
+      if (restarted && hasClient) {
+        supervisor.current?.retry();
+        setStartupDelayed(false);
+      }
+    } catch (error) {
+      setDiagnostic(`Local runtime recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (!hasClient) {
+        setServerLookupError(undefined);
+        setServerLookupAttempt((current) => current + 1);
+      }
+      serverRestarting.current = false;
+    }
+  }, [setDiagnostic]);
+  const currentWorkspaceCwd = useRef<string | undefined>(workspaceCwd);
+  currentWorkspaceCwd.current = workspaceCwd;
+  const currentGitStatusCwd = useRef<string | undefined>(gitStatusCwd);
+  currentGitStatusCwd.current = gitStatusCwd;
+  const capabilityCwd = activeThread
+    ? activeThread.kind === "project" ? activeThread.cwd : undefined
+    : draftChat
+      ? draftChat.kind === "project" ? draftChat.cwd : undefined
+      : navView === "projects" ? cwd : undefined;
+  const capabilityTarget = { ...(capabilityCwd ? { cwd: capabilityCwd } : {}), ...(instanceId ? { instanceId } : {}) };
+  currentCapabilityTarget.current = capabilityTarget;
+  const capabilities = capabilitySnapshot && capabilityTargetMatches(capabilitySnapshot, capabilityTarget) ? capabilitySnapshot.data : undefined;
+  const workspaceTerminalTabs = workspaceCwd ? terminalTabs.filter((tab) => samePath(tab.cwd, workspaceCwd)) : [];
+  const activeTerminalTab = workspaceTerminalTabs.find((tab) => tab.tabId === activeTerminalTabId) ?? workspaceTerminalTabs[0];
+  const splitTerminalTab = workspaceTerminalTabs.find((tab) => tab.tabId === splitTerminalTabId && tab.tabId !== activeTerminalTab?.tabId);
+  const visibleTerminalTabs = [activeTerminalTab, splitTerminalTab].filter((tab): tab is TerminalTab => Boolean(tab));
+  const visibleTerminalStartRevision = visibleTerminalTabs.map(({ tabId, cwd, session, starting, startError }) => `${tabId}\0${cwd}\0${session?.sessionId ?? ""}\0${starting}\0${startError ?? ""}`).join("\x01");
+  const gitMutationsBlocked = gitBusy || workspaceHasBlockingWork(threads, workspaceCwd);
+  const terminalLayoutRevision = terminalTabs.map(({ tabId, cwd, name }) => `${tabId}\0${cwd}\0${name}`).join("\x01");
+
+  useEffect(() => {
+    if (activeThread?.kind === "chat" && railView && railView !== "agents") setRailView("agents");
+  }, [activeThread?.kind, railView]);
+
+  useEffect(() => {
+    setGitStatus(undefined);
+    setGitRepository(undefined);
+    setGitStatusCwd(undefined);
+    setGitDiff(undefined);
+    setSelectedFile(undefined);
+    setGitDetailLoading(undefined);
+    gitDetailRequest.current += 1;
+    gitRefreshRequest.current += 1;
+    checkpointReviewRequest.current += 1;
+    setGitError(undefined);
+    setGitRemote("");
+    setGitBranchQuery("");
+    setGitBranchAction(undefined);
+    gitBranchActionTrigger.current = undefined;
+    setGitFileRowLimit(gitChangedFilePageSize);
+    setGitLocalBranchLimit({ scope: "", limit: gitBranchPageSize });
+    setGitRemoteBranchLimit({ scope: "", limit: gitBranchPageSize });
+    terminalGitMutationSessions.current.clear();
+    gitRefreshPending.current = false;
+    gitRefreshTargetCwd.current = undefined;
+    if (gitRefreshTimer.current !== undefined) {
+      window.clearTimeout(gitRefreshTimer.current);
+      gitRefreshTimer.current = undefined;
+    }
+    setCheckpointReview(undefined);
+    setReviewComments({});
+    setPendingReviewRevert(undefined);
+    setCommitMessage("");
+    setBranchDraft("");
+    setPublishName("");
+    setPullRequest({ title: "", body: "", draft: true });
+    setCloneUrl("");
+    setGitRefreshBusy(false);
+    setGitMutationBusy(false);
+    setGitReviewBusy(false);
+    setGitLoadState("idle");
+    setGitLoadCwd(undefined);
+  }, [workspaceCwd]);
+
+  useEffect(() => {
+    setGitLocalBranchLimit({ scope: localGitBranchScope, limit: gitBranchPageSize });
+    setGitRemoteBranchLimit({ scope: remoteGitBranchScope, limit: gitBranchPageSize });
+    setGitBranchAction(undefined);
+    gitBranchActionTrigger.current = undefined;
+  }, [localGitBranchScope, remoteGitBranchScope]);
+
+  useEffect(() => {
+    checkpointReviewRequest.current += 1;
+    setCheckpointReview(undefined);
+    setReviewComments({});
+    setPendingReviewRevert(undefined);
+  }, [activeThreadId]);
+
+  useEffect(() => {
+    if (connection !== "connected" || !workspaceCwd) {
+      setProjectScripts([]);
+      return;
+    }
+    let disposed = false;
+    void call("files.read", { cwd: workspaceCwd, path: "package.json" })
+      .then((result) => { if (!disposed) setProjectScripts(parseProjectScripts((result as { content: string }).content)); })
+      .catch(() => { if (!disposed) setProjectScripts([]); });
+    return () => { disposed = true; };
+  }, [call, connection, workspaceCwd]);
+
+  const refreshQuota = useCallback(async () => {
+    const key = instanceId ?? "";
+    if (quotaRefreshInFlight.current?.key === key) return;
+    const request = { key, id: ++quotaRefreshRequestId.current };
+    quotaRefreshInFlight.current = request;
+    setQuotaLoading(true);
+    setQuotaError(undefined);
+    try {
+      const result = await call("usage.quota", instanceId ? { instanceId } : {}) as KimiQuota;
+      if (quotaRefreshInFlight.current === request) setQuota(result);
+    } catch (error) {
+      if (quotaRefreshInFlight.current === request) setQuotaError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (quotaRefreshInFlight.current === request) {
+        quotaRefreshInFlight.current = undefined;
+        setQuotaLoading(false);
+      }
+    }
+  }, [call, instanceId]);
+
+  useEffect(() => {
+    setQuota(undefined);
+    setQuotaError(undefined);
+    if (connection === "connected" && auth?.authenticated) void refreshQuota();
+  }, [auth?.authenticated, connection, instanceId, refreshQuota]);
+
+  const refreshCapabilities = useCallback(async (requestedTarget?: CapabilityTarget): Promise<boolean> => {
+    const target = requestedTarget ?? { ...(capabilityCwd ? { cwd: capabilityCwd } : {}), ...(instanceId ? { instanceId } : {}) };
+    if (requestedTarget && !capabilityTargetMatches(target, currentCapabilityTarget.current)) return false;
+    const requestId = ++capabilityRefreshRequest.current;
+    setCapabilitiesLoading(true);
+    try {
+      const data = await call("capabilities.list", { provider: "kimi", ...target }) as KimiCapabilities;
+      if (!capabilityRequestMatches(requestId, capabilityRefreshRequest.current, target, currentCapabilityTarget.current)) return false;
+      setCapabilitySnapshot({ ...target, data });
+      return true;
+    } catch (error) {
+      if (capabilityRequestMatches(requestId, capabilityRefreshRequest.current, target, currentCapabilityTarget.current)) {
+        setDiagnostic(error instanceof Error ? error.message : String(error));
+      }
+      return false;
+    } finally {
+      if (capabilityRequestMatches(requestId, capabilityRefreshRequest.current, target, currentCapabilityTarget.current)) setCapabilitiesLoading(false);
+    }
+  }, [call, capabilityCwd, instanceId, setDiagnostic]);
+
+  useEffect(() => {
+    if (connection === "connected") void refreshCapabilities();
+  }, [connection, refreshCapabilities]);
+
+  useEffect(() => {
+    if (connection === "connected") void refreshProviders().catch((error: Error) => setDiagnostic(error.message));
+  }, [connection, refreshProviders, setDiagnostic]);
+
+  const refreshGit = useCallback(async () => {
+    if (!workspaceCwd) return;
+    const requestedCwd = workspaceCwd;
+    const requestId = ++gitRefreshRequest.current;
+    const refreshing = workspaceRequestMatches(requestedCwd, currentGitStatusCwd.current);
+    setGitRefreshBusy(true);
+    setGitLoadCwd(requestedCwd);
+    if (!refreshing) setGitLoadState("loading");
+    setGitError(undefined);
+    try {
+      const [status, repository] = await Promise.all([
+        call("git.status", { cwd: requestedCwd }) as Promise<GitStatus>,
+        call("git.repository", { cwd: requestedCwd }) as Promise<GitRepository>,
+      ]);
+      if (!gitDetailRequestMatches(requestId, gitRefreshRequest.current, requestedCwd, currentWorkspaceCwd.current)) return;
+      setGitStatus(status);
+      setGitRepository(repository);
+      setGitStatusCwd(requestedCwd);
+      setGitLoadState("ready");
+    } catch (error) {
+      if (!gitDetailRequestMatches(requestId, gitRefreshRequest.current, requestedCwd, currentWorkspaceCwd.current)) return;
+      const presented = classifyGitError(error);
+      if (presented.kind === "not-repository") {
+        setGitStatus(undefined);
+        setGitRepository(undefined);
+        setGitStatusCwd(undefined);
+        setGitLoadState("not-repository");
+      } else {
+        setGitError(presented);
+        setGitLoadState("error");
+      }
+    } finally {
+      if (gitDetailRequestMatches(requestId, gitRefreshRequest.current, requestedCwd, currentWorkspaceCwd.current)) setGitRefreshBusy(false);
+    }
+  }, [call, workspaceCwd]);
+
+  gitRefreshCallback.current = refreshGit;
+  const scheduleGitRefresh = useCallback((delay = 180, targetCwd?: string) => {
+    gitRefreshTargetCwd.current = targetCwd ?? currentWorkspaceCwd.current;
+    if (gitRefreshTimer.current !== undefined) window.clearTimeout(gitRefreshTimer.current);
+    gitRefreshTimer.current = window.setTimeout(() => {
+      gitRefreshTimer.current = undefined;
+      const requestedCwd = gitRefreshTargetCwd.current;
+      gitRefreshTargetCwd.current = undefined;
+      if (currentConnection.current !== "connected" || !currentWorkspaceCwd.current) return;
+      if (requestedCwd && !workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      if (currentGitBusy.current) {
+        gitRefreshPending.current = true;
+        return;
+      }
+      void gitRefreshCallback.current();
+    }, Math.max(0, delay));
+  }, []);
+  gitRefreshScheduler.current = scheduleGitRefresh;
+
+  useEffect(() => () => {
+    if (gitRefreshTimer.current !== undefined) window.clearTimeout(gitRefreshTimer.current);
+  }, []);
+
+  useEffect(() => {
+    if (gitBusy || !gitRefreshPending.current) return;
+    gitRefreshPending.current = false;
+    scheduleGitRefresh(120);
+  }, [gitBusy, scheduleGitRefresh]);
+
+  useEffect(() => {
+    if (railView !== "changes" && railView !== "git") return;
+    const refreshVisibleSnapshot = () => {
+      if (document.visibilityState === "visible") scheduleGitRefresh(120, workspaceCwd);
+    };
+    window.addEventListener("focus", refreshVisibleSnapshot);
+    document.addEventListener("visibilitychange", refreshVisibleSnapshot);
+    return () => {
+      window.removeEventListener("focus", refreshVisibleSnapshot);
+      document.removeEventListener("visibilitychange", refreshVisibleSnapshot);
+    };
+  }, [railView, scheduleGitRefresh, workspaceCwd]);
+
+  useEffect(() => {
+    if (railView === "changes" || railView === "git") void refreshGit();
+  }, [railView, refreshGit]);
+
+  useEffect(() => {
+    const previous = previousGitTurn.current;
+    previousGitTurn.current = { threadId: activeThread?.threadId, busy: activeThreadBusy };
+    if ((railView === "changes" || railView === "git") && previous.threadId === activeThread?.threadId && previous.busy && !activeThreadBusy) void refreshGit();
+  }, [activeThread?.threadId, activeThreadBusy, railView, refreshGit]);
+
+  useEffect(() => {
+    if (connection !== "connected" || !auth?.authenticated) return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshQuota();
+    };
+    const interval = window.setInterval(() => void refreshQuota(), 60_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [auth?.authenticated, connection, refreshQuota]);
+
+  useEffect(() => {
+    if (connection !== "connected") {
+      setTerminalTabs((current) => current.map((tab) => ({ ...tab, session: undefined, starting: false })));
+    }
+  }, [connection]);
+
+  useEffect(() => { saveTerminalLayout(terminalTabs); }, [terminalLayoutRevision]);
+
+  useEffect(() => {
+    terminalEnd.current?.scrollIntoView({ block: "end" });
+  }, [activeTerminalTab?.entries]);
+
+  useEffect(() => {
+    if (railView !== "terminal" || connection !== "connected" || !workspaceCwd) return;
+    if (!workspaceTerminalTabs.length) {
+      const tab = createTerminalTab(workspaceCwd, 1);
+      setTerminalTabs((current) => [...current, tab].slice(-12));
+      setActiveTerminalTabId(tab.tabId);
+    } else if (!activeTerminalTab) {
+      setActiveTerminalTabId(workspaceTerminalTabs[0]!.tabId);
+    }
+  }, [activeTerminalTab, connection, railView, workspaceCwd, workspaceTerminalTabs.length]);
+
+  useEffect(() => {
+    if (railView !== "terminal" || connection !== "connected") return;
+    for (const tab of visibleTerminalTabs) {
+      if (!claimTerminalStart(terminalStarts.current, tab.tabId, tab)) continue;
+      updateTerminalTab(tab.tabId, (current) => ({ ...current, starting: true, startError: undefined }));
+      void call("terminal.start", { cwd: tab.cwd }).then((session) => {
+        if (!terminalTabsRef.current.some((current) => current.tabId === tab.tabId)) {
+          void call("terminal.stop", { sessionId: (session as TerminalSessionInfo).sessionId }).catch(() => undefined);
+          return;
+        }
+        updateTerminalTab(tab.tabId, (current) => ({ ...current, session: session as TerminalSessionInfo, starting: false, entries: appendTerminalEntries(current.entries, [terminalEntry("system", `${(session as TerminalSessionInfo).shell} · ${(session as TerminalSessionInfo).cwd}\n`)]) }));
+      }).catch((error: Error) => {
+        updateTerminalTab(tab.tabId, (current) => ({ ...current, starting: false, startError: error.message, entries: appendTerminalEntries(current.entries, [terminalEntry("stderr", `${error.message}\n`)]) }));
+      }).finally(() => terminalStarts.current.delete(tab.tabId));
+    }
+  }, [call, connection, railView, visibleTerminalStartRevision]);
+
+  useEffect(() => {
+    if (!pendingTerminalCommand || !activeTerminalTab?.session) return;
+    const command = pendingTerminalCommand;
+    setPendingTerminalCommand(undefined);
+    updateTerminalTab(activeTerminalTab.tabId, (current) => ({ ...current, entries: appendTerminalEntries(current.entries, [terminalEntry("command", `› ${command}\n`)]) }));
+    setTerminalHistory((current) => [...current.filter((item) => item !== command), command].slice(-100));
+    if (updateTerminalGitMutationTracking(terminalGitMutationSessions.current, activeTerminalTab.session.sessionId, command)) {
+      gitRefreshScheduler.current(700, activeTerminalTab.cwd);
+    }
+    void call("terminal.write", { sessionId: activeTerminalTab.session.sessionId, command }).catch((error: Error) => {
+      updateTerminalTab(activeTerminalTab.tabId, (current) => ({ ...current, entries: appendTerminalEntries(current.entries, [terminalEntry("stderr", `${error.message}\n`)]) }));
+    });
+  }, [activeTerminalTab, call, pendingTerminalCommand]);
+
+  useEffect(() => {
+    let disposed = false;
+    let client: ConnectionSupervisor | undefined;
+    const domainEvents = createFrameBatcher<StoredEvent>((events) => {
+      publishThreads(applyEvents(threadsRef.current, events, turnProjectionCache.current));
+    });
+    flushDomainEvents.current = domainEvents.flush;
+    const terminalOutput = createTerminalOutputBatcher((events) => {
+      setTerminalTabs((current) => applyTerminalOutputBatch(current, events));
+    });
+    setServerLookupError(undefined);
+    setStartupDelayed(false);
+    void localServerUrl().then((url) => {
+      if (disposed) return;
+      client = new ConnectionSupervisor(url, setConnection, handleMessage);
+      supervisor.current = client;
+      client.start();
+    }).catch((error: unknown) => {
+      if (disposed) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setServerLookupError(message);
+      setStartupDelayed(true);
+      setConnection("error");
+    });
+    return () => {
+      disposed = true;
+      client?.close();
+      if (supervisor.current === client) supervisor.current = undefined;
+      if (automaticRestartTimer.current !== undefined) window.clearTimeout(automaticRestartTimer.current);
+      domainEvents.flush();
+      if (flushDomainEvents.current === domainEvents.flush) flushDomainEvents.current = () => undefined;
+      terminalOutput.flush();
+    };
+
+    function handleMessage(message: ServerMessage) {
+      if (message.channel === "server.welcome") {
+        const payload = message.payload as { defaultCwd?: string; threads?: Thread[] };
+        if (payload.defaultCwd) setCwd((value) => value || payload.defaultCwd!);
+        if (payload.threads) {
+          const listedThreads = payload.threads.map(normalizeThread);
+          const listedIds = new Set(listedThreads.map((thread) => thread.threadId));
+          for (const threadId of listedIds) locallyRecoveredThreads.current.delete(threadId);
+          const incoming = rebaseThreadListSnapshot(listedThreads, locallyRecoveredThreads.current.values());
+          threadMutationGeneration.current += 1;
+          replaceThreads(incoming);
+          setActiveThreadId((current) => current ?? (currentDraftChat.current ? undefined : preferredInitialThreadId(incoming)));
+        }
+      } else if (message.channel === "orchestration.domainEvent") {
+        const event = message.payload as StoredEvent;
+        threadMutationGeneration.current += 1;
+        if (event.type === "ThreadDeleted") locallyRecoveredThreads.current.delete(event.threadId);
+        domainEvents.push(event);
+        if (event.type === "ToolCallCreated" && isSubagentTool(event.payload.tool as Tool | undefined)) setRailView("agents");
+      } else if (message.channel === "thread.queueUpdated") {
+        const payload = message.payload as { threadId: string; queue: QueuedPrompt[] };
+        mutateThreads((current) => current.map((thread) => thread.threadId === payload.threadId ? { ...thread, queue: visibleQueuedPrompts(payload.queue) } : thread));
+      } else if (message.channel === "preview.command") {
+        applyAgentPreviewCommand(message.payload as DesktopPreviewCommand);
+      } else if (message.channel === "skill.installRequested") {
+        const dialog = skillInstallDialogFromRequest(message.payload);
+        if (dialog) setManageDialog(dialog);
+      } else if (message.channel === "server.diagnostics") {
+        setDiagnostic(String((message.payload as { message?: string }).message ?? "Runtime error"));
+      } else if (message.channel === "notifications.event") {
+        const notice = message.payload as { title?: string; message?: string };
+        const text = notice.message ?? notice.title ?? "Kimi Code task update";
+        setTaskNotice({ title: notice.title ?? "Task update", message: text });
+        if (String((message.payload as { type?: string }).type).startsWith("schedule.")) void refreshSchedules();
+        if (document.hidden && "Notification" in window && Notification.permission === "granted") new Notification(notice.title ?? "Kimi Code", { body: text });
+      } else if (message.channel === "auth.status") {
+        const status = message.payload as AuthState;
+        setAuth(status);
+        if (status.event?.message) setDiagnostic(status.event.message);
+        if (status.event?.type === "complete" && status.event.operation === "logout") {
+          setKimiRuntimeReady(false);
+          setQuota(undefined);
+          return;
+        }
+        if (status.authenticated && status.event?.type === "complete") {
+          void call("env.bootstrap").then((result) => {
+            const environment = result as { initialize?: unknown; runtimeError?: string };
+            setKimiRuntimeReady(Boolean(environment.initialize));
+            if (environment.runtimeError) setDiagnostic(`Agent runtime unavailable: ${environment.runtimeError}`);
+          }).catch((error: Error) => setDiagnostic(error.message));
+        }
+        void refreshProviders().catch(() => undefined);
+      } else if (message.channel === "terminal.output") {
+        const event = message.payload as TerminalEvent;
+        terminalOutput.push(event);
+        if (terminalGitMutationSessions.current.has(event.sessionId)) {
+          const targetCwd = terminalTabsRef.current.find((tab) => tab.session?.sessionId === event.sessionId)?.cwd;
+          if (event.type === "exit") terminalGitMutationSessions.current.delete(event.sessionId);
+          gitRefreshScheduler.current(event.type === "exit" ? 100 : 450, targetCwd);
+        }
+      }
+    }
+  }, [refreshProviders, refreshSchedules, serverLookupAttempt]);
+
+  useEffect(() => {
+    if (connection === "connected") {
+      if (automaticRestartTimer.current !== undefined) window.clearTimeout(automaticRestartTimer.current);
+      automaticRestartTimer.current = undefined;
+      setStartupDelayed(false);
+      return;
+    }
+    if (connection === "offline" && automaticRestartTimer.current !== undefined) {
+      window.clearTimeout(automaticRestartTimer.current);
+      automaticRestartTimer.current = undefined;
+    }
+    if (!bootstrapping) return;
+    const timer = window.setTimeout(() => setStartupDelayed(true), 12_000);
+    return () => window.clearTimeout(timer);
+  }, [bootstrapping, connection]);
+
+  useEffect(() => {
+    if (!shouldScheduleRuntimeRecovery(connection, automaticRestartTimer.current !== undefined)) return;
+    automaticRestartTimer.current = window.setTimeout(() => {
+      automaticRestartTimer.current = undefined;
+      void recoverLocalServer(false);
+    }, 12_000);
+  }, [connection, recoverLocalServer]);
+
+  useEffect(() => {
+    if (connection !== "connected") return;
+    let disposed = false;
+    const requestId = ++threadListRequestId.current;
+    setBootstrapping(true);
+    void (async () => {
+      try {
+        const environment = await call("env.bootstrap") as { initialize?: unknown; auth: AuthState; runtimeError?: string };
+        if (disposed || requestId !== threadListRequestId.current) return;
+        setAuth(environment.auth);
+        setKimiRuntimeReady(Boolean(environment.initialize));
+        if (environment.runtimeError) setDiagnostic(`Agent runtime unavailable: ${environment.runtimeError}`);
+        if (environment.auth.authenticated) void refreshQuota();
+
+        let listed: { threads: Thread[]; runtimeSessions: RuntimeSession[] } | undefined;
+        for (let attempt = 0; attempt < 3 && !listed; attempt += 1) {
+          flushDomainEvents.current();
+          const generation = threadMutationGeneration.current;
+          const result = await call("threads.list", { provider: "kimi", ...(preferences.providerInstances.kimi ? { instanceId: preferences.providerInstances.kimi } : {}) }) as { threads: Thread[]; runtimeSessions: RuntimeSession[] };
+          if (disposed || requestId !== threadListRequestId.current) return;
+          if (threadListSnapshotIsStable(generation, threadMutationGeneration.current)) listed = result;
+        }
+        if (!listed) return;
+
+        const listedThreads = listed.threads.map(normalizeThread);
+        const listedIds = new Set(listedThreads.map((thread) => thread.threadId));
+        for (const threadId of listedIds) locallyRecoveredThreads.current.delete(threadId);
+        const incoming = rebaseThreadListSnapshot(listedThreads, locallyRecoveredThreads.current.values());
+        replaceThreads(incoming);
+        setRuntimeSessions(listed.runtimeSessions);
+        setActiveThreadId((current) => current ?? (currentDraftChat.current ? undefined : preferredInitialThreadId(incoming)));
+      } catch (error) {
+        if (!disposed && requestId === threadListRequestId.current) setDiagnostic(error instanceof Error ? error.message : String(error));
+      } finally {
+        if (!disposed && requestId === threadListRequestId.current) setBootstrapping(false);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [call, connection, preferences.providerInstances.kimi, refreshQuota]);
+
+  useEffect(() => {
+    if (connection !== "connected" || bootstrapping || kimiRuntimeAvailable || !auth?.authenticated) return;
+    const timer = window.setInterval(() => {
+      void call("env.bootstrap").then((result) => {
+        if ((result as { initialize?: unknown }).initialize) setKimiRuntimeReady(true);
+      }).catch(() => undefined);
+    }, 12_000);
+    return () => window.clearInterval(timer);
+  }, [auth?.authenticated, bootstrapping, call, connection, kimiRuntimeAvailable]);
+
+  useEffect(() => {
+    if (fileSuggestionQuery === undefined || !composerProjectCwd) {
+      setFileSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void call("files.tree", { cwd: composerProjectCwd, query: fileSuggestionQuery })
+        .then((result) => { if (!cancelled) setFileSuggestions((result as { files: string[] }).files.slice(0, 8)); })
+        .catch(() => { if (!cancelled) setFileSuggestions([]); });
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [call, composerProjectCwd, fileSuggestionQuery]);
+
+  useEffect(() => {
+    setConfigDefaults([]);
+    setDraftConfig({});
+    setConfigDefaultsState({ target: configDefaultsTarget, settled: false });
+  }, [configDefaultsTarget]);
+
+  useEffect(() => {
+    if (!runtimeReady || configDefaultsState.target !== configDefaultsTarget || configDefaultsState.settled) return;
+    let cancelled = false;
+    void call("runtime.configDefaults", { provider: "kimi", ...(instanceId ? { instanceId } : {}) }).then((result) => {
+      if (cancelled) return;
+      const options = (result as { configOptions?: unknown }).configOptions;
+      const defaults = Array.isArray(options) ? options as ConfigOption[] : [];
+      setConfigDefaults(defaults);
+      setDraftConfig(draftConfigOverrides(defaults, preferences.composerConfig));
+      setConfigDefaultsState((current) => current.target === configDefaultsTarget ? { ...current, settled: true } : current);
+    }).catch((error) => {
+      if (cancelled) return;
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+      setConfigDefaults([]);
+      setDraftConfig({});
+      setConfigDefaultsState((current) => current.target === configDefaultsTarget ? { ...current, settled: true } : current);
+    });
+    return () => { cancelled = true; };
+  }, [call, configDefaultsState, configDefaultsTarget, instanceId, preferences.composerConfig, runtimeReady]);
+
+  useEffect(() => {
+    if (!draftChat || activeThread) return;
+    setDraftConfig(draftConfigOverrides(configDefaults, preferences.composerConfig));
+  }, [activeThread, configDefaults, draftChat, preferences.composerConfig]);
+
+  useEffect(() => {
+    if (!runtimeReady || !activeThread || activeThread.archivedAt || isThreadBusy(activeThread)) return;
+    let cancelled = false;
+    void call("threads.resume", { threadId: activeThread.threadId, sessionId: activeThread.sessionId, cwd: activeThread.cwd, provider: "kimi", ...(activeThread.instanceId ? { instanceId: activeThread.instanceId } : {}), replay: false })
+      .catch((error: Error) => { if (!cancelled) setDiagnostic(error.message); });
+    return () => { cancelled = true; };
+  }, [activeThread?.archivedAt, activeThread?.cwd, activeThread?.instanceId, activeThread?.lifecycle.phase, activeThread?.running, activeThread?.sessionId, activeThread?.threadId, call, runtimeReady]);
+
+  function createThread(targetCwd = cwd, isolate = false) {
+    if (!targetCwd || draftSendingRef.current) return;
+    const nextDraft = { kind: "project" as const, cwd: targetCwd, ...(isolate ? { isolate: true } : {}) };
+    const draft = recoverableDrafts.current.get(draftRecoveryKey(nextDraft)) ?? nextDraft;
+    switchComposerTarget(draft);
+    setCwd(targetCwd);
+    rememberWorkspace(targetCwd);
+    setNavView("projects");
+    setCapabilityCenterOpen(false);
+    setNarrowSidebarOpen(false);
+    setActiveThreadId(undefined);
+    setDraftChat(draft);
+    setDiagnostics([]);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function selectKimiRuntime(selectedInstanceId?: string) {
+    if (activeThread || selectedInstanceId === preferences.providerInstances.kimi) return;
+    setPreferences((current) => ({ ...current, provider: "kimi", providerInstances: withKimiInstance(current.providerInstances, selectedInstanceId) }));
+    setDiagnostics([]);
+  }
+
+  function clearProjectPanels() {
+    setRailView(railForStandaloneChat);
+    setSelectedFile(undefined);
+    setGitStatus(undefined);
+    setGitRepository(undefined);
+    setGitStatusCwd(undefined);
+    setGitDiff(undefined);
+    setGitDetailLoading(undefined);
+    gitDetailRequest.current += 1;
+    gitRefreshRequest.current += 1;
+    checkpointReviewRequest.current += 1;
+    setGitError(undefined);
+    setGitRemote("");
+    setGitBranchQuery("");
+    setGitBranchAction(undefined);
+    gitBranchActionTrigger.current = undefined;
+    setGitFileRowLimit(gitChangedFilePageSize);
+    setGitLocalBranchLimit({ scope: "", limit: gitBranchPageSize });
+    setGitRemoteBranchLimit({ scope: "", limit: gitBranchPageSize });
+    setCommitMessage("");
+    setGitRefreshBusy(false);
+    setGitMutationBusy(false);
+    setGitReviewBusy(false);
+    setGitLoadState("idle");
+    setGitLoadCwd(undefined);
+    setBranchDraft("");
+    setPublishName("");
+    setPullRequest({ title: "", body: "", draft: true });
+    setCloneUrl("");
+    setPreviewUrl(undefined);
+    setPreviewDraft("http://localhost:3000");
+    setActiveTerminalTabId(undefined);
+    setSplitTerminalTabId(undefined);
+  }
+
+  function createStandaloneChat() {
+    if (draftSendingRef.current) return;
+    const nextDraft = { kind: "chat" as const };
+    const draft = recoverableDrafts.current.get(draftRecoveryKey(nextDraft)) ?? nextDraft;
+    switchComposerTarget(draft);
+    clearProjectPanels();
+    setNavView("chats");
+    setCapabilityCenterOpen(false);
+    setNarrowSidebarOpen(false);
+    setActiveThreadId(undefined);
+    setDraftChat(draft);
+    setDiagnostics([]);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function changeNavView(next: "projects" | "chats") {
+    if (draftSendingRef.current) return;
+    if (next === "chats") clearProjectPanels();
+    setCapabilityCenterOpen(false);
+    setNavView(next);
+    if (activeThread && !composerCanSubmit(next, activeThread.kind, false)) {
+      switchComposerTarget(undefined);
+      setActiveThreadId(undefined);
+    }
+    if (draftChat && !composerCanSubmit(next, draftChat.kind, false)) {
+      switchComposerTarget(undefined);
+      setDraftChat(undefined);
+    }
+  }
+
+  function changeThreadMenu(threadId: string, forceOpen = false) {
+    setItemMenu((current) => forceOpen ? { kind: "thread", id: threadId } : current?.kind === "thread" && current.id === threadId ? undefined : { kind: "thread", id: threadId });
+  }
+
+  function changeRuntimeSessionMenu(sessionId: string, forceOpen = false) {
+    setItemMenu((current) => forceOpen ? { kind: "session", id: sessionId } : current?.kind === "session" && current.id === sessionId ? undefined : { kind: "session", id: sessionId });
+  }
+
+  function useStarterPrompt(text: string) {
+    if (!activeThread && !draftChat) {
+      if (navView === "chats") createStandaloneChat();
+      else if (cwd) createThread(cwd);
+      else return;
+    }
+    editPrompt(text);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function selectThread(thread: Thread) {
+    if (draftSendingRef.current) return;
+    switchComposerTarget(thread.threadId);
+    if (thread.kind === "chat") clearProjectPanels();
+    else {
+      const projectCwd = thread.worktree?.sourceCwd ?? thread.cwd;
+      setCwd(projectCwd);
+      rememberWorkspace(projectCwd);
+    }
+    setCapabilityCenterOpen(false);
+    setNarrowSidebarOpen(false);
+    setDraftChat(undefined);
+    setActiveThreadId(thread.threadId);
+    if (thread.provider === "kimi") setPreferences((current) => ({ ...current, provider: "kimi", providerInstances: withKimiInstance(current.providerInstances, thread.instanceId) }));
+    setNavView(thread.kind === "chat" ? "chats" : "projects");
+  }
+
+  async function resumeSession(session: RuntimeSession): Promise<Thread | undefined> {
+    const navigationGeneration = composerTargetGeneration.current;
+    try {
+      const selectedInstanceId = preferences.providerInstances.kimi;
+      const result = await call("threads.resume", { threadId: session.sessionId, sessionId: session.sessionId, cwd: session.cwd, provider: "kimi", ...(selectedInstanceId ? { instanceId: selectedInstanceId } : {}), replay: false }) as { thread: Thread };
+      const thread = normalizeThread(result.thread);
+      rememberLocallyRecoveredThread(locallyRecoveredThreads.current, thread);
+      mutateThreads((current) => current.some((item) => item.threadId === thread.threadId) ? current : [thread, ...current]);
+      if (composerTargetRequestMatches(navigationGeneration, composerTargetGeneration.current)) selectThread(thread);
+      return thread;
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+      return undefined;
+    }
+  }
+
+  async function renameRuntimeSession(session: RuntimeSession) {
+    const thread = await resumeSession(session);
+    if (thread) setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: session.title ?? thread.title });
+  }
+
+  async function send(event: FormEvent) {
+    event.preventDefault();
+    const requestedMode = submitMode.current;
+    submitMode.current = "queue";
+    const text = prompt.trim();
+    if (!runtimeReady || !draftConfigSettled || !text || attachmentsLoading || !composerCanSubmit(navView, activeThread?.kind ?? draftChat?.kind, configUpdatesInFlight.current > 0) || draftSendingRef.current || updateMutationsBlocked) return;
+    const harness = parseHarnessCommand(text);
+    if (harness?.name === "goal" && !harness.objective) {
+      editPrompt("/goal ");
+      setDiagnostic("Add the objective after /goal, or use /goal clear.");
+      return;
+    }
+    if (harness?.name === "side" && !activeThread) {
+      setDiagnostic("Open a chat before creating a side chat.");
+      return;
+    }
+    const mentions = [...text.matchAll(/@\{([^}]+)\}/g)].map((match) => match[1]!);
+    const mode = activeThreadBusy ? requestedMode : "queue";
+    const visibleRestored = visibleRestoredSubmissionId.current ? restoredTurnSubmissions.current.get(visibleRestoredSubmissionId.current) : undefined;
+    const restoredAtSend = activeThread
+      ? visibleRestored?.params.threadId === activeThread.threadId && restoredTurnDraftMatches(visibleRestored.params, text, images)
+        ? visibleRestored
+        : latestMatchingRestoredTurnSubmission(restoredTurnSubmissions.current, activeThread.threadId, text, images)
+      : undefined;
+    if (restoredAtSend) restoredTurnSubmissions.current.delete(restoredAtSend.params.submissionId);
+    if (visibleRestored) visibleRestoredSubmissionId.current = undefined;
+    const targetAtSend = activeThread?.threadId ?? draftChat!;
+    const targetGenerationAtSend = composerTargetGeneration.current;
+    const targetEditSequenceAtSend = composerTargetEditSequence(targetAtSend);
+    setComposerPrompt("");
+    setFileSuggestions([]);
+    setComposerMenuOpen(false);
+    const attachedImages = images;
+    let attemptedSubmission: TurnSubmissionReceipt | undefined;
+    let submittedThread: Thread | undefined;
+    let submittedThreadEditSequenceAtSend: number | undefined;
+    let submittedThreadConfigEditSequenceAtSend: number | undefined;
+    setComposerImages([]);
+    updateDraftSending(Boolean(draftChat));
+    try {
+      let thread = activeThread;
+      if (!thread) {
+        const createParams = {
+          ...(draftChat?.kind === "chat" ? { standalone: true } : { cwd: draftChat?.cwd }),
+          ...(draftChat?.isolate ? { isolate: true } : {}),
+          provider: "kimi",
+          ...(preferences.providerInstances.kimi ? { instanceId: preferences.providerInstances.kimi } : {}),
+          ...(Object.keys(draftConfig).length ? { config: draftConfig } : {}),
+        };
+        const draft = draftChat!;
+        const fingerprint = threadCreationFingerprint(createParams);
+        const creations = restoredThreadCreations.current.get(draft) ?? new Map<string, ThreadCreationReceipt>();
+        restoredThreadCreations.current.set(draft, creations);
+        const recoveryKey = draftRecoveryKey(draft);
+        const restoredCreation = creations.get(fingerprint);
+        if (!threadCreationSlotAvailable(creations, fingerprint)) throw new Error("Resolve one of this draft's ambiguous creation attempts before changing its runtime configuration again.");
+        const creation = threadCreationAttempt(createParams, restoredCreation);
+        creations.set(fingerprint, creation);
+        recoverableDrafts.current.set(recoveryKey, draft);
+        if (!saveDraftCreationRecovery(recoverableDrafts.current, restoredThreadCreations.current)) {
+          throw new RequestNotSentError("Thread creation was not sent because its recovery receipt could not be saved");
+        }
+        try {
+          const created = await callIdempotent("threads.create", creation.params);
+          thread = threadFromCreationResult(created);
+          creations.delete(fingerprint);
+          if (creations.size) recoverableDrafts.current.set(recoveryKey, draft);
+          else recoverableDrafts.current.delete(recoveryKey);
+          saveDraftCreationRecovery(recoverableDrafts.current, restoredThreadCreations.current);
+        } catch (error) {
+          const retained = threadCreationAfterFailure(error, creation, restoredCreation);
+          creations.delete(fingerprint);
+          if (retained) creations.set(fingerprint, retained);
+          if (creations.size) recoverableDrafts.current.set(recoveryKey, draft);
+          else recoverableDrafts.current.delete(recoveryKey);
+          saveDraftCreationRecovery(recoverableDrafts.current, restoredThreadCreations.current);
+          throw error;
+        }
+      }
+      submittedThread = thread;
+      submittedThreadEditSequenceAtSend = composerTargetEditSequence(thread.threadId);
+      submittedThreadConfigEditSequenceAtSend = threadConfigEditSequence(thread.threadId);
+      if (!activeThread) {
+        rememberLocallyRecoveredThread(locallyRecoveredThreads.current, thread);
+        mutateThreads((current) => current.some((item) => item.threadId === thread.threadId) ? current : [thread, ...current]);
+        if (composerTargetGeneration.current === targetGenerationAtSend && currentDraftChat.current === targetAtSend) {
+          switchComposerTarget(thread.threadId);
+          setDraftChat(undefined);
+          setActiveThreadId(thread.threadId);
+        }
+      }
+      if (harness?.name === "goal") {
+        const result = await call(harness.clear ? "threads.clearGoal" : "threads.setGoal", harness.clear
+          ? { threadId: thread.threadId }
+          : { threadId: thread.threadId, objective: harness.objective }) as { thread: Thread };
+        const updated = normalizeThread(result.thread);
+        mutateThreads((current) => [updated, ...current.filter((item) => item.threadId !== updated.threadId)]);
+        return;
+      }
+      if (harness?.name === "side") {
+        const side = await requestSideThread(thread, harness.title);
+        rememberLocallyRecoveredThread(locallyRecoveredThreads.current, side);
+        mutateThreads((current) => [side, ...current.filter((item) => item.threadId !== side.threadId)]);
+        if (composerTargetRequestMatches(targetGenerationAtSend, composerTargetGeneration.current)) selectThread(side);
+        return;
+      }
+      const attempt = turnSubmissionAttempt({ threadId: thread.threadId, text, mentions, images: attachedImages, mode }, restoredAtSend, () => crypto.randomUUID(), ++turnSubmissionOrder.current);
+      attemptedSubmission = attempt.receipt;
+      await callIdempotent("threads.sendTurn", attempt.params);
+      restoredTurnSubmissions.current.delete(attempt.params.submissionId);
+      if (visibleRestoredSubmissionId.current === attempt.params.submissionId) visibleRestoredSubmissionId.current = undefined;
+      const nextRestored = latestRestoredTurnSubmission(restoredTurnSubmissions.current, thread.threadId);
+      const unchangedDraft = composerTargetEditSequence(targetAtSend) === targetEditSequenceAtSend
+        && submittedThreadEditSequenceAtSend === composerTargetEditSequence(thread.threadId);
+      const sameTarget = composerTargetMatchesAttempt(currentComposerTarget.current, targetAtSend, !activeThread ? thread.threadId : undefined);
+      if (nextRestored && unchangedDraft && sameTarget && !currentPrompt.current && !currentImages.current.length) {
+        visibleRestoredSubmissionId.current = nextRestored.params.submissionId;
+        setComposerPrompt(nextRestored.params.text);
+        setComposerImages(nextRestored.params.images);
+      }
+    } catch (error) {
+      const unchangedDraft = composerTargetEditSequence(targetAtSend) === targetEditSequenceAtSend
+        && (submittedThreadEditSequenceAtSend === undefined || !submittedThread || submittedThreadEditSequenceAtSend === composerTargetEditSequence(submittedThread.threadId));
+      const configUnchanged = submittedThreadConfigEditSequenceAtSend === undefined || !submittedThread
+        || submittedThreadConfigEditSequenceAtSend === threadConfigEditSequence(submittedThread.threadId);
+      const sameTarget = composerTargetMatchesAttempt(currentComposerTarget.current, targetAtSend, !activeThread ? submittedThread?.threadId : undefined);
+      let retainedSubmission: TurnSubmissionReceipt | undefined;
+      if (attemptedSubmission) {
+        retainedSubmission = configUnchanged ? turnSubmissionAfterFailure(error, attemptedSubmission, restoredAtSend) : undefined;
+        if (retainedSubmission) rememberTurnSubmission(restoredTurnSubmissions.current, retainedSubmission, 8, unchangedDraft && sameTarget ? retainedSubmission.params.submissionId : visibleRestoredSubmissionId.current);
+        else restoredTurnSubmissions.current.delete(attemptedSubmission.params.submissionId);
+      }
+      if (unchangedDraft && sameTarget && !currentPrompt.current && !currentImages.current.length) {
+        visibleRestoredSubmissionId.current = retainedSubmission?.params.submissionId;
+        setComposerPrompt(text);
+        setComposerImages(attachedImages);
+      }
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    } finally {
+      updateDraftSending(false);
+    }
+  }
+
+  function stopThread(threadId: string) {
+    if (threads.find((thread) => thread.threadId === threadId)?.provider !== "kimi") return;
+    void call("threads.interruptTurn", { threadId, clearQueue: true }).catch((error: Error) => setDiagnostic(error.message));
+  }
+
+  async function archiveThread(thread: Thread, archived: boolean) {
+    const navigationGeneration = composerTargetGeneration.current;
+    try {
+      const result = await call("threads.archive", { threadId: thread.threadId, archived }) as { thread: Thread };
+      const updated = normalizeThread(result.thread);
+      mutateThreads((current) => current.map((item) => item.threadId === updated.threadId ? updated : item));
+      if (archived && currentActiveThreadId.current === thread.threadId) setActiveThreadId(undefined);
+      if (!archived && composerTargetRequestMatches(navigationGeneration, composerTargetGeneration.current)) selectThread(updated);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function createSideThread(title?: string) {
+    if (!activeThread || activeThread.provider !== "kimi") return;
+    const navigationGeneration = composerTargetGeneration.current;
+    try {
+      const side = await requestSideThread(activeThread, title);
+      mutateThreads((current) => [side, ...current.filter((item) => item.threadId !== side.threadId)]);
+      if (composerTargetRequestMatches(navigationGeneration, composerTargetGeneration.current)) selectThread(side);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function requestSideThread(parent: Thread, title?: string): Promise<Thread> {
+    const normalizedTitle = title?.trim();
+    const semanticParams = { threadId: parent.threadId, ...(normalizedTitle ? { title: normalizedTitle } : {}) };
+    const fingerprint = threadCreationFingerprint(semanticParams);
+    const receipts = restoredSideCreations.current;
+    const restored = receipts.get(fingerprint);
+    if (!threadCreationSlotAvailable(receipts, fingerprint)) {
+      throw new Error("Resolve one of the ambiguous side-chat creations before starting another one.");
+    }
+    const creation = threadCreationAttempt(semanticParams, restored);
+    receipts.set(fingerprint, creation);
+    if (!saveSideCreationRecovery(receipts)) {
+      receipts.delete(fingerprint);
+      if (restored) receipts.set(fingerprint, restored);
+      throw new RequestNotSentError("Side chat creation was not sent because its recovery receipt could not be saved");
+    }
+    try {
+      const result = await callIdempotent("threads.createSide", creation.params);
+      const side = sideThreadFromCreationResult(result, parent);
+      receipts.delete(fingerprint);
+      saveSideCreationRecovery(receipts);
+      return side;
+    } catch (error) {
+      const retained = threadCreationAfterFailure(error, creation, restored);
+      receipts.delete(fingerprint);
+      if (retained) receipts.set(fingerprint, retained);
+      saveSideCreationRecovery(receipts);
+      throw error;
+    }
+  }
+
+  async function clearGoal(threadId: string) {
+    try {
+      const result = await call("threads.clearGoal", { threadId }) as { thread: Thread };
+      const updated = normalizeThread(result.thread);
+      mutateThreads((current) => current.map((item) => item.threadId === threadId ? updated : item));
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function editTurnPrompt(text: string) {
+    if (activeThread?.provider !== "kimi") return;
+    if (activeThread && activeThreadBusy) {
+      try {
+        await call("threads.interruptTurn", { threadId: activeThread.threadId, clearQueue: true });
+      } catch (error) {
+        setDiagnostic(error instanceof Error ? error.message : String(error));
+      }
+    }
+    editPrompt(text);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function removeQueuedPrompt(threadId: string, queuedId: string) {
+    if (threads.find((thread) => thread.threadId === threadId)?.provider !== "kimi") return;
+    void call("threads.removeQueuedTurn", { threadId, queuedId }).catch((error: Error) => setDiagnostic(error.message));
+  }
+
+  function updateQueuedPrompt(threadId: string, queuedId: string, text: string) {
+    if (threads.find((thread) => thread.threadId === threadId)?.provider !== "kimi") return;
+    void call("threads.updateQueuedTurn", { threadId, queuedId, text }).catch((error: Error) => setDiagnostic(error.message));
+  }
+
+  function steerQueuedPrompt(threadId: string, queuedId: string) {
+    if (configUpdatesInFlight.current > 0 || threads.find((thread) => thread.threadId === threadId)?.provider !== "kimi") return;
+    void call("threads.steerQueuedTurn", { threadId, queuedId }).catch((error: Error) => setDiagnostic(error.message));
+  }
+
+  function clearQueuedPrompts(threadId: string) {
+    if (threads.find((thread) => thread.threadId === threadId)?.provider !== "kimi") return;
+    void call("threads.clearQueue", { threadId }).catch((error: Error) => setDiagnostic(error.message));
+  }
+
+  async function confirmManageAction(value?: string) {
+    const dialog = manageDialog;
+    if (!dialog) return;
+    try {
+      if (dialog.kind === "rename-thread") {
+        const title = value?.trim();
+        if (!title) return;
+        await call("threads.rename", { threadId: dialog.threadId, title });
+      } else if (dialog.kind === "delete-thread") {
+        await call("threads.delete", { threadId: dialog.threadId });
+        setPreferences((current) => ({ ...current, hiddenSessions: [...new Set([dialog.sessionId, ...current.hiddenSessions])] }));
+      } else if (dialog.kind === "rename-project") {
+        const title = value?.trim();
+        if (!title) return;
+        setPreferences((current) => ({ ...current, projectAliases: { ...current.projectAliases, [pathKey(dialog.cwd)]: title } }));
+      } else if (dialog.kind === "remove-project") {
+        setPreferences((current) => ({
+          ...current,
+          projects: current.projects.filter((path) => !samePath(path, dialog.cwd)),
+          hiddenProjects: uniquePaths([dialog.cwd, ...current.hiddenProjects]),
+        }));
+      } else if (dialog.kind === "remove-runtime-session") {
+        setPreferences((current) => ({ ...current, hiddenSessions: [...new Set([dialog.sessionId, ...current.hiddenSessions])] }));
+      } else if (dialog.kind === "delete-project-chats") {
+        await Promise.all(dialog.threadIds.map((threadId) => call("threads.delete", { threadId })));
+        setPreferences((current) => ({ ...current, hiddenSessions: [...new Set([...dialog.sessionIds, ...current.hiddenSessions])] }));
+      } else if (dialog.kind === "install-skill") {
+        const installed = await call("skills.install", { cwd: dialog.cwd, source: dialog.source }) as { skill?: { name?: string }; restartRequired?: boolean };
+        await refreshCapabilities();
+        setDiagnostic(`Installed ${installed.skill?.name ?? dialog.name}. Start a new chat to load the skill.`);
+      } else if (dialog.kind === "approve-project-mcp") {
+        await call("mcp.approveProject", { cwd: dialog.cwd, fingerprint: dialog.fingerprint, ...(dialog.instanceId ? { instanceId: dialog.instanceId } : {}) });
+        setDiagnostic(await refreshCapabilities({ cwd: dialog.cwd, ...(dialog.instanceId ? { instanceId: dialog.instanceId } : {}) })
+          ? "Project MCP servers approved for this exact configuration."
+          : "Project MCP approval changed, but capabilities could not be refreshed. Refresh to verify the current status.");
+      } else if (dialog.kind === "revoke-project-mcp") {
+        await call("mcp.revokeProject", { cwd: dialog.cwd, ...(dialog.instanceId ? { instanceId: dialog.instanceId } : {}) });
+        setDiagnostic(await refreshCapabilities({ cwd: dialog.cwd, ...(dialog.instanceId ? { instanceId: dialog.instanceId } : {}) })
+          ? "Project MCP approval revoked."
+          : "Project MCP approval was revoked, but capabilities could not be refreshed. Refresh to verify the current status.");
+      }
+      setManageDialog(undefined);
+      setItemMenu(undefined);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function reorderProject(source: string, target: string) {
+    if (samePath(source, target)) return;
+    setPreferences((current) => ({
+      ...current,
+      projects: reorderPaths(uniquePaths([...current.projects, ...projects.map((project) => project.cwd)]), source, target),
+    }));
+  }
+
+  function reorderProjectByKeyboard(project: ProjectGroup, offset: -1 | 1) {
+    if (threadFilter) return;
+    const order = projects.map((item) => item.cwd);
+    const sourceIndex = order.findIndex((path) => samePath(path, project.cwd));
+    const targetIndex = sourceIndex + offset;
+    if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= order.length) return;
+    reorderProject(project.cwd, order[targetIndex]!);
+    setProjectReorderAnnouncement(`Moved ${project.name} to position ${targetIndex + 1} of ${order.length}.`);
+  }
+
+  function toggleProject(projectCwd: string) {
+    const key = pathKey(projectCwd);
+    setCollapsedProjects((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function respond(approval: Approval, optionId?: string) {
+    if (!activeThread || activeThread.provider !== "kimi") return;
+    void call("threads.respondToRequest", { threadId: activeThread.threadId, requestId: approval.requestId, optionId }).catch((error: Error) => setDiagnostic(error.message));
+  }
+
+  async function setConfig(configId: string, value: string, target = configTarget): Promise<boolean> {
+    if (!runtimeReady || !target || !configTargetsMatch(target, currentConfigTarget.current) || updateMutationsBlocked || configUpdatesInFlight.current > 0) return false;
+    if (target.kind === "thread") {
+      const threadId = target.threadId;
+      const visibleReceiptId = visibleRestoredSubmissionId.current;
+      const visibleReceiptBelongsToThread = visibleReceiptId && restoredTurnSubmissions.current.get(visibleReceiptId)?.params.threadId === threadId;
+      forgetThreadTurnSubmissions(restoredTurnSubmissions.current, threadId);
+      if (visibleReceiptBelongsToThread) visibleRestoredSubmissionId.current = undefined;
+      markComposerTargetEdited(threadId);
+      markThreadConfigEdited(threadId);
+      const update = { targetKey: target.key, configId, requestId: ++configRequestId.current };
+      configUpdatesInFlight.current += 1;
+      setConfigUpdating((current) => ({ ...current, [target.key]: update }));
+      try {
+        const result = await call("threads.setConfigOption", { threadId, configId, value }) as { configOptions?: ConfigOption[] };
+        if (result.configOptions) {
+          mutateThreads((current) => current.map((thread) => thread.threadId === threadId ? { ...thread, configOptions: result.configOptions! } : thread));
+        }
+        setPreferences((current) => ({ ...current, composerConfig: { ...current.composerConfig, [configId]: value } }));
+        return true;
+      } catch (error) {
+        setDiagnostic(error instanceof Error ? error.message : String(error));
+        return false;
+      } finally {
+        configUpdatesInFlight.current = Math.max(0, configUpdatesInFlight.current - 1);
+        setConfigUpdating((current) => {
+          if (current[target.key]?.requestId !== update.requestId) return current;
+          const next = { ...current };
+          delete next[target.key];
+          return next;
+        });
+      }
+    } else {
+      markComposerTargetEdited(target.draft);
+      setPreferences((current) => ({ ...current, composerConfig: { ...current.composerConfig, [configId]: value } }));
+      setDraftConfig((current) => {
+        const option = configDefaults.find((candidate) => candidate.id === configId);
+        const next = { ...current };
+        if (option && String(option.currentValue) === value) delete next[configId];
+        else next[configId] = value;
+        return next;
+      });
+      return true;
+    }
+  }
+
+  function changeConfig(configId: string, value: string) {
+    if (!configTarget || updateMutationsBlocked || configUpdatesInFlight.current > 0) return;
+    const option = composerOptions.find((candidate) => candidate.id === configId);
+    if (isYoloChoice(option, value) && !preferences.yoloAcknowledged) {
+      setYoloConfirm({ target: configTarget, configId, value, busy: false });
+      return;
+    }
+    void setConfig(configId, value, configTarget);
+  }
+
+  function insertMention(file: string) {
+    editPrompt((value) => replaceComposerTrigger(value, `@{${file}} `));
+    setFileSuggestions([]);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function insertCommand(command: AvailableCommand) {
+    editPrompt((value) => replaceComposerTrigger(value, `/${command.name} `));
+    setFileSuggestions([]);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function insertSkill(skill: KimiSkill) {
+    editPrompt((value) => replaceComposerTrigger(value, skillComposerInsertion(skill.name, runtimeCommands ?? [])));
+    setFileSuggestions([]);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function startComposerTrigger(prefix: "/" | "$" | "#") {
+    setComposerMenuOpen(false);
+    editPrompt((value) => `${value}${value && !/\s$/.test(value) ? " " : ""}${prefix}`);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function toggleComposerCommandPicker() {
+    setComposerMenuOpen(false);
+    editPrompt((value) => toggleComposerTrigger(value, "/"));
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function startComposerCommand(command: string) {
+    setComposerMenuOpen(false);
+    editPrompt((value) => `${value}${value && !/\s$/.test(value) ? " " : ""}/${command} `);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function useCapabilityPrompt(text: string) {
+    setCapabilityCenterOpen(false);
+    if (activeThread && activeThread.provider !== "kimi") {
+      activeThread.kind === "chat" ? createStandaloneChat() : createThread(activeThread.worktree?.sourceCwd ?? activeThread.cwd);
+      editPrompt(text);
+      window.setTimeout(() => composerInput.current?.focus(), 0);
+      return;
+    }
+    if (!activeThread && !draftChat && !cwd) {
+      createStandaloneChat();
+      editPrompt(text);
+      window.setTimeout(() => composerInput.current?.focus(), 0);
+      return;
+    }
+    useStarterPrompt(text);
+  }
+
+  async function attachWorkspaceFiles() {
+    const promptCwd = activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : undefined;
+    if (!promptCwd) {
+      setDiagnostic("Open a project before attaching workspace files.");
+      return;
+    }
+    const targetGeneration = composerTargetGeneration.current;
+    setComposerMenuOpen(false);
+    try {
+      if (!isTauri()) throw new Error("The native file picker is available in the desktop app");
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        directory: false,
+        multiple: true,
+        defaultPath: promptCwd,
+        title: "Attach project files",
+      });
+      if (!composerTargetRequestMatches(targetGeneration, composerTargetGeneration.current)) return;
+      const paths = typeof selected === "string" ? [selected] : selected ?? [];
+      const relative = paths.map((path) => workspaceRelativePath(promptCwd, path)).filter((path): path is string => Boolean(path));
+      if (relative.length !== paths.length) setDiagnostic("Only files inside the active project can be attached.");
+      if (relative.length) {
+        editPrompt((value) => `${value}${value && !/\s$/.test(value) ? " " : ""}${relative.map((path) => `@{${path}}`).join(" ")} `);
+        window.setTimeout(() => composerInput.current?.focus(), 0);
+      }
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function attachImages(files: FileList | null) {
+    if (!files) return;
+    const imageFiles = [...files].filter((file) => file.type.startsWith("image/"));
+    const selected = imageFiles.filter((file) => file.size <= maxImageBytes).slice(0, Math.max(0, 5 - currentImages.current.length));
+    if (selected.length < imageFiles.length) setDiagnostic("Images must be 20 MB or smaller, with at most five attached.");
+    if (!selected.length) return;
+    const generation = ++attachmentGeneration.current;
+    const targetGeneration = composerTargetGeneration.current;
+    setAttachmentsLoading(true);
+    try {
+      const loaded = await Promise.all(selected.map(readImage));
+      if (attachmentRequestMatches(generation, attachmentGeneration.current, targetGeneration, composerTargetGeneration.current)) {
+        const accepted = loaded.slice(0, Math.max(0, 5 - currentImages.current.length));
+        if (accepted.length) {
+          invalidateComposerDraft();
+          setComposerImages([...currentImages.current, ...accepted]);
+        }
+      }
+    } catch (error) {
+      if (attachmentGeneration.current === generation) setDiagnostic(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (attachmentGeneration.current === generation) setAttachmentsLoading(false);
+    }
+  }
+
+  async function openLocation(path: string) {
+    if (!activeThread) return;
+    const requestId = ++gitDetailRequest.current;
+    const requestedCwd = activeThread.cwd;
+    setGitDiff(undefined);
+    setSelectedFile(undefined);
+    setGitDetailLoading(path);
+    setRailView("changes");
+    try {
+      const file = await call("files.read", { cwd: requestedCwd, path }) as { path: string; content: string };
+      if (gitDetailRequestMatches(requestId, gitDetailRequest.current, requestedCwd, currentWorkspaceCwd.current)) setSelectedFile(file);
+    } catch (error) {
+      if (gitDetailRequestMatches(requestId, gitDetailRequest.current, requestedCwd, currentWorkspaceCwd.current)) await revealLocalPath(path);
+    } finally {
+      if (requestId === gitDetailRequest.current) setGitDetailLoading(undefined);
+    }
+  }
+
+  function saveAgentProfile() {
+    const name = profileDraft.name.trim();
+    const profilePrompt = profileDraft.prompt.trim();
+    if (!name || !profilePrompt) return;
+    const model = composerOptions.find(isModelOption);
+    const reasoning = composerOptions.find(isThinkingOption);
+    const permission = composerOptions.find(isModeOption);
+    const profile: AgentProfile = {
+      id: globalThis.crypto?.randomUUID?.() ?? `profile-${Date.now()}`,
+      name, provider: "kimi", prompt: profilePrompt,
+      ...(model ? { model: String(model.currentValue) } : {}),
+      ...(reasoning ? { reasoning: String(reasoning.currentValue) } : {}),
+      ...(permission ? { permission: String(permission.currentValue) } : {}),
+    };
+    setPreferences((current) => ({ ...current, agentProfiles: [...current.agentProfiles, profile].slice(-30) }));
+    setProfileDraft({ name: "", prompt: "" });
+  }
+
+  async function useAgentProfile(profile: AgentProfile) {
+    if (profile.provider !== "kimi") {
+      setDiagnostic("This historical profile cannot be used with Kimi.");
+      return;
+    }
+    for (const update of profileConfigUpdates(composerOptions, profile)) await setConfig(update.id, update.value);
+    useCapabilityPrompt(profile.prompt.endsWith(" ") ? profile.prompt : `${profile.prompt} `);
+  }
+
+  function deleteAgentProfile(id: string) {
+    setPreferences((current) => ({ ...current, agentProfiles: current.agentProfiles.filter((profile) => profile.id !== id) }));
+  }
+
+  function openProjectMcpDialog(action: "approve" | "revoke", fingerprint?: string) {
+    const snapshot = capabilitySnapshot;
+    const projectMcp = snapshot?.data.projectMcp;
+    const dialog = projectMcpDialogFromSnapshot(action, fingerprint, snapshot?.cwd && projectMcp
+      ? { cwd: snapshot.cwd, ...(snapshot.instanceId ? { instanceId: snapshot.instanceId } : {}), fingerprint: projectMcp.fingerprint }
+      : undefined, currentCapabilityTarget.current);
+    if (dialog) setManageDialog(dialog);
+  }
+
+  async function chooseSkillToInstall(kind: "folder" | "file" = "folder") {
+    if (!capabilityProjectCwd) {
+      setDiagnostic("Open a project before installing a local skill.");
+      return;
+    }
+    setComposerMenuOpen(false);
+    try {
+      if (!isTauri()) throw new Error("Local skill installation is available in the desktop app");
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        directory: kind === "folder",
+        multiple: false,
+        defaultPath: capabilityProjectCwd,
+        title: `Choose a skill ${kind} from this project`,
+        ...(kind === "file" ? { filters: [{ name: "Markdown skill", extensions: ["md"] }] } : {}),
+      });
+      if (typeof selected !== "string") return;
+      if (!workspaceRelativePath(capabilityProjectCwd, selected)) {
+        throw new Error("Choose a skill folder inside the active project");
+      }
+      const selectedName = selected.split(/[\\/]/).filter(Boolean).at(-1) ?? "local skill";
+      const name = kind === "file" ? selectedName.replace(/\.md$/i, "") : selectedName;
+      setManageDialog({ kind: "install-skill", cwd: capabilityProjectCwd, source: selected, name });
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function openGitDiff(path: string, targetCwd = workspaceCwd) {
+    if (!targetCwd || !gitStatusCwd || !workspaceRequestMatches(targetCwd, gitStatusCwd)) return;
+    const requestId = ++gitDetailRequest.current;
+    setSelectedFile(undefined);
+    setGitDiff(undefined);
+    setGitDetailLoading(path);
+    setGitError(undefined);
+    try {
+      const diff = await call("git.diff", { cwd: targetCwd, path }) as { path: string; diff: string };
+      if (gitDetailRequestMatches(requestId, gitDetailRequest.current, targetCwd, currentWorkspaceCwd.current)) setGitDiff(diff);
+    } catch (error) {
+      if (gitDetailRequestMatches(requestId, gitDetailRequest.current, targetCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
+    } finally {
+      if (requestId === gitDetailRequest.current) setGitDetailLoading(undefined);
+    }
+  }
+
+  function closeGitDetail() {
+    gitDetailRequest.current += 1;
+    setGitDetailLoading(undefined);
+    setSelectedFile(undefined);
+    setGitDiff(undefined);
+  }
+
+  async function changeGitStage(method: "git.stage" | "git.unstage", paths: string[]) {
+    if (!workspaceCwd || !gitStatusCwd || !workspaceRequestMatches(workspaceCwd, gitStatusCwd) || !paths.length) return;
+    const requestedCwd = workspaceCwd;
+    const detailPath = gitDiff?.path ?? gitDetailLoading;
+    closeGitDetail();
+    setGitMutationBusy(true);
+    setGitError(undefined);
+    try {
+      let status: GitStatus | undefined;
+      for (const batch of gitPathBatches(paths)) {
+        status = await call(method, { cwd: requestedCwd, paths: batch }) as GitStatus;
+        if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+        setGitStatus(status);
+        setGitStatusCwd(requestedCwd);
+        setGitLoadCwd(requestedCwd);
+        setGitLoadState("ready");
+      }
+      if (!status) return;
+      if (detailPath && status.files.some((file) => file.path === detailPath)) await openGitDiff(detailPath, requestedCwd);
+    } catch (error) {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
+    } finally {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitMutationBusy(false);
+    }
+  }
+
+  async function commitGit() {
+    if (!workspaceCwd || !gitStatusCwd || !workspaceRequestMatches(workspaceCwd, gitStatusCwd) || !commitMessage.trim()) return;
+    const requestedCwd = workspaceCwd;
+    const message = commitMessage.trim();
+    closeGitDetail();
+    setGitMutationBusy(true);
+    setGitError(undefined);
+    try {
+      const result = await call("git.commit", { cwd: requestedCwd, message }) as { commit: string; status: GitStatus };
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      const repository = await call("git.repository", { cwd: requestedCwd }) as GitRepository;
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      setGitStatus(result.status);
+      setGitStatusCwd(requestedCwd);
+      setGitRepository(repository);
+      setGitLoadCwd(requestedCwd);
+      setGitLoadState("ready");
+      setCommitMessage("");
+      setDiagnostic(`Committed ${result.commit}`);
+    } catch (error) {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
+    } finally {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitMutationBusy(false);
+    }
+  }
+
+  function openGitBranchAction(action: GitBranchAction, trigger: HTMLButtonElement) {
+    gitBranchActionTrigger.current = trigger;
+    setGitBranchAction(action);
+  }
+
+  function closeGitBranchAction(restoreFocus = true) {
+    const trigger = gitBranchActionTrigger.current;
+    gitBranchActionTrigger.current = undefined;
+    setGitBranchAction(undefined);
+    if (!restoreFocus) return;
+    window.requestAnimationFrame(() => {
+      if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+      else gitBranchesSummary.current?.focus();
+    });
+  }
+
+  async function updateGit(method: "git.fetch" | "git.createBranch" | "git.switchBranch" | "git.checkoutRemoteBranch" | "git.renameBranch" | "git.deleteBranch" | "git.push" | "git.pull", params: Record<string, unknown>, success?: string) {
+    if (!workspaceCwd) return;
+    const requestedCwd = workspaceCwd;
+    closeGitDetail();
+    setGitMutationBusy(true);
+    setGitError(undefined);
+    try {
+      await call(method, { cwd: requestedCwd, ...params });
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      const [status, repository] = await Promise.all([
+        call("git.status", { cwd: requestedCwd }) as Promise<GitStatus>,
+        call("git.repository", { cwd: requestedCwd }) as Promise<GitRepository>,
+      ]);
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      setGitStatus(status);
+      setGitStatusCwd(requestedCwd);
+      setGitRepository(repository);
+      setGitLoadCwd(requestedCwd);
+      setGitLoadState("ready");
+      setBranchDraft("");
+      if (gitBranchAction) closeGitBranchAction();
+      if (success) setDiagnostic(success);
+    } catch (error) {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
+    } finally {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitMutationBusy(false);
+    }
+  }
+
+  async function confirmGitBranchAction() {
+    if (!gitBranchAction) return;
+    if (gitBranchAction.kind === "rename") {
+      const next = gitBranchAction.value.trim();
+      if (next && next !== gitBranchAction.branch) await updateGit("git.renameBranch", { branch: gitBranchAction.branch, newBranch: next }, `Renamed ${gitBranchAction.branch} to ${next}.`);
+      return;
+    }
+    if (gitBranchAction.kind === "delete") {
+      await updateGit("git.deleteBranch", { branch: gitBranchAction.branch }, `Deleted local branch ${gitBranchAction.branch}.`);
+      return;
+    }
+    const localBranch = gitBranchAction.value.trim();
+    if (localBranch) await updateGit("git.checkoutRemoteBranch", { remote: gitBranchAction.remote, branch: gitBranchAction.branch, localBranch }, `Tracking ${gitBranchAction.remote}/${gitBranchAction.branch} as ${localBranch}.`);
+  }
+
+  async function publishGit() {
+    if (!workspaceCwd || !publishName.trim()) return;
+    const requestedCwd = workspaceCwd;
+    closeGitDetail();
+    setGitMutationBusy(true);
+    setGitError(undefined);
+    try {
+      const status = await call("git.publish", { cwd: requestedCwd, name: publishName.trim(), visibility: publishVisibility }) as GitStatus;
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      const repository = await call("git.repository", { cwd: requestedCwd }) as GitRepository;
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      setGitStatus(status);
+      setGitStatusCwd(requestedCwd);
+      setGitRepository(repository);
+      setGitLoadCwd(requestedCwd);
+      setGitLoadState("ready");
+      setDiagnostic(`Published ${publishName.trim()} as a ${publishVisibility} repository.`);
+    } catch (error) {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
+    } finally {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitMutationBusy(false);
+    }
+  }
+
+  async function createGitPullRequest() {
+    if (!workspaceCwd || !pullRequest.title.trim()) return;
+    const requestedCwd = workspaceCwd;
+    setGitMutationBusy(true);
+    setGitError(undefined);
+    try {
+      const result = await call("git.createPullRequest", { cwd: requestedCwd, ...pullRequest, title: pullRequest.title.trim() }) as { url: string };
+      if (!workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) return;
+      setDiagnostic(`Pull request created: ${result.url}`);
+      await openExternalLink(result.url);
+    } catch (error) {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitError(classifyGitError(error));
+    } finally {
+      if (workspaceRequestMatches(requestedCwd, currentWorkspaceCwd.current)) setGitMutationBusy(false);
+    }
+  }
+
+  async function cloneGitRepository() {
+    const name = repositoryNameFromUrl(cloneUrl);
+    if (!name) { setGitError({ kind: "unknown", title: "Clone URL is invalid", detail: "Enter an HTTPS or SSH repository URL." }); return; }
+    setGitError(undefined);
+    try {
+      if (!isTauri()) throw new Error("Clone destination selection is available in the desktop app");
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const parent = await open({ directory: true, multiple: false, title: "Choose the parent folder for the cloned repository" });
+      if (typeof parent !== "string") return;
+      const destination = joinLocalPath(parent, name);
+      setGitMutationBusy(true);
+      await call("git.clone", { url: cloneUrl.trim(), destination });
+      rememberWorkspace(destination);
+      setCwd(destination);
+      setNavView("projects");
+      setCloneUrl("");
+      setDiagnostic(`Cloned ${name}.`);
+    } catch (error) { setGitError(classifyGitError(error)); }
+    finally { setGitMutationBusy(false); }
+  }
+
+  async function openWorkspaceInEditor() {
+    if (!workspaceCwd) return;
+    setSearchOpen(false);
+    setThreadFilter("");
+    if (preferences.editor === "system") {
+      await revealLocalPath(workspaceCwd);
+      return;
+    }
+    await openExternalLink(editorUrl(preferences.editor, workspaceCwd));
+  }
+
+  function runProjectScript(script: ProjectScript) {
+    if (!workspaceCwd) return;
+    setSearchOpen(false);
+    setThreadFilter("");
+    setPendingTerminalCommand(`npm run ${script.name}`);
+    setRailView("terminal");
+  }
+
+  function updateTerminalTab(tabId: string, update: (tab: TerminalTab) => TerminalTab) {
+    setTerminalTabs((current) => current.map((tab) => tab.tabId === tabId ? update(tab) : tab));
+  }
+
+  function addTerminalTab(split = false) {
+    if (!workspaceCwd) return;
+    const tab = createTerminalTab(workspaceCwd, workspaceTerminalTabs.length + 1);
+    setTerminalTabs((current) => [...current, tab].slice(-12));
+    if (split) setSplitTerminalTabId(tab.tabId);
+    else setActiveTerminalTabId(tab.tabId);
+  }
+
+  function selectTerminalTab(tabId: string) {
+    if (tabId === splitTerminalTabId && activeTerminalTabId) setSplitTerminalTabId(activeTerminalTabId);
+    setActiveTerminalTabId(tabId);
+  }
+
+  async function closeTerminalTab(tab: TerminalTab) {
+    terminalTabsRef.current = terminalTabsRef.current.filter((item) => item.tabId !== tab.tabId);
+    setTerminalTabs((current) => current.filter((item) => item.tabId !== tab.tabId));
+    if (activeTerminalTabId === tab.tabId) setActiveTerminalTabId(workspaceTerminalTabs.find((item) => item.tabId !== tab.tabId)?.tabId);
+    if (splitTerminalTabId === tab.tabId) setSplitTerminalTabId(undefined);
+    if (tab.session) await call("terminal.stop", { sessionId: tab.session.sessionId }).catch((error: Error) => setDiagnostic(error.message));
+  }
+
+  function toggleTerminalSplit() {
+    if (splitTerminalTab) {
+      setSplitTerminalTabId(undefined);
+      return;
+    }
+    const other = workspaceTerminalTabs.find((tab) => tab.tabId !== activeTerminalTab?.tabId);
+    if (other) setSplitTerminalTabId(other.tabId);
+    else addTerminalTab(true);
+  }
+
+  function runTerminalCommand(event: FormEvent, tab: TerminalTab) {
+    event.preventDefault();
+    const command = tab.command.trim();
+    if (!command || !tab.session) return;
+    updateTerminalTab(tab.tabId, (current) => ({ ...current, command: "" }));
+    setTerminalHistoryIndex(-1);
+    if (command === "clear" || command === "cls") {
+      updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: [] }));
+      return;
+    }
+    updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: appendTerminalEntries(current.entries, [terminalEntry("command", `› ${command}\n`)]) }));
+    setTerminalHistory((current) => [...current.filter((item) => item !== command), command].slice(-100));
+    if (updateTerminalGitMutationTracking(terminalGitMutationSessions.current, tab.session.sessionId, command)) {
+      gitRefreshScheduler.current(700, tab.cwd);
+    }
+    void call("terminal.write", { sessionId: tab.session.sessionId, command }).catch((error: Error) => {
+      updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: appendTerminalEntries(current.entries, [terminalEntry("stderr", `${error.message}\n`)]) }));
+    });
+  }
+
+  async function restartTerminal(tab: TerminalTab) {
+    if (tab.starting || terminalStarts.current.has(tab.tabId)) return;
+    updateTerminalTab(tab.tabId, (current) => ({ ...current, starting: true, startError: undefined, entries: [] }));
+    if (tab.session) await call("terminal.stop", { sessionId: tab.session.sessionId }).catch(() => undefined);
+    updateTerminalTab(tab.tabId, (current) => ({ ...current, session: undefined, starting: false, startError: undefined }));
+  }
+
+  function attachTerminalContext(tab: TerminalTab) {
+    const context = terminalContext(tab.entries);
+    if (!context) return;
+    editPrompt((current) => `${current}${current && !/\s$/.test(current) ? "\n\n" : ""}${context}`);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  function showPreview(candidate = previewDraft) {
+    const normalized = normalizeLocalPreviewUrl(candidate);
+    if (!normalized) {
+      setDiagnostic("Preview accepts localhost or 127.0.0.1 URLs only");
+      return;
+    }
+    setPreviewDraft(normalized);
+    setPreviewUrl(normalized);
+    setRailView("preview");
+  }
+
+  function applyAgentPreviewCommand(command: DesktopPreviewCommand) {
+    const normalized = command.url ? normalizeLocalPreviewUrl(command.url) : undefined;
+    if (normalized) {
+      setPreviewDraft(normalized);
+      setPreviewUrl(normalized);
+    }
+    if (command.panelWidth !== undefined) {
+      setPreferences((current) => ({
+        ...current,
+        sidebarCollapsed: current.sidebarCollapsed || command.panelWidth! >= 760,
+        railWidth: clampPanelWidth("rail", command.panelWidth!),
+      }));
+    }
+    if (command.action === "open") setPreviewRevision((value) => value + 1);
+    setRailView("preview");
+  }
+
+  function toggleRail(view: RailView) {
+    setRailView((current) => current === view ? undefined : view);
+  }
+
+  async function revertTurn(turnId: string) {
+    if (!activeThread || activeThread.provider !== "kimi") return;
+    try {
+      await call("checkpoints.revert", { threadId: activeThread.threadId, turnId });
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function openCheckpointReview(turnId: string) {
+    if (!activeThread || activeThread.provider !== "kimi") return;
+    const threadId = activeThread.threadId;
+    const requestId = ++checkpointReviewRequest.current;
+    setRailView("changes");
+    setGitReviewBusy(true);
+    try {
+      const review = await call("checkpoints.review", { threadId, turnId }) as CheckpointReview;
+      if (requestId !== checkpointReviewRequest.current || currentActiveThreadId.current !== threadId) return;
+      setCheckpointReview(review);
+      setReviewComments({});
+      setPendingReviewRevert(undefined);
+    } catch (error) {
+      if (requestId === checkpointReviewRequest.current && currentActiveThreadId.current === threadId) setDiagnostic(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (requestId === checkpointReviewRequest.current && currentActiveThreadId.current === threadId) setGitReviewBusy(false);
+    }
+  }
+
+  async function revertCheckpointPart(path: string, hunkIndex?: number) {
+    if (!activeThread || activeThread.provider !== "kimi" || !checkpointReview) return;
+    closeGitDetail();
+    setGitMutationBusy(true);
+    try {
+      await call("checkpoints.revertPart", { threadId: activeThread.threadId, turnId: checkpointReview.turnId, path, ...(hunkIndex === undefined ? {} : { hunkIndex }) });
+      setPendingReviewRevert(undefined);
+      await refreshGit();
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    } finally { setGitMutationBusy(false); }
+  }
+
+  function addReviewFeedbackToPrompt() {
+    if (!checkpointReview || activeThread?.provider !== "kimi") return;
+    const feedback = reviewFeedbackPrompt(checkpointReview, reviewComments);
+    if (!feedback) return;
+    editPrompt((current) => `${current}${current && !/\s$/.test(current) ? "\n\n" : ""}${feedback}`);
+    window.setTimeout(() => composerInput.current?.focus(), 0);
+  }
+
+  async function chooseWorkspace() {
+    if (draftSendingRef.current) return;
+    const navigationGeneration = composerTargetGeneration.current;
+    try {
+      if (!isTauri()) throw new Error("The native folder picker is available in the desktop app");
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ directory: true, multiple: false, title: "Choose a Kimi Code workspace" });
+      if (!composerTargetRequestMatches(navigationGeneration, composerTargetGeneration.current)) return;
+      if (typeof selected === "string") {
+        const existing = threads.find((thread) => samePath(thread.cwd, selected));
+        existing ? selectThread(existing) : createThread(selected);
+      }
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function beginLogin() {
+    try {
+      setAuth((current) => current ? { ...current, loginRunning: true } : current);
+      setAuth(await call("auth.beginLogin", { provider: "kimi" }) as AuthState);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function installCli() {
+    try {
+      const status = await call("env.installCli") as AuthState;
+      setAuth(status);
+      await openExternalLink(status.installUrl);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function logout() {
+    try {
+      setAuth(await call("auth.logout", { provider: "kimi" }) as AuthState);
+      setKimiRuntimeReady(false);
+      setQuota(undefined);
+      setSettingsCategory("account");
+      setSettingsOpen(true);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function installUpdate() {
+    const update = pendingUpdate.current;
+    if (!update || updateInstallInFlight.current) return;
+    if (updateBlocked) {
+      setUpdateNotice("Finish or stop active work before updating.");
+      return;
+    }
+    updateInstallInFlight.current = true;
+    const attempt: UpdateAttempt = { update, prepared: false, cancelled: false, resourceClosed: false };
+    updateAttempt.current = attempt;
+    setUpdatePreparing(true);
+    setUpdateNotice(undefined);
+    let downloaded = 0;
+    let total: number | undefined;
+    let nativeStopAttempted = false;
+    const currentVersion = updateStatus.currentVersion;
+    try {
+      await call("env.prepareUpdate");
+      attempt.prepared = true;
+      setUpdateStatus({ phase: "downloading", version: update.version, ...(currentVersion ? { currentVersion } : {}), percent: 0 });
+      await update.download((event) => {
+        if (attempt.cancelled) return;
+        if (event.event === "Started") total = event.data.contentLength;
+        if (event.event === "Progress") downloaded += event.data.chunkLength;
+        if (event.event !== "Finished") {
+          const percent = updatePercent(downloaded, total);
+          setUpdateStatus({ phase: "downloading", version: update.version, ...(currentVersion ? { currentVersion } : {}), ...(percent === undefined ? {} : { percent }) });
+        }
+      }, { timeout: updateDownloadTimeoutMs });
+      if (attempt.cancelled) throw new Error("Update download cancelled");
+      await call("env.confirmUpdate");
+      setUpdateStatus({ phase: "installing", version: update.version, ...(currentVersion ? { currentVersion } : {}), percent: 100 });
+      nativeStopAttempted = true;
+      await invoke<boolean>("stop_server_for_update");
+      await update.install();
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (error) {
+      if (nativeStopAttempted) {
+        try {
+          const restarted = await invoke<boolean>("recover_server", { force: false });
+          if (restarted) supervisor.current?.retry();
+        } catch (recoveryError) {
+          setDiagnostic(`Could not resume work after the update failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`);
+        }
+      }
+      try {
+        await releaseUpdateAttempt(attempt);
+      } catch (cancelError) {
+        setDiagnostic(`Could not fully release the update: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`);
+      }
+      if (attempt.cancelled) {
+        if (attempt.resourceClosed && !attempt.prepared) {
+          setUpdateNotice("Update cancelled.");
+          await checkForUpdates();
+        } else {
+          setUpdateStatus({ phase: "error", version: update.version, message: "Update cancellation is incomplete. Close and reopen Kimi Code before trying again." });
+        }
+      } else {
+        setUpdateStatus({ phase: "error", version: update.version, message: error instanceof Error ? error.message : String(error) });
+      }
+    } finally {
+      setUpdatePreparing(false);
+      updateInstallInFlight.current = false;
+      if (updateAttempt.current === attempt && attempt.resourceClosed && !attempt.prepared) updateAttempt.current = undefined;
+    }
+  }
+
+  async function releaseUpdateAttempt(attempt: UpdateAttempt): Promise<void> {
+    if (pendingUpdate.current === attempt.update) pendingUpdate.current = undefined;
+    try {
+      await releaseUpdateResources(attempt, () => attempt.update.close(), () => call("env.cancelUpdate"));
+    } catch (firstError) {
+      try {
+        await releaseUpdateResources(attempt, () => attempt.update.close(), () => call("env.cancelUpdate"));
+      } catch (secondError) {
+        throw new Error([firstError, secondError].map((error) => error instanceof Error ? error.message : String(error)).join("; retry: "));
+      }
+    }
+  }
+
+  async function cancelUpdateDownload(): Promise<void> {
+    const attempt = updateAttempt.current;
+    if (!attempt || !updateCanCancel(updateStatus.phase, updateInstallInFlight.current)) return;
+    attempt.cancelled = true;
+    setUpdateNotice("Cancelling update…");
+    try {
+      await releaseUpdateAttempt(attempt);
+    } catch (error) {
+      setDiagnostic(`Could not cancel the update cleanly: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async function runWindowAction(action: "minimize" | "maximize" | "close") {
+    try {
+      if (!isTauri()) return;
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const window = getCurrentWindow();
+      if (action === "minimize") await window.minimize();
+      else if (action === "maximize") await window.toggleMaximize();
+      else await window.close();
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function createAppWindow() {
+    try {
+      if (!isTauri()) throw new Error("New windows are available in the desktop app");
+      const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+      const window = new WebviewWindow(`kimi-code-${Date.now()}`, { url: "/", title: "Kimi Code", width: 1280, height: 800, minWidth: 900, minHeight: 620, decorations: false });
+      await window.once("tauri://error", (event) => setDiagnostic(String(event.payload)));
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function exitApp() {
+    try {
+      const { exit } = await import("@tauri-apps/plugin-process");
+      await exit(0);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function edit(command: "cut" | "copy" | "paste" | "delete" | "selectAll") {
+    try {
+      let applied = false;
+      const target = document.activeElement;
+      if (command === "paste" && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) && !target.disabled && !target.readOnly) {
+        const text = await navigator.clipboard.readText();
+        target.setRangeText(text, target.selectionStart ?? target.value.length, target.selectionEnd ?? target.value.length, "end");
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+        applied = true;
+      } else {
+        applied = document.execCommand(command);
+      }
+      if (!applied) setDiagnostic(`${command === "selectAll" ? "Select all" : command[0]!.toUpperCase() + command.slice(1)} is not available for the current selection.`);
+    } catch (error) {
+      setDiagnostic(error instanceof Error ? error.message : String(error));
+    } finally {
+      setOpenMenu(undefined);
+    }
+  }
+
+  function finishOnboarding() {
+    setPreferences((current) => ({ ...current, workspace: cwd || current.workspace, onboardingDone: true, projects: cwd ? uniquePaths([cwd, ...current.projects]) : current.projects }));
+    setShowOnboarding(false);
+  }
+
+  function beginPanelResize(panel: "sidebar" | "rail", event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const shell = handle.closest<HTMLElement>(".shell");
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startWidth = panel === "sidebar" ? preferences.sidebarWidth : renderedRailWidth;
+    const side = panel === "sidebar" ? preferences.sidebarSide : preferences.railSide;
+    const property = panel === "sidebar" ? "--sidebar-current-width" : "--rail-current-width";
+    let finalWidth = panel === "sidebar" ? preferences.sidebarWidth : preferences.railWidth;
+    const writes = createLatestFrameBatcher<number>((width) => shell?.style.setProperty(property, `${width}px`));
+    const move = (pointer: PointerEvent) => {
+      if (pointer.pointerId !== pointerId) return;
+      finalWidth = panelResizeWidth(panel, startWidth, pointer.clientX - startX, side);
+      const renderedWidth = panel === "rail" ? effectiveRailWidth(finalWidth, viewportWidth, layoutSidebarWidth, layoutConversationMinimum) : finalWidth;
+      writes.push(renderedWidth);
+    };
+    const stop = onceForPointer(pointerId, () => {
+      document.body.classList.remove("is-resizing");
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+      handle.removeEventListener("lostpointercapture", stop);
+      writes.flush();
+      setPreferences((current) => panel === "sidebar" ? { ...current, sidebarCollapsed: false, sidebarWidth: finalWidth } : { ...current, railWidth: finalWidth });
+    });
+    document.body.classList.add("is-resizing");
+    handle.setPointerCapture(pointerId);
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
+    handle.addEventListener("lostpointercapture", stop);
+  }
+
+  function resizePanelWithKeyboard(panel: "sidebar" | "rail", event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const side = panel === "sidebar" ? preferences.sidebarSide : preferences.railSide;
+    const direction = (event.key === "ArrowRight" ? 1 : -1) * (side === "left" ? 1 : -1);
+    setPreferences((current) => panel === "sidebar"
+      ? { ...current, sidebarCollapsed: false, sidebarWidth: clampPanelWidth(panel, current.sidebarWidth + direction * 12) }
+      : { ...current, railWidth: clampPanelWidth(panel, effectiveRailWidth(current.railWidth, viewportWidth, layoutSidebarWidth, layoutConversationMinimum) + direction * 12) });
+  }
+
+  function cyclePreviewWidth() {
+    setPreferences((current) => {
+      const currentWidth = effectiveRailWidth(current.railWidth, viewportWidth, layoutSidebarWidth, layoutConversationMinimum);
+      const widths = [...new Set([420, 960, 1_200].map((width) => effectiveRailWidth(width, viewportWidth, collapsedSidebarWidth, layoutConversationMinimum)).filter((width) => width >= 260))];
+      return widths.length ? { ...current, sidebarCollapsed: true, railWidth: widths.find((width) => width > currentWidth) ?? widths[0]! } : current;
+    });
+  }
+
+  const projectedRuntimeSessions = useMemo(() => filterRuntimeSessions(runtimeSessions, threads, preferences.hiddenSessions), [preferences.hiddenSessions, runtimeSessions, threads]);
+  const archivedThreads = useMemo(() => threads.filter((thread) => Boolean(thread.archivedAt)), [threads]);
+  const standaloneThreads = useMemo(() => threads.filter((thread) => thread.kind === "chat" && !thread.archivedAt), [threads]);
+  const projectThreads = useMemo(() => threads.filter((thread) => thread.kind !== "chat" && !thread.archivedAt), [threads]);
+  const standaloneRuntimeSessions = useMemo(() => projectedRuntimeSessions.filter((session) => session.kind === "chat"), [projectedRuntimeSessions]);
+  const projectRuntimeSessions = useMemo(() => projectedRuntimeSessions.filter((session) => session.kind !== "chat"), [projectedRuntimeSessions]);
+  const visibleThreads = useMemo(() => filterByTitle(standaloneThreads, threadFilter), [standaloneThreads, threadFilter]);
+  const visibleRuntimeSessions = useMemo(() => filterByTitle(standaloneRuntimeSessions, threadFilter), [standaloneRuntimeSessions, threadFilter]);
+  const projects = useMemo(() => groupProjects(preferences.projects, projectThreads, projectRuntimeSessions, preferences.projectAliases)
+    .filter((project) => !preferences.hiddenProjects.some((hidden) => samePath(hidden, project.cwd))), [preferences.hiddenProjects, preferences.projectAliases, preferences.projects, projectRuntimeSessions, projectThreads]);
+  const visibleProjects = useMemo(() => filterProjects(projects, threadFilter), [projects, threadFilter]);
+  const commandQuery = threadFilter.trim().toLowerCase();
+  const paletteActions = [
+    { id: "new-chat", label: "New chat", detail: navView === "chats" ? "Start a standalone conversation" : "Start in the current project", icon: <Plus />, shortcut: preferences.keybindings.newChat, disabled: !kimiRuntimeAvailable || (navView === "projects" && !cwd), run: () => { navView === "chats" ? createStandaloneChat() : createThread(cwd); setSearchOpen(false); setThreadFilter(""); } },
+    { id: "open-folder", label: "Open folder", detail: "Choose a local workspace", icon: <FolderOpen />, shortcut: preferences.keybindings.openFolder, run: () => { setSearchOpen(false); setThreadFilter(""); void chooseWorkspace(); } },
+    { id: "open-editor", label: "Open workspace in editor", detail: preferences.editor === "system" ? "Reveal in the system file manager" : `Open with ${preferences.editor === "vscode" ? "Visual Studio Code" : "Cursor"}`, icon: <ArrowSquareOut />, disabled: !workspaceCwd, run: () => void openWorkspaceInEditor() },
+    { id: "terminal", label: "Toggle terminal", detail: "Open a shell in the active workspace", icon: <TerminalWindow />, shortcut: preferences.keybindings.terminal, disabled: !workspaceCwd, run: () => { toggleRail("terminal"); setSearchOpen(false); setThreadFilter(""); } },
+    { id: "agents", label: "Show subagents", detail: "Inspect active and completed delegated work", icon: <Robot />, disabled: !activeThread && !workspaceCwd, run: () => { setRailView("agents"); setSearchOpen(false); setThreadFilter(""); } },
+    { id: "settings", label: "Open settings", detail: "Appearance, shortcuts, Kimi account, and updates", icon: <GearSix />, shortcut: preferences.keybindings.settings, run: () => { setSettingsCategory("general"); setSettingsOpen(true); setSearchOpen(false); setThreadFilter(""); } },
+  ].filter((action) => !commandQuery || `${action.label} ${action.detail}`.toLowerCase().includes(commandQuery));
+  const visibleProjectScripts = projectScripts.filter((script) => !commandQuery || `${script.name} ${script.command}`.toLowerCase().includes(commandQuery));
+  const turnWindow = useMemo(() => {
+    if (!activeThread) return { count: 0, visible: [] as TurnView[] };
+    const cached = turnProjectionCache.current.get(activeThread.threadId);
+    const views = cached?.source === activeThread ? cached.views : projectTurns(activeThread);
+    return { count: views.length, visible: recentTurns(views, visibleTurnLimit) };
+  }, [activeThread, visibleTurnLimit]);
+  const visibleTurnViews = turnWindow.visible;
+  const hiddenTurnCount = turnWindow.count - visibleTurnViews.length;
+  const turnOpenPreview = useLatestCallback(showPreview);
+  const turnOpenLocation = useLatestCallback(openLocation);
+  const turnEditPrompt = useLatestCallback(editTurnPrompt);
+  const turnRespond = useLatestCallback(respond);
+  const turnRevert = useLatestCallback(revertTurn);
+  const turnOpenReview = useLatestCallback(openCheckpointReview);
+  const runtimeCommands = activeThread?.provider === "kimi" && activeThread.commands.length
+    ? activeThread.commands
+    : threads.find((thread) => thread.provider === "kimi" && thread.commands.length)?.commands;
+  const commandCatalog = useMemo(() => runtimeCommands?.length ? runtimeCommands : fallbackCommands, [runtimeCommands]);
+  const nativeCapabilityCommands = useMemo(() => new Set((runtimeCommands ?? []).map((command) => command.name)), [runtimeCommands]);
+  const commandSuggestions = useMemo(() => {
+    if (promptTrigger?.kind !== "command") return [];
+    const query = promptTrigger.query.toLowerCase();
+    return commandCatalog
+      .filter((command) => !query || command.name.toLowerCase().includes(query) || command.description.toLowerCase().includes(query))
+      .slice(0, 10);
+  }, [commandCatalog, promptTrigger]);
+  const skillSuggestions = useMemo(() => promptTrigger?.kind === "skill"
+    ? filterKimiSkills(capabilities?.skills ?? [], promptTrigger.query)
+    : [], [capabilities?.skills, promptTrigger]);
+  const visibleFileSuggestions = promptTrigger?.kind === "file" ? fileSuggestions : [];
+  const suggestionCount = commandSuggestions.length + skillSuggestions.length + visibleFileSuggestions.length;
+  const suggestionsOpen = suggestionCount > 0 && !suggestionsDismissed;
+  const activeSuggestionIndex = Math.min(suggestionIndex, Math.max(0, suggestionCount - 1));
+  const activeSuggestionId = suggestionsOpen ? `composer-suggestion-${activeSuggestionIndex}` : undefined;
+  const suggestionQueryKey = promptTrigger ? `${promptTrigger.prefix}:${promptTrigger.query}` : "";
+  const sidebarIconOnly = narrowLayout ? !narrowSidebarOpen : layoutSidebarCollapsed || preferences.sidebarWidth < 168;
+  const workspaceTools = activeThread ? activeThread.kind === "project" : draftChat ? draftChat.kind === "project" : navView === "projects" && Boolean(cwd);
+  const railAvailable = Boolean(activeThread) || workspaceTools;
+  const capabilityProjectCwd = capabilityCwd;
+  const quotaLeft = quotaPercent(quota);
+  const context = activeThread?.usage?.context;
+  const contextUsed = contextPercent(activeThread?.usage);
+  const sidebarDrawerWidth = Math.min(420, Math.max(260, Math.min(preferences.sidebarWidth, viewportWidth - 48)));
+  const shellStyle = {
+    "--sidebar-current-width": `${layoutSidebarWidth}px`,
+    "--sidebar-drawer-width": `${sidebarDrawerWidth}px`,
+    "--rail-current-width": `${renderedRailWidth}px`,
+  } as CSSProperties;
+  const railResizeHandle = railRendered ? <div className="panel-resizer rail-resizer" role="separator" aria-label="Resize side panel" aria-orientation="vertical" aria-valuemin={railMinimumWidth} aria-valuemax={railMaximumWidth} aria-valuenow={renderedRailWidth} aria-disabled={!railResizable} tabIndex={railResizable ? 0 : -1} onPointerDown={railResizable ? (event) => beginPanelResize("rail", event) : undefined} onKeyDown={railResizable ? (event) => resizePanelWithKeyboard("rail", event) : undefined} /> : null;
+  const railTabs = railView ? <RailTabs current={railView} workspace={workspaceTools} activeAgents={agentRuns.filter((run) => run.status === "running").length} onSelect={setRailView} onClose={() => setRailView(undefined)} /> : null;
+
+  useEffect(() => {
+    setSuggestionIndex(0);
+    setSuggestionsDismissed(false);
+  }, [suggestionQueryKey]);
+
+  useEffect(() => {
+    if (!terminalSplitAvailable) setSplitTerminalTabId(undefined);
+  }, [terminalSplitAvailable]);
+
+  useEffect(() => {
+    if (!activeSuggestionId) return;
+    document.getElementById(activeSuggestionId)?.scrollIntoView({ block: "nearest" });
+  }, [activeSuggestionId]);
+
+  function chooseComposerSuggestion(index: number) {
+    if (promptTrigger?.kind === "command") {
+      const command = commandSuggestions[index];
+      if (command) insertCommand(command);
+      return;
+    }
+    if (promptTrigger?.kind === "skill") {
+      const skill = skillSuggestions[index];
+      if (skill) insertSkill(skill);
+      return;
+    }
+    const file = visibleFileSuggestions[index];
+    if (file) insertMention(file);
+  }
+
+  function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (suggestionsOpen) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const key = event.key === "ArrowDown" ? "ArrowDown" : "ArrowUp";
+        setSuggestionIndex((current) => moveSuggestionIndex(current, suggestionCount, key));
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSuggestionsDismissed(true);
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault();
+        chooseComposerSuggestion(activeSuggestionIndex);
+        return;
+      }
+    }
+    const mode = promptShortcutMode(event, preferences.sendKey, activeThreadBusy);
+    if (mode) {
+      submitMode.current = mode;
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  }
+
+  function handleAppMenuTriggerKeyDown(menu: AppMenu, event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (!isAppMenuOpenKey(event.key)) return;
+    event.preventDefault();
+    if (openMenu === menu) {
+      menuBar.current?.querySelector<HTMLElement>(".app-menu.open [role=\"menuitem\"]:not([disabled])")?.focus();
+      return;
+    }
+    setOpenMenu(menu);
+  }
+
+  return (
+    <div style={shellStyle} className={`shell ${railRendered ? "rail-open" : ""} ${layoutSidebarCollapsed ? "sidebar-collapsed" : ""} ${narrowLayout && narrowSidebarOpen ? "sidebar-drawer-open" : ""} ${sidebarIconOnly ? "sidebar-icon-only" : ""} sidebar-${preferences.sidebarSide} rail-${preferences.railSide} density-${preferences.density}`}>
+      <a className="skip-link" href="#conversation-content">Skip to conversation</a>
+      <header className="app-titlebar">
+        <div className="titlebar-logo" title="Kimi Code"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div>
+        <nav ref={menuBar} className="menu-bar" aria-label="Application menu">
+          <div className={`app-menu ${openMenu === "file" ? "open" : ""}`} onPointerEnter={() => { if (openMenu) setOpenMenu("file"); }}>
+            <button ref={(element) => { menuTriggers.current.file = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "file"} onClick={() => setOpenMenu((current) => current === "file" ? undefined : "file")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("file", event)}>File</button>
+            {openMenu === "file" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus}>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void createAppWindow(); }}><span>New Window</span><kbd>Ctrl Shift N</kbd></button>
+              <button type="button" role="menuitem" disabled={!kimiRuntimeAvailable || (navView === "projects" && !cwd)} onClick={() => { setOpenMenu(undefined); navView === "chats" ? createStandaloneChat() : createThread(cwd); }}><span>New Chat</span><kbd>{preferences.keybindings.newChat}</kbd></button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void chooseWorkspace(); }}><span>Open Folder…</span><kbd>{preferences.keybindings.openFolder}</kbd></button>
+              <button type="button" role="menuitem" disabled={!workspaceCwd} onClick={() => { setOpenMenu(undefined); void openWorkspaceInEditor(); }}><span>Open in Editor</span></button>
+              <span className="menu-separator" role="separator" />
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void runWindowAction("close"); }}><span>Close Window</span><kbd>Ctrl W</kbd></button>
+              <button type="button" role="menuitem" disabled={!providerState?.installed} onClick={() => { setOpenMenu(undefined); void logout(); }}>Log Out of Kimi</button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void exitApp(); }}>Exit</button>
+            </div>}
+          </div>
+          <div className={`app-menu ${openMenu === "edit" ? "open" : ""}`} onPointerEnter={() => { if (openMenu) setOpenMenu("edit"); }}>
+            <button ref={(element) => { menuTriggers.current.edit = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "edit"} onPointerDown={(event) => event.preventDefault()} onClick={() => setOpenMenu((current) => current === "edit" ? undefined : "edit")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("edit", event)}>Edit</button>
+            {openMenu === "edit" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus} onPointerDown={(event) => event.preventDefault()}>
+              <button type="button" role="menuitem" onClick={() => void edit("cut")}><span>Cut</span><kbd>Ctrl X</kbd></button>
+              <button type="button" role="menuitem" onClick={() => void edit("copy")}><span>Copy</span><kbd>Ctrl C</kbd></button>
+              <button type="button" role="menuitem" onClick={() => void edit("paste")}><span>Paste</span><kbd>Ctrl V</kbd></button>
+              <button type="button" role="menuitem" onClick={() => void edit("delete")}>Delete</button>
+              <span className="menu-separator" role="separator" />
+              <button type="button" role="menuitem" onClick={() => void edit("selectAll")}><span>Select All</span><kbd>Ctrl A</kbd></button>
+            </div>}
+          </div>
+          <div className={`app-menu ${openMenu === "view" ? "open" : ""}`} onPointerEnter={() => { if (openMenu) setOpenMenu("view"); }}>
+            <button ref={(element) => { menuTriggers.current.view = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "view"} onClick={() => setOpenMenu((current) => current === "view" ? undefined : "view")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("view", event)}>View</button>
+            {openMenu === "view" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus}>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setPreferences((current) => ({ ...current, zoom: clampZoom(current.zoom + .1) })); }}><span>Zoom In</span><kbd>Ctrl +</kbd></button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setPreferences((current) => ({ ...current, zoom: clampZoom(current.zoom - .1) })); }}><span>Zoom Out</span><kbd>Ctrl −</kbd></button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setPreferences((current) => ({ ...current, zoom: 1 })); }}><span>Actual Size</span><kbd>Ctrl 0</kbd></button>
+              <span className="menu-separator" role="separator" />
+              <button type="button" role="menuitem" disabled={sidebarToggle.disabled} onClick={() => { setOpenMenu(undefined); toggleSidebar(); }}><span>{sidebarToggle.label}</span><kbd>{preferences.keybindings.toggleSidebar}</kbd></button>
+              <button type="button" role="menuitem" disabled={!workspaceTools} onClick={() => { setOpenMenu(undefined); toggleRail("changes"); }}>Changes</button>
+              <button type="button" role="menuitem" disabled={!workspaceTools} onClick={() => { setOpenMenu(undefined); toggleRail("terminal"); }}><span>Terminal</span><kbd>{preferences.keybindings.terminal}</kbd></button>
+              <button type="button" role="menuitem" disabled={!workspaceTools} onClick={() => { setOpenMenu(undefined); showPreview(); }}>App Preview</button>
+            </div>}
+          </div>
+          <div className={`app-menu ${openMenu === "help" ? "open" : ""}`} onPointerEnter={() => { if (openMenu) setOpenMenu("help"); }}>
+            <button ref={(element) => { menuTriggers.current.help = element; }} className="menu-trigger" type="button" aria-haspopup="menu" aria-expanded={openMenu === "help"} onClick={() => setOpenMenu((current) => current === "help" ? undefined : "help")} onKeyDown={(event) => handleAppMenuTriggerKeyDown("help", event)}>Help</button>
+            {openMenu === "help" && <div className="menu-popover" role="menu" onKeyDown={moveMenuFocus}>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void openExternalLink("https://www.kimi.com/code/docs/en/"); }}>Kimi Code Documentation</button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void openExternalLink("https://github.com/Leonxlnx/kimi-code-desktop#readme"); }}>Kimi Code Desktop Documentation</button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); void openExternalLink("https://github.com/MoonshotAI/kimi-cli"); }}>Kimi Code CLI on GitHub</button>
+              <button type="button" role="menuitem" onClick={() => { setOpenMenu(undefined); setSettingsCategory("about"); setSettingsOpen(true); }}>About Kimi Code</button>
+            </div>}
+          </div>
+          <button className="menu-settings" type="button" onClick={() => { setOpenMenu(undefined); setSettingsCategory("general"); setSettingsOpen(true); }}>Settings</button>
+        </nav>
+        <div className="titlebar-drag" data-tauri-drag-region onDoubleClick={() => void runWindowAction("maximize")} />
+        <div className="window-controls">
+          <button type="button" aria-label="Minimize" onClick={() => void runWindowAction("minimize")}><Minus /></button>
+          <button type="button" aria-label="Maximize or restore" onClick={() => void runWindowAction("maximize")}><Square /></button>
+          <button className="window-close" type="button" aria-label="Close" onClick={() => void runWindowAction("close")}><X /></button>
+        </div>
+      </header>
+
+      {narrowLayout && narrowSidebarOpen && <button className="sidebar-drawer-backdrop" type="button" aria-label="Close sidebar" onClick={() => setNarrowSidebarOpen(false)} />}
+
+      {preferences.sidebarSide === "left" && <div className="sidebar-slot" ref={setSidebarHost} />}
+      {preferences.railSide === "left" && <div className="rail-slot" ref={setRailHost} />}
+      {sidebarHost && createPortal(<aside className="sidebar" aria-label="Kimi Code navigation">
+        {!layoutSidebarCollapsed && <div className="panel-resizer sidebar-resizer" role="separator" aria-label="Resize sidebar" aria-orientation="vertical" aria-valuemin={84} aria-valuemax={420} aria-valuenow={preferences.sidebarWidth} tabIndex={0} onPointerDown={(event) => beginPanelResize("sidebar", event)} onKeyDown={(event) => resizePanelWithKeyboard("sidebar", event)} />}
+        <div className="sidebar-toolbar">
+          <button className="toolbar-icon" type="button" disabled={sidebarToggle.disabled} aria-label={sidebarToggle.label} aria-expanded={narrowLayout ? narrowSidebarOpen : !layoutSidebarCollapsed} title={sidebarToggle.disabled ? sidebarToggle.label : `${sidebarToggle.label} (${preferences.keybindings.toggleSidebar})`} onClick={toggleSidebar}><SidebarSimple /></button>
+          <nav className="view-switch" aria-label="Workspace views">
+            <button className={!capabilityCenterOpen && navView === "projects" ? "active" : ""} type="button" aria-current={!capabilityCenterOpen && navView === "projects" ? "page" : undefined} title="Projects" onClick={() => changeNavView("projects")}><FolderSimple /><span>Projects</span></button>
+            <button className={!capabilityCenterOpen && navView === "chats" ? "active" : ""} type="button" aria-current={!capabilityCenterOpen && navView === "chats" ? "page" : undefined} title="Chats" onClick={() => changeNavView("chats")}><ChatCircleDots /><span>Chats</span></button>
+          </nav>
+          <button className="toolbar-icon" type="button" aria-label="Open command palette" title={`Command palette (${preferences.keybindings.palette})`} onClick={() => setSearchOpen(true)}><MagnifyingGlass /></button>
+        </div>
+
+        <button className={`capability-link ${capabilityCenterOpen ? "active" : ""}`} type="button" aria-current={capabilityCenterOpen ? "page" : undefined} title="Kimi skills and plugins" onClick={() => { setRailView(undefined); setCapabilityTab("plugins"); setCapabilityCenterOpen(true); void refreshCapabilities(); }}><PlugsConnected /><span><strong>Extensions</strong><small>{capabilities?.provider === "kimi" ? `${capabilities.skills.length} skills · ${capabilities.plugins.length} plugins` : "Kimi skills · plugins"}</small></span><CaretRight /></button>
+        <button className={`capability-link ${settingsOpen && settingsCategory === "automations" ? "active" : ""}`} type="button" aria-current={settingsOpen && settingsCategory === "automations" ? "page" : undefined} title="Scheduled agent tasks" onClick={() => { setCapabilityCenterOpen(false); setSettingsCategory("automations"); setSettingsOpen(true); }}><Clock /><span><strong>Scheduled</strong><small>{schedules.filter((schedule) => schedule.enabled).length || ""}</small></span><CaretRight /></button>
+
+        <div className="sidebar-body">
+          <div className="sidebar-heading"><span>{navView === "projects" ? "Projects" : "Chats"}</span><button type="button" title={navView === "projects" ? "Open folder" : "New chat"} aria-label={navView === "projects" ? "Open folder" : "New chat"} disabled={navView === "chats" && !kimiRuntimeAvailable} onClick={() => navView === "projects" ? void chooseWorkspace() : createStandaloneChat()}>{navView === "projects" ? <FolderOpen /> : <Plus />}</button></div>
+          <div className="sidebar-list">
+            {bootstrapping ? <SidebarSkeleton /> : navView === "projects" ? visibleProjects.map((project, projectIndex) => {
+              const expanded = !collapsedProjects.has(pathKey(project.cwd));
+              const panelId = `project-threads-${projectIndex}`;
+              return <section className={`project-group ${expanded ? "expanded" : ""} ${draggingProject && samePath(draggingProject, project.cwd) ? "dragging" : ""}`} key={project.cwd}>
+                <div className="project-row" title={project.cwd} draggable onDragStart={() => setDraggingProject(project.cwd)} onDragEnd={() => setDraggingProject(undefined)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (draggingProject) reorderProject(draggingProject, project.cwd); setDraggingProject(undefined); }} onContextMenu={(event) => { event.preventDefault(); setItemMenu({ kind: "project", id: project.cwd }); }}>
+                  <button className="project-disclosure" type="button" aria-label={`${expanded ? "Collapse" : "Expand"} ${project.name}`} aria-expanded={expanded} aria-controls={panelId} onClick={() => toggleProject(project.cwd)}><CaretRight className="project-caret" size={13} /></button>
+                  <button className={`project-select ${samePath(project.cwd, cwd) ? "active" : ""}`} type="button" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" onClick={() => { if (!samePath(project.cwd, cwd)) createThread(project.cwd); }} onKeyDown={(event) => {
+                    if (!event.altKey || event.ctrlKey || event.metaKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+                    event.preventDefault();
+                    reorderProjectByKeyboard(project, event.key === "ArrowUp" ? -1 : 1);
+                  }}><FolderSimple size={15} /><span>{project.name}</span></button>
+                  <span className="row-actions">
+                    <button className="project-new" type="button" aria-label={`New chat in ${project.name}`} title={`New chat in ${project.name}`} disabled={!kimiRuntimeAvailable} onClick={() => void createThread(project.cwd)}><Plus /></button>
+                    <ItemActions open={itemMenu?.kind === "project" && itemMenu.id === project.cwd} label={`Manage ${project.name}`} onToggle={() => setItemMenu((current) => current?.kind === "project" && current.id === project.cwd ? undefined : { kind: "project", id: project.cwd })} items={[
+                      { label: "New isolated chat", icon: <GitBranch />, onSelect: () => createThread(project.cwd, true) },
+                      { label: "Rename project", icon: <PencilSimple />, onSelect: () => setManageDialog({ kind: "rename-project", cwd: project.cwd, name: project.name }) },
+                      { label: "Remove from sidebar", icon: <X />, onSelect: () => setManageDialog({ kind: "remove-project", cwd: project.cwd, name: project.name }) },
+                      ...(project.threads.length ? [{ label: `Delete ${project.threads.length} chat${project.threads.length === 1 ? "" : "s"}`, icon: <Trash />, danger: true, onSelect: () => setManageDialog({ kind: "delete-project-chats" as const, cwd: project.cwd, name: project.name, threadIds: project.threads.map((thread) => thread.threadId), sessionIds: project.threads.map((thread) => thread.sessionId) }) }] : []),
+                    ]} />
+                  </span>
+                </div>
+                <div className="project-threads" id={panelId} hidden={!expanded}>
+                  {threadTreeOrder(project.threads).map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} side={Boolean(thread.parentThreadId)} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onArchive={() => void archiveThread(thread, true)} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
+                  {project.runtimeSessions.map((session) => <RuntimeSessionNavItem session={session} key={session.sessionId} menuOpen={itemMenu?.kind === "session" && itemMenu.id === session.sessionId} onSelect={() => void resumeSession(session)} onMenu={(forceOpen) => changeRuntimeSessionMenu(session.sessionId, forceOpen)} onRename={() => void renameRuntimeSession(session)} onRemove={() => setManageDialog({ kind: "remove-runtime-session", sessionId: session.sessionId, name: session.title ?? "Agent session" })} />)}
+                </div>
+              </section>;
+            }) : <>
+              {threadTreeOrder(visibleThreads).map((thread) => <ThreadNavItem thread={thread} active={thread.threadId === activeThread?.threadId} chat side={Boolean(thread.parentThreadId)} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => selectThread(thread)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onArchive={() => void archiveThread(thread, true)} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}
+              {visibleRuntimeSessions.map((session) => <RuntimeSessionNavItem session={session} chat key={session.sessionId} menuOpen={itemMenu?.kind === "session" && itemMenu.id === session.sessionId} onSelect={() => void resumeSession(session)} onMenu={(forceOpen) => changeRuntimeSessionMenu(session.sessionId, forceOpen)} onRename={() => void renameRuntimeSession(session)} onRemove={() => setManageDialog({ kind: "remove-runtime-session", sessionId: session.sessionId, name: session.title ?? "Agent chat" })} />)}
+            </>}
+            {!bootstrapping && threadFilter && (navView === "projects" ? !visibleProjects.length : !visibleThreads.length && !visibleRuntimeSessions.length) && <p className="thread-empty">No matches</p>}
+            {!bootstrapping && !threadFilter && navView === "projects" && !visibleProjects.length && <button className="sidebar-empty" type="button" onClick={() => void chooseWorkspace()}><FolderOpen /> Open your first folder</button>}
+            {!bootstrapping && !threadFilter && navView === "chats" && !visibleThreads.length && !visibleRuntimeSessions.length && <button className="sidebar-empty" type="button" disabled={!kimiRuntimeAvailable} onClick={createStandaloneChat}><ChatCircleDots /> Start a chat</button>}
+            <span className="sr-only" aria-live="polite">{projectReorderAnnouncement}</span>
+          </div>
+          {!bootstrapping && archivedThreads.length > 0 && <details className="archived-threads">
+            <summary><Archive /><span>Archived</span><small>{archivedThreads.length}</small><CaretRight /></summary>
+            <div>{archivedThreads.slice(0, 20).map((thread) => <ThreadNavItem archived chat={thread.kind === "chat"} thread={thread} active={false} key={thread.threadId} menuOpen={itemMenu?.kind === "thread" && itemMenu.id === thread.threadId} onSelect={() => void archiveThread(thread, false)} onMenu={(forceOpen) => changeThreadMenu(thread.threadId, forceOpen)} onStop={() => stopThread(thread.threadId)} onRename={() => setManageDialog({ kind: "rename-thread", threadId: thread.threadId, name: thread.title })} onArchive={() => void archiveThread(thread, false)} onDelete={() => setManageDialog({ kind: "delete-thread", threadId: thread.threadId, sessionId: thread.sessionId, name: thread.title })} />)}</div>
+          </details>}
+        </div>
+
+        <footer className="sidebar-footer">
+          <button className="sidebar-quota" type="button" title={quotaLeft === undefined ? "Subscription usage unavailable" : `${quotaLeft}% of current Kimi quota left`} onClick={() => { setSettingsCategory("usage"); setSettingsOpen(true); }}>
+            <Gauge />
+            <span><span className="quota-label"><small>Kimi usage</small><strong>{quotaLeft === undefined ? (quotaLoading ? "Updating…" : "View") : `${quotaLeft}% left`}</strong></span>{quotaLeft !== undefined && <i><b style={{ transform: `scaleX(${quotaLeft / 100})` }} /></i>}</span>
+          </button>
+          {updateNotice && <div className="sidebar-update-note" role="status">{updateNotice}</div>}
+          <div className="sidebar-footer-actions">
+            <button className={`nav-item settings-link ${settingsOpen ? "active" : ""}`} type="button" title="Settings" onClick={() => { setSettingsCategory("general"); setSettingsOpen(true); }}><GearSix size={17} /><span>Settings</span></button>
+            {showSidebarUpdate(updateStatus.phase) && <button className={`sidebar-update ${updateStatus.phase}`} type="button" aria-label={updateStatus.phase === "available" ? `Install Kimi Code ${updateStatus.version ?? "update"} and restart` : updateStatus.phase === "downloading" ? "Cancel Kimi Code update download" : "Installing Kimi Code update"} title={updateStatus.phase === "available" ? "Install update & restart" : updateStatus.phase === "downloading" ? "Cancel download" : "Installing update"} disabled={updateStatus.phase === "installing" || updateStatus.phase === "available" && updatePreparing} onClick={() => void (updateStatus.phase === "downloading" ? cancelUpdateDownload() : installUpdate())}>{updateStatus.phase === "available" ? <DownloadSimple /> : updateStatus.phase === "downloading" ? <X /> : <ArrowsClockwise />}<span>{updateStatus.phase === "downloading" ? `Cancel${updateStatus.percent !== undefined ? ` · ${updateStatus.percent}%` : ""}` : updatePreparing ? "Preparing" : updateStatus.phase === "available" ? "Update" : "Updating"}</span></button>}
+          </div>
+        </footer>
+      </aside>, sidebarHost)}
+
+      <main id="conversation-content" className="conversation" tabIndex={-1}>
+        <header className="topbar">
+          <div className="topbar-title"><strong>{capabilityCenterOpen ? "Capabilities" : activeThread?.title ?? (draftChat ? "New chat" : navView === "chats" ? "Chats" : cwd ? workspaceName(cwd) : "Kimi Code")}</strong>{!capabilityCenterOpen && historicalThread && <span className="topbar-provider"><ProviderMark provider={providerId} />{providerName(providerId)} · History</span>}{!capabilityCenterOpen && (activeThread?.worktree || draftChat?.isolate) && <span className="worktree-badge" title={activeThread?.worktree ? `${activeThread.worktree.branch} · ${activeThread.cwd}` : "A new isolated Git worktree will be created when you send the first task"}><GitBranch />{activeThread?.worktree?.branch ?? "Isolated worktree"}</span>}</div>
+          <div className="topbar-actions">
+            {railAvailable && !capabilityCenterOpen && <button className={`panel-toggle rail-master-toggle ${railRendered ? "active" : ""}`} type="button" title={railView ? "Close work panel" : "Open work panel"} aria-label={railView ? "Close work panel" : "Open work panel"} aria-expanded={railRendered} onClick={() => setRailView((current) => current ? undefined : activeThread?.kind === "chat" ? "agents" : agentRuns.some((run) => run.status === "running") ? "agents" : "changes")}><SidebarSimple /></button>}
+          </div>
+        </header>
+
+        {activeThread && !capabilityCenterOpen && (historicalThread ? <div className="thread-contextbar historical-thread-banner" role="note">
+          <Archive /><span><strong>Historical {providerName(activeThread.provider)} chat</strong><small>This transcript is preserved locally and cannot continue in Kimi.</small></span>
+          <button type="button" disabled={!kimiRuntimeAvailable} onClick={() => activeThread.kind === "chat" ? createStandaloneChat() : createThread(activeThread.worktree?.sourceCwd ?? activeThread.cwd)}><Plus /> Start Kimi chat</button>
+        </div> : <div className={`thread-contextbar ${activeThread.goal ? "has-goal" : ""}`}>
+          <button className="thread-goal" type="button" title={activeThread.goal ? "Edit this goal" : "Define a goal for this chat"} onClick={() => { editPrompt(activeThread.goal ? `/goal ${activeThread.goal.objective}` : "/goal "); window.setTimeout(() => composerInput.current?.focus(), 0); }}>
+            <Hammer /><span><small>Goal</small><strong>{activeThread.goal?.objective ?? "Define what done means"}</strong></span>
+          </button>
+          <div className="thread-context-actions">
+            {activeThread.goal && <button type="button" title="Clear goal" aria-label="Clear goal" onClick={() => void clearGoal(activeThread.threadId)}><X /></button>}
+            <button type="button" title="Create a side chat" onClick={() => void createSideThread()}><GitBranch /><span>Side chat</span></button>
+          </div>
+        </div>)}
+
+        <div className="timeline-shell">
+          <div ref={timeline} className={`timeline ${capabilityCenterOpen ? "capability-timeline" : ""}`} onScroll={(event) => {
+            const pinned = isNearScrollBottom(event.currentTarget);
+            timelinePinned.current = pinned;
+            setShowJumpToLatest(!pinned && Boolean(activeThread && turnWindow.count));
+          }}>
+            {bootstrapping ? <StartupScreen delayed={startupDelayed} {...(serverLookupError ? { error: serverLookupError } : {})} onRetry={() => void recoverLocalServer(true)} /> : capabilityCenterOpen ? <CapabilitiesCenter provider="kimi" data={capabilities} loading={capabilitiesLoading} tab={capabilityTab} profiles={preferences.agentProfiles.filter((profile) => profile.provider === "kimi")} profileDraft={profileDraft} nativePlugins={nativeCapabilityCommands.has("plugins")} nativeMcp={nativeCapabilityCommands.has("mcp-config") || nativeCapabilityCommands.has("mcp")} canInstallSkill={Boolean(capabilityProjectCwd)} onTab={setCapabilityTab} onRefresh={refreshCapabilities} onInstallSkill={chooseSkillToInstall} onUseSkill={(name) => useCapabilityPrompt(skillComposerInsertion(name, runtimeCommands ?? []))} onUsePrompt={useCapabilityPrompt} onProfileDraft={setProfileDraft} onSaveProfile={saveAgentProfile} onUseProfile={useAgentProfile} onDeleteProfile={deleteAgentProfile} onCopyPath={(path) => void navigator.clipboard.writeText(path)} onProjectMcpAction={openProjectMcpDialog} /> : showOnboarding ? <Onboarding provider={providerState} cwd={cwd} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onChooseWorkspace={chooseWorkspace} onCancel={() => void call("auth.cancel", { provider: "kimi" })} onFinish={finishOnboarding} onSkip={finishOnboarding} /> : !historicalThread && !runtimeReady && (!activeThread || !turnWindow.count) ? <ProviderGate provider={providerState} onInstall={installCli} onLogin={beginLogin} onOpenUrl={openExternalLink} onCancel={() => void call("auth.cancel", { provider: "kimi" })} /> : !historicalThread && (!activeThread || !turnWindow.count) ? <EmptyConversation kind={activeThread?.kind ?? draftChat?.kind ?? (navView === "chats" ? "chat" : "project")} workspace={activeThread?.kind === "project" ? activeThread.cwd : draftChat?.kind === "project" ? draftChat.cwd : cwd} agentName="Kimi" canPrompt={runtimeReady && Boolean(activeThread || draftChat || navView === "chats" || cwd)} onPrompt={useStarterPrompt} onOpenFolder={() => void chooseWorkspace()} /> : null}
+            {!bootstrapping && !capabilityCenterOpen && !showOnboarding && <div ref={conversationStage} className="conversation-stage">{hiddenTurnCount > 0 && <button className="conversation-history-more" type="button" onClick={() => setVisibleTurnLimit((current) => current + initialTurnWindow)}><CaretDown /> Show {Math.min(initialTurnWindow, hiddenTurnCount)} earlier turns</button>}{visibleTurnViews.map((turn) => <TurnBlock key={turn.record.turnId} turn={turn} readOnly={historicalThread} onOpenUrl={openExternalLink} onOpenPreview={turnOpenPreview} onOpenLocation={turnOpenLocation} onRevealPath={revealLocalPath} onEdit={turnEditPrompt} onRespond={turnRespond} onRevert={turnRevert} onReview={turnOpenReview} />)}</div>}
+          </div>
+          {showJumpToLatest && <button className="jump-to-latest" type="button" onClick={jumpToLatest}><CaretDown /> Jump to latest</button>}
+        </div>
+
+        {!bootstrapping && !capabilityCenterOpen && !showOnboarding && (historicalThread ? <div className="composer historical-composer" role="status"><Archive /><span><strong>Read-only history</strong><small>Start a Kimi chat above to continue this work.</small></span></div> : <form ref={composer} className={`composer ${draftSending ? "sending" : activeThreadBusy ? "working" : ""}`} onSubmit={send}>
+          {activeThread?.queue.length ? <PromptQueue
+            queue={activeThread.queue}
+            onClear={() => clearQueuedPrompts(activeThread.threadId)}
+            onRemove={(queuedId) => removeQueuedPrompt(activeThread.threadId, queuedId)}
+            onUpdate={(queuedId, text) => updateQueuedPrompt(activeThread.threadId, queuedId, text)}
+            steerDisabled={configMutationPending}
+            onSteer={(queuedId) => steerQueuedPrompt(activeThread.threadId, queuedId)}
+          /> : null}
+          <textarea ref={composerInput} role="combobox" aria-autocomplete="list" aria-controls={suggestionsOpen ? "composer-suggestions" : undefined} aria-expanded={suggestionsOpen} aria-activedescendant={activeSuggestionId} aria-label={activeThreadBusy ? "Task prompt. Enter queues. Control Enter steers." : "Task prompt"} title={activeThreadBusy ? "Enter to queue · Ctrl+Enter to steer" : undefined} value={prompt} onChange={(event) => editPrompt(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={updateMutationsBlocked ? "Updating Kimi Code…" : !runtimeReady ? `Connect ${providerName(providerId)} to continue…` : activeThreadBusy ? "Queue the next instruction (Ctrl+Enter to steer)" : activeThread?.kind === "chat" || draftChat?.kind === "chat" ? `Message ${providerName(providerId)}` : activeThread || draftChat ? `Ask ${providerName(providerId)} to work in this project` : "Start a chat first"} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} />
+          {suggestionsOpen && (commandSuggestions.length > 0 || skillSuggestions.length > 0) && <div className="mention-menu command-mention-menu" id="composer-suggestions" role="listbox" aria-label={promptTrigger?.kind === "skill" ? "Installed skills" : "Kimi commands"}>
+            <small>{promptTrigger?.kind === "skill" ? "Installed skills" : `Commands from ${providerName(providerId)}`}</small>
+            {promptTrigger?.kind === "skill"
+              ? skillSuggestions.map((skill, index) => <button id={`composer-suggestion-${index}`} type="button" role="option" tabIndex={-1} aria-selected={activeSuggestionIndex === index} key={`${skill.scope}-${skill.source}-${skill.name}`} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSuggestionIndex(index)} onClick={() => insertSkill(skill)}><SlidersHorizontal /><span><strong>${skill.name}</strong><small>{skill.description || `${skill.scope} skill`}</small></span><em>{skill.scope}</em></button>)
+              : commandSuggestions.map((command, index) => <button id={`composer-suggestion-${index}`} type="button" role="option" tabIndex={-1} aria-selected={activeSuggestionIndex === index} key={command.name} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSuggestionIndex(index)} onClick={() => insertCommand(command)}><TerminalWindow /><span><strong>/{command.name}</strong><small>{command.description}</small></span></button>)}
+          </div>}
+          {suggestionsOpen && visibleFileSuggestions.length > 0 && <div className="mention-menu" id="composer-suggestions" role="listbox" aria-label="Project files">{visibleFileSuggestions.map((file, index) => <button id={`composer-suggestion-${index}`} type="button" role="option" tabIndex={-1} aria-selected={activeSuggestionIndex === index} key={file} onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSuggestionIndex(index)} onClick={() => insertMention(file)}><FileText />{file}</button>)}</div>}
+          {images.length > 0 && <div className="pending-images">{images.map((image) => <span key={image.name}>{image.name}<button type="button" aria-label={`Remove ${image.name}`} onClick={() => editImages((current) => current.filter((item) => item !== image))}><X /></button></span>)}</div>}
+          <div className="composer-footer">
+            <div ref={composerTools} className="composer-tools">
+              <input ref={fileInput} type="file" accept="image/*" multiple hidden onChange={(event) => void attachImages(event.target.files)} />
+              <button className={`composer-action ${composerMenuOpen ? "active" : ""}`} type="button" title="Add context and capabilities" aria-label="Add context and capabilities" aria-haspopup="menu" aria-expanded={composerMenuOpen} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} onClick={() => setComposerMenuOpen((current) => !current)}><Plus /></button>
+              <button className={`composer-action composer-skill-action ${promptTrigger?.prefix === "/" ? "active" : ""}`} type="button" title="Use a command (/)" aria-label="Toggle commands" aria-pressed={promptTrigger?.prefix === "/"} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked} onClick={toggleComposerCommandPicker}>/</button>
+              {composerMenuOpen && <div className="composer-tools-menu" role="menu" onKeyDown={moveMenuFocus}>
+                <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void attachWorkspaceFiles()}><Paperclip /><span><strong>Add files…</strong><small>{composerProjectCwd ? "Attach files from this project" : "Available inside a project"}</small></span></button>
+                <button type="button" role="menuitem" onClick={() => { setComposerMenuOpen(false); fileInput.current?.click(); }}><ImageSquare /><span><strong>Add images…</strong><small>Attach up to five images</small></span></button>
+                <span className="composer-menu-separator" role="separator" />
+                <button type="button" role="menuitem" onClick={() => startComposerTrigger("/")}><TerminalWindow /><span><strong>Commands</strong><small>Type / to use Kimi Code commands</small></span><kbd>/</kbd></button>
+                <button type="button" role="menuitem" onClick={() => startComposerTrigger("$")}><SlidersHorizontal /><span><strong>Skills</strong><small>Type $ to invoke a Kimi skill</small></span><kbd>$</kbd></button>
+                <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("folder")}><DownloadSimple /><span><strong>Install skill folder…</strong><small>{composerProjectCwd ? "Copy a skill bundle from this project" : "Available inside a project"}</small></span></button>
+                <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => void chooseSkillToInstall("file")}><FileText /><span><strong>Install skill file…</strong><small>{composerProjectCwd ? "Copy a flat Markdown skill from this project" : "Available inside a project"}</small></span></button>
+                {nativeCapabilityCommands.has("plugins") && <button type="button" role="menuitem" onClick={() => startComposerCommand("plugins")}><PlugsConnected /><span><strong>Plugin manager…</strong><small>Open Kimi's plugin manager</small></span><kbd>/plugins</kbd></button>}
+                <button type="button" role="menuitem" onClick={() => startComposerCommand("goal")}><Hammer /><span><strong>Set chat goal…</strong><small>Keep the objective attached to this chat</small></span><kbd>/goal</kbd></button>
+                <button type="button" role="menuitem" disabled={!activeThread} onClick={() => startComposerCommand("side")}><GitBranch /><span><strong>Create side chat…</strong><small>Branch without losing this chat</small></span><kbd>/side</kbd></button>
+                <button type="button" role="menuitem" disabled={!composerProjectCwd} onClick={() => startComposerTrigger("#")}><FileText /><span><strong>Project files</strong><small>Type # to mention workspace context</small></span><kbd>#</kbd></button>
+              </div>}
+              <div className="composer-context-wrap">
+                <button className="composer-context" type="button" aria-label={context ? `Context: ${formatTokens(context.used)} of ${formatTokens(context.size)} used` : "Context usage unavailable"} aria-describedby="composer-context-details"><Gauge /><span>{contextUsed === undefined ? "n/a" : `${contextUsed}%`}</span></button>
+                <div className="composer-context-popover" id="composer-context-details" role="tooltip"><div><span>Context window</span><strong>{contextUsed === undefined ? "n/a" : `${contextUsed}%`}</strong></div>{context ? <><i><b style={{ transform: `scaleX(${contextUsed! / 100})` }} /></i><small><span>{formatTokens(context.used)} used</span><span>{formatTokens(context.size)} limit</span></small></> : <p>Available after the first model update.</p>}</div>
+              </div>
+            </div>
+            <div className="composer-controls">
+              {(activeThread || draftChat) && <ProviderPicker providers={providers} instances={providerInstances} {...(instanceId ? { selectedInstanceId: instanceId } : {})} locked={Boolean(activeThread)} disabled={draftSending || updateMutationsBlocked || configMutationPending} onSelect={selectKimiRuntime} />}
+              {(activeThread || draftChat) && <ComposerConfig options={composerOptions} busyId={configBusyId} disabled={!runtimeReady || draftSending || updateMutationsBlocked || configMutationPending} onChange={changeConfig} />}
+              <button className={`icon-button primary composer-submit ${primaryComposerAction === "stop" ? "composer-stop" : ""}`} type={primaryComposerAction === "stop" ? "button" : "submit"} aria-label={composerPrimaryLabel(primaryComposerAction)} title={composerPrimaryLabel(primaryComposerAction)} disabled={!runtimeReady || (!activeThread && !draftChat) || showOnboarding || draftSending || updateMutationsBlocked || (primaryComposerAction !== "stop" && (!composerSubmitReady || !prompt.trim()))} onClick={primaryComposerAction === "stop" && activeThread ? () => stopThread(activeThread.threadId) : undefined}>{primaryComposerAction === "stop" ? <Stop weight="fill" /> : <ArrowUp weight="bold" />}</button>
+            </div>
+          </div>
+        </form>)}
+      </main>
+
+      {preferences.railSide === "right" && <div className="rail-slot" ref={setRailHost} />}
+      {preferences.sidebarSide === "right" && <div className="sidebar-slot" ref={setSidebarHost} />}
+      {railView && railRendered && railHost && createPortal(<aside className={`rail ${railView}-rail`} aria-label="Workspace tools">
+        {railResizeHandle}{railTabs}
+        <div id={`rail-panel-${railView}`} className={`rail-view rail-view-${railView}`} role="tabpanel" aria-labelledby={`rail-tab-${railView}`} aria-busy={(railView === "changes" || railView === "git") ? gitBusy || visibleGitLoadState === "idle" || visibleGitLoadState === "loading" : undefined} tabIndex={0} key={railView}>
+          {railView === "changes" && <>
+            <div className="rail-contextbar"><span><GitCommit /> {checkpointReview ? "Review turn changes" : visibleGitStatus?.branch ?? "Changes"}</span><div><span className="git-live-status" role="status" aria-live="polite">{gitActivityLabel}</span>{checkpointReview ? <button className="rail-icon" type="button" aria-label="Close turn review" onClick={() => setCheckpointReview(undefined)}><X /></button> : <button className="rail-icon" type="button" aria-label="Refresh changes" disabled={gitBusy} onClick={() => void refreshGit()}><ArrowsClockwise /></button>}</div></div>
+            {visibleGitError && <div className={`git-inline-error ${visibleGitError.kind}`} role="alert"><WarningCircle /><span><strong>{visibleGitError.title}</strong><small>{visibleGitError.detail}</small></span><button type="button" aria-label="Dismiss Git error" onClick={() => setGitError(undefined)}><X /></button></div>}
+            {checkpointReview ? <CheckpointReviewPanel review={checkpointReview} comments={reviewComments} revertedParts={activeThread?.revertedParts ?? []} busy={gitMutationsBlocked} pending={pendingReviewRevert} onComment={(key, value) => setReviewComments((current) => ({ ...current, [key]: value }))} onRequestRevert={setPendingReviewRevert} onConfirmRevert={revertCheckpointPart} onCancelRevert={() => setPendingReviewRevert(undefined)} onAddFeedback={addReviewFeedbackToPrompt} /> : visibleGitStatus || selectedFile || gitDetailLoading ? <div className={`git-changes-layout ${gitDetailOpen ? "detail-open" : ""} ${visibleGitStatus ? "" : "file-only"}`}>
+              {visibleGitStatus && <div className="git-changes-master">
+                <div className="git-summary"><span>{visibleGitStatus.files.length ? `${visibleGitStatus.files.length} changed` : "Working tree clean"}</span><div>{gitUnstagedPaths.length > 0 && <button type="button" disabled={gitMutationsBlocked} onClick={() => void changeGitStage("git.stage", gitUnstagedPaths)}>Stage all</button>}{gitStagedPaths.length > 0 && <button type="button" disabled={gitMutationsBlocked} onClick={() => void changeGitStage("git.unstage", gitStagedPaths)}>Unstage all</button>}{visibleGitStatus.upstream && <small>{visibleGitStatus.ahead ? `↑${visibleGitStatus.ahead}` : ""}{visibleGitStatus.behind ? ` ↓${visibleGitStatus.behind}` : ""} {visibleGitStatus.upstream}</small>}</div></div>
+                {visibleGitFileSections.map((section) => <section className={`git-file-group ${section.id}`} aria-label={`${section.id} files`} key={section.id}><header><span>{section.id === "conflicts" ? "Conflicts" : section.id === "staged" ? "Staged changes" : "Changes"}</span><small>{section.items.length === section.total ? section.total : `${section.items.length} of ${section.total}`}</small></header><div className="git-files">
+                  {section.items.map((file) => <div className={`git-file ${gitDiff?.path === file.path || gitDetailLoading === file.path ? "active" : ""}`} key={file.path}><button type="button" onClick={() => void openGitDiff(file.path)}><span className="git-file-status">{section.id === "conflicts" ? "!" : file.untracked ? "U" : `${file.indexStatus.replace(".", "")}${file.worktreeStatus.replace(".", "")}`}</span><span title={file.path}>{file.path}</span></button><div className="git-file-actions">{gitFileActions(file).map((action) => <button type="button" disabled={gitMutationsBlocked} key={action} onClick={() => void changeGitStage(action === "stage" ? "git.stage" : "git.unstage", [file.path])}>{action === "stage" ? "Stage" : "Unstage"}</button>)}</div></div>)}
+                </div></section>)}
+                {visibleGitFileCount < visibleGitStatus.files.length && <button className="git-show-more" type="button" onClick={() => setGitFileRowLimit((current) => nextProgressiveLimit(current, visibleGitStatus.files.length, gitChangedFilePageSize))}><span>Show more changed files</span><small>{visibleGitFileCount} of {visibleGitStatus.files.length}</small></button>}
+                {!visibleGitStatus.files.length && <div className="git-empty"><Check /> No local changes</div>}
+                <section className="git-commit"><label htmlFor="commit-message">Commit message</label><textarea id="commit-message" value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe this change" /><button className="primary" type="button" disabled={gitMutationsBlocked || !commitMessage.trim() || !visibleGitStatus.files.some((file) => file.staged)} onClick={() => void commitGit()}><GitCommit /> Commit staged</button></section>
+              </div>}
+              <section className="git-changes-detail" aria-label="Change detail">
+                <button className="git-detail-back" type="button" onClick={closeGitDetail}><CaretRight /> Back to changes</button>
+                {gitDetailLoading && <div className="git-detail-empty" role="status"><ArrowsClockwise className="rotating" /> Loading {gitDetailLoading}</div>}
+                {!gitDetailLoading && selectedFile && <section className="git-file-preview file-preview"><div><h2>{selectedFile.path}</h2><button type="button" aria-label="Close file preview" onClick={closeGitDetail}><X /></button></div><pre>{selectedFile.content}</pre></section>}
+                {!gitDetailLoading && gitDiff && renderedGitDiff && <section className="git-diff"><div><strong>{gitDiff.path}</strong><button type="button" onClick={closeGitDetail} aria-label="Close diff"><X /></button></div><pre>{renderedGitDiff.lines.map((line, index) => <span className={gitDiffLineKind(line)} key={index}>{line || " "}</span>)}</pre>{renderedGitDiff.omittedLines > 0 && <p className="git-diff-truncated">Showing the first {renderedGitDiff.lines.length.toLocaleString()} lines · {renderedGitDiff.omittedLines.toLocaleString()} more not rendered</p>}</section>}
+                {!gitDetailOpen && <div className="git-detail-empty"><FileText /><strong>Select a changed file</strong><span>Its bounded diff appears here.</span></div>}
+              </section>
+            </div> : visibleGitLoadState === "not-repository" ? <div className="git-clone"><GitBranch /><strong>No Git repository here</strong><span>Open Git to clone a repository.</span><button className="primary" type="button" onClick={() => setRailView("git")}>Open Git</button></div> : visibleGitLoadState === "error" ? <div className="git-clone"><WarningCircle /><strong>Changes unavailable</strong><span>Resolve the issue above, then retry.</span><button className="primary" type="button" disabled={gitBusy} onClick={() => void refreshGit()}><ArrowsClockwise /> Retry</button></div> : <div className="git-clone" role="status"><ArrowsClockwise className="rotating" /><strong>Reading changes…</strong></div>}
+          </>}
+
+          {railView === "git" && <>
+            <div className="rail-contextbar"><span><GitBranch /> {visibleGitRepository?.current ?? "Git"}</span><div><span className="git-live-status" role="status" aria-live="polite">{gitActivityLabel}</span><button className="rail-icon" type="button" aria-label="Refresh Git" disabled={gitBusy} onClick={() => void refreshGit()}><ArrowsClockwise /></button></div></div>
+            {visibleGitError && <div className={`git-inline-error ${visibleGitError.kind}`} role="alert"><WarningCircle /><span><strong>{visibleGitError.title}</strong><small>{visibleGitError.detail}</small></span><button type="button" aria-label="Dismiss Git error" onClick={() => setGitError(undefined)}><X /></button></div>}
+            {visibleGitStatus && visibleGitRepository ? <>
+              <section className="git-repository">
+                <div className="git-current-branch"><GitBranch /><span><strong>{visibleGitRepository.current}</strong><small>{visibleGitRepository.detached ? "Detached HEAD" : visibleGitRepository.upstream ?? (visibleGitRepository.unborn ? "No commits yet" : "Local branch")}</small></span>{(visibleGitRepository.ahead > 0 || visibleGitRepository.behind > 0) && <em>↑{visibleGitRepository.ahead} ↓{visibleGitRepository.behind}</em>}</div>
+                {visibleGitRepository.remotes.length > 0 && <div className="git-network-row">
+                  <select aria-label="Git remote" value={selectedGitRemote} disabled={gitBusy} onChange={(event) => setGitRemote(event.target.value)}>{visibleGitRepository.remotes.map((remote) => <option value={remote.name} key={remote.name}>{remote.name}</option>)}</select>
+                  <button className="secondary" type="button" aria-label={`Fetch ${selectedGitRemote}`} disabled={gitMutationsBlocked || !selectedGitRemote} onClick={() => void updateGit("git.fetch", { remote: selectedGitRemote }, `Fetched ${selectedGitRemote}.`)}><ArrowsClockwise /><span>Fetch</span></button>
+                  <button className="secondary" type="button" aria-label={`Push to ${selectedGitRemote}`} disabled={gitMutationsBlocked || !selectedGitRemote || visibleGitRepository.unborn} onClick={() => void updateGit("git.push", { remote: selectedGitRemote }, `Pushed ${visibleGitRepository.current} to ${selectedGitRemote}.`)}><ArrowUp /><span>Push</span></button>
+                  <button className="secondary" type="button" aria-label={`Pull from ${visibleGitStatus.upstream ?? "upstream"}`} disabled={gitMutationsBlocked || !visibleGitStatus.upstream} onClick={() => void updateGit("git.pull", {}, `Pulled ${visibleGitStatus.upstream ?? "upstream"}.`)}><DownloadSimple /><span>Pull</span></button>
+                </div>}
+                <details className="git-branches">
+                  <summary ref={(element) => { gitBranchesSummary.current = element ?? undefined; }}><span>Manage branches</span><small>{visibleGitRepository.localBranches.length} local · {visibleGitRepository.remoteBranches.length} remote</small></summary>
+                  <div className="git-branches-body">
+                    <label className="git-branch-search"><MagnifyingGlass /><input value={gitBranchQuery} onChange={(event) => setGitBranchQuery(event.target.value)} placeholder="Filter branches" aria-label="Filter Git branches" /></label>
+                    <div className="git-new-branch"><input value={branchDraft} onChange={(event) => setBranchDraft(event.target.value)} placeholder="new/branch-name" aria-label="New branch name" spellCheck={false} /><button type="button" disabled={gitMutationsBlocked || !branchDraft.trim()} onClick={() => void updateGit("git.createBranch", { branch: branchDraft.trim() }, `Created ${branchDraft.trim()}.`)}><Plus /> Create</button></div>
+                    <section className="git-branch-list" aria-label="Local branches"><header><span>Local</span><small aria-live="polite">{visibleLocalBranches.length === filteredLocalBranches.length ? filteredLocalBranches.length : `${visibleLocalBranches.length} of ${filteredLocalBranches.length}`}</small></header>{visibleLocalBranches.map((branch) => <div className={`git-branch-entry ${branch.current ? "current" : ""}`} key={branch.name}>
+                      <div className="git-branch-row"><button className="git-branch-name" type="button" disabled={gitMutationsBlocked || branch.current} onClick={() => void updateGit("git.switchBranch", { branch: branch.name }, `Switched to ${branch.name}.`)}><Circle weight={branch.current ? "fill" : "regular"} /><span><strong>{branch.name}</strong><small>{branch.current ? "Current" : branch.upstreamGone ? "Upstream gone" : branch.upstream ?? "Local"}{branch.ahead || branch.behind ? ` · ↑${branch.ahead} ↓${branch.behind}` : ""}</small></span></button>
+                      <div className="git-branch-row-actions"><button type="button" disabled={gitMutationsBlocked} aria-label={`Rename ${branch.name}`} title="Rename branch" onClick={(event) => openGitBranchAction({ kind: "rename", branch: branch.name, value: branch.name }, event.currentTarget)}><PencilSimple /></button>{!branch.current && <button type="button" disabled={gitMutationsBlocked} aria-label={`Delete ${branch.name}`} title="Delete branch" onClick={(event) => openGitBranchAction({ kind: "delete", branch: branch.name }, event.currentTarget)}><Trash /></button>}</div></div>
+                      {gitBranchAction?.kind !== "track" && gitBranchAction?.branch === branch.name && <GitBranchActionPanel action={gitBranchAction} busy={gitMutationsBlocked} onValue={(value) => setGitBranchAction((current) => current && current.kind !== "delete" ? { ...current, value } : current)} onCancel={closeGitBranchAction} onConfirm={() => void confirmGitBranchAction()} />}
+                    </div>)}{!filteredLocalBranches.length && <p>No matching local branches.</p>}{visibleLocalBranches.length < filteredLocalBranches.length && <button className="git-show-more" type="button" onClick={() => setGitLocalBranchLimit((current) => ({ scope: localGitBranchScope, limit: nextProgressiveLimit(scopedProgressiveLimit(current, localGitBranchScope, gitBranchPageSize), filteredLocalBranches.length, gitBranchPageSize) }))}><span>Show more local branches</span><small>{visibleLocalBranches.length} of {filteredLocalBranches.length}</small></button>}</section>
+                    {selectedGitRemote && <section className="git-branch-list remote" aria-label={`${selectedGitRemote} remote branches`}><header><span>{selectedGitRemote}</span><small aria-live="polite">{visibleRemoteBranches.length === filteredRemoteBranches.length ? filteredRemoteBranches.length : `${visibleRemoteBranches.length} of ${filteredRemoteBranches.length}`}</small></header>{visibleRemoteBranches.map((branch) => { const exists = visibleGitRepository.localBranches.some((local) => local.name === branch.name); return <div className="git-branch-entry" key={branch.fullName}><div className="git-branch-row"><span className="git-branch-name"><GitBranch /><span><strong>{branch.name}</strong><small>{branch.fullName}</small></span></span><div className="git-branch-row-actions"><button type="button" disabled={gitMutationsBlocked || exists} aria-label={exists ? `${branch.name} already exists locally` : `Track ${branch.fullName}`} title={exists ? "Local branch already exists" : "Create tracking branch"} onClick={(event) => openGitBranchAction({ kind: "track", remote: branch.remote, branch: branch.name, value: branch.name }, event.currentTarget)}><DownloadSimple /></button></div></div>{gitBranchAction?.kind === "track" && gitBranchAction.remote === branch.remote && gitBranchAction.branch === branch.name && <GitBranchActionPanel action={gitBranchAction} busy={gitMutationsBlocked} onValue={(value) => setGitBranchAction((current) => current?.kind === "track" ? { ...current, value } : current)} onCancel={closeGitBranchAction} onConfirm={() => void confirmGitBranchAction()} />}</div>; })}{!filteredRemoteBranches.length && <p>No matching remote branches.</p>}{visibleRemoteBranches.length < filteredRemoteBranches.length && <button className="git-show-more" type="button" onClick={() => setGitRemoteBranchLimit((current) => ({ scope: remoteGitBranchScope, limit: nextProgressiveLimit(scopedProgressiveLimit(current, remoteGitBranchScope, gitBranchPageSize), filteredRemoteBranches.length, gitBranchPageSize) }))}><span>Show more remote branches</span><small>{visibleRemoteBranches.length} of {filteredRemoteBranches.length}</small></button>}</section>}
+                  </div>
+                </details>
+              </section>
+              {!visibleGitRepository.remotes.length && <details className="git-network-action"><summary>Publish repository</summary><div><input value={publishName} onChange={(event) => setPublishName(event.target.value)} placeholder="owner/repository" aria-label="GitHub repository name" /><select value={publishVisibility} onChange={(event) => setPublishVisibility(event.target.value as "private" | "public")} aria-label="Repository visibility"><option value="private">Private</option><option value="public">Public</option></select><button type="button" disabled={gitMutationsBlocked || !publishName.trim()} onClick={() => void publishGit()}>Publish with GitHub CLI</button><small>This creates a remote repository and pushes the current branch. GitHub CLI sign-in is required.</small></div></details>}
+              {visibleGitStatus.upstream && <details className="git-network-action"><summary>Create pull request</summary><div><input value={pullRequest.title} onChange={(event) => setPullRequest((current) => ({ ...current, title: event.target.value }))} placeholder="Pull request title" aria-label="Pull request title" /><textarea value={pullRequest.body} onChange={(event) => setPullRequest((current) => ({ ...current, body: event.target.value }))} placeholder="Summary and test plan" aria-label="Pull request description" /><label><input type="checkbox" checked={pullRequest.draft} onChange={(event) => setPullRequest((current) => ({ ...current, draft: event.target.checked }))} /> Create as draft</label><button type="button" disabled={gitMutationsBlocked || !pullRequest.title.trim()} onClick={() => void createGitPullRequest()}>Create with GitHub CLI</button></div></details>}
+            </> : visibleGitLoadState === "not-repository" ? <div className="git-clone"><GitBranch /><strong>No Git repository here</strong><span>Clone an HTTPS or SSH repository into a folder you choose.</span><input value={cloneUrl} onChange={(event) => setCloneUrl(event.target.value)} placeholder="https://github.com/owner/repo.git" aria-label="Repository clone URL" spellCheck={false} /><button className="primary" type="button" disabled={gitMutationsBlocked || !repositoryNameFromUrl(cloneUrl)} onClick={() => void cloneGitRepository()}><DownloadSimple /> Clone repository</button></div> : visibleGitLoadState === "error" ? <div className="git-clone"><WarningCircle /><strong>Git status unavailable</strong><span>Resolve the issue above, then retry.</span><button className="primary" type="button" disabled={gitBusy} onClick={() => void refreshGit()}><ArrowsClockwise /> Retry</button></div> : <div className="git-clone" role="status"><ArrowsClockwise className="rotating" /><strong>Reading repository…</strong></div>}
+          </>}
+
+          {railView === "terminal" && <>
+            <div className="terminal-tabs" role="tablist" aria-label="Workspace terminals"><div>{workspaceTerminalTabs.map((tab) => <button className={tab.tabId === activeTerminalTab?.tabId ? "active" : ""} type="button" role="tab" aria-selected={tab.tabId === activeTerminalTab?.tabId} key={tab.tabId} onClick={() => selectTerminalTab(tab.tabId)}><TerminalWindow /><span>{tab.name}</span><i className={tab.session ? "live" : ""} /></button>)}</div><span><button className="rail-icon" type="button" aria-label="New terminal" title="New terminal" onClick={() => addTerminalTab()}><Plus /></button><button className={`rail-icon ${splitTerminalTab ? "active" : ""}`} type="button" aria-label="Toggle terminal split" title={terminalSplitAvailable ? "Split terminal" : "Widen the panel to split terminals"} disabled={!terminalSplitAvailable} onClick={toggleTerminalSplit}><SidebarSimple /></button></span></div>
+            <div className={`terminal-grid ${splitTerminalTab ? "split" : ""}`}>
+              {visibleTerminalTabs.map((tab) => <section className={`terminal-pane ${tab.tabId === activeTerminalTab?.tabId ? "active" : ""}`} key={tab.tabId} onPointerDown={() => selectTerminalTab(tab.tabId)}>
+                <div className="rail-contextbar"><span title={tab.session?.cwd ?? tab.cwd}><TerminalWindow /> {tab.session?.shell ?? "Terminal"}</span><div><button className="rail-icon" type="button" aria-label="Attach recent terminal output to prompt" title="Attach output to prompt" disabled={!tab.entries.length} onClick={() => attachTerminalContext(tab)}><Paperclip /></button><button className="rail-icon" type="button" aria-label="Clear terminal" title="Clear terminal" onClick={() => updateTerminalTab(tab.tabId, (current) => ({ ...current, entries: [] }))}><Broom /></button><button className="rail-icon" type="button" aria-label="Restart terminal" title="Restart terminal" disabled={tab.starting} onClick={() => void restartTerminal(tab)}><ArrowsClockwise /></button><button className="rail-icon" type="button" aria-label={`Close ${tab.name}`} title="Close terminal" onClick={() => void closeTerminalTab(tab)}><X /></button></div></div>
+                <div className="terminal-screen" role="region" aria-label={`${tab.name} output`}>
+                  {!tab.entries.length && <div className="terminal-empty">{tab.starting ? "Starting PowerShell…" : "Run a command in this workspace."}</div>}
+                  {tab.entries.map((entry) => <pre className={entry.kind} key={entry.id}>{entry.text}</pre>)}
+                  {tab.tabId === activeTerminalTab?.tabId && <div ref={terminalEnd} />}
+                </div>
+                <form className="terminal-input" onSubmit={(event) => runTerminalCommand(event, tab)}>
+                  <span aria-hidden="true">›</span>
+                  <input value={tab.command} onChange={(event) => { updateTerminalTab(tab.tabId, (current) => ({ ...current, command: event.target.value })); setTerminalHistoryIndex(-1); }} onKeyDown={(event) => {
+                    if (event.key === "ArrowUp" && terminalHistory.length) {
+                      event.preventDefault();
+                      const next = Math.min(terminalHistory.length - 1, terminalHistoryIndex + 1);
+                      setTerminalHistoryIndex(next);
+                      updateTerminalTab(tab.tabId, (current) => ({ ...current, command: terminalHistory[terminalHistory.length - 1 - next] ?? "" }));
+                    } else if (event.key === "ArrowDown" && terminalHistoryIndex >= 0) {
+                      event.preventDefault();
+                      const next = terminalHistoryIndex - 1;
+                      setTerminalHistoryIndex(next);
+                      updateTerminalTab(tab.tabId, (current) => ({ ...current, command: next < 0 ? "" : terminalHistory[terminalHistory.length - 1 - next] ?? "" }));
+                    }
+                  }} aria-label={`${tab.name} command`} autoComplete="off" spellCheck={false} placeholder={tab.session ? "Type a command" : tab.startError ? "Restart terminal to try again" : "Terminal is starting…"} disabled={!tab.session} />
+                  <button type="submit" aria-label="Run command" disabled={!tab.session || !tab.command.trim()}><PaperPlaneRight weight="fill" /></button>
+                </form>
+              </section>)}
+            </div>
+          </>}
+
+          {railView === "preview" && <>
+            <form className="preview-address" onSubmit={(event) => { event.preventDefault(); showPreview(); }}>
+              <label><Browser /><input value={previewDraft} onChange={(event) => setPreviewDraft(event.target.value)} aria-label="Local preview URL" spellCheck={false} /></label>
+              <button className="preview-open" type="submit">Open</button>
+              <div className="preview-actions"><button className="rail-icon" type="button" aria-label="Reload preview" title="Reload preview" onClick={() => setPreviewRevision((value) => value + 1)}><ArrowsClockwise /></button><button className="rail-icon" type="button" aria-label="Open preview in default browser" title="Open in browser" disabled={!previewUrl} onClick={() => { if (previewUrl) void openExternalLink(previewUrl); }}><ArrowSquareOut /></button><button className="preview-size" type="button" aria-label={`Cycle preview width; current ${previewPanelMode.toLowerCase()}`} title="Cycle preview width" onClick={cyclePreviewWidth}>{previewPanelMode === "Wide" ? <CornersIn /> : <CornersOut />}<span>{previewPanelMode}</span></button></div>
+            </form>
+            <div className="preview-frame">
+              {previewUrl ? <iframe key={`${previewUrl}-${previewRevision}`} src={previewUrl} title={`Preview of ${previewUrl}`} sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts" referrerPolicy="no-referrer" /> : <div className="preview-empty"><Browser /><strong>No local app open</strong><span>Enter a localhost URL above.</span></div>}
+            </div>
+          </>}
+
+          {railView === "agents" && <SubagentsRail provider={activeThread?.provider ?? providerId} runs={agentRuns} readOnly={historicalThread} canInspect={!historicalThread && Boolean(providerState?.capabilities?.subagents.inspect)} canStop={!historicalThread && Boolean(providerState?.capabilities?.subagents.stop)} onInspect={async (run) => {
+            const agentThreadId = run.threadIds?.[0];
+            if (!activeThread || historicalThread || !agentThreadId) return undefined;
+            const result = await call("subagents.inspect", { threadId: activeThread.threadId, agentThreadId }) as { inspection: SubagentInspection };
+            return result.inspection;
+          }} onStop={async (run) => { const agentThreadId = run.threadIds?.[0]; if (!activeThread || historicalThread || !agentThreadId) return; await call("subagents.stop", { threadId: activeThread.threadId, agentThreadId }); }} onUseAgent={(agent) => { if (!historicalThread) useCapabilityPrompt(`Use the ${agent} subagent for this task: `); }} onOpenCenter={() => { setCapabilityTab("agents"); setCapabilityCenterOpen(true); setRailView(undefined); }} />}
+        </div>
+      </aside>, railHost)}
+
+      {searchOpen && <div className="command-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) { setSearchOpen(false); setThreadFilter(""); } }}>
+        <section className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette" onKeyDown={trapDialogFocus}>
+          <label className="command-input"><MagnifyingGlass /><input autoFocus value={threadFilter} onChange={(event) => setThreadFilter(event.target.value)} placeholder="Search actions, projects, chats, and scripts…" aria-label="Search commands, projects, chats, and scripts" /><kbd>Esc</kbd></label>
+          <div className="command-results">
+            {paletteActions.length > 0 && <section><h2>Actions</h2>{paletteActions.map((action) => <button type="button" key={action.id} disabled={action.disabled} onClick={action.run}>{action.icon}<span><strong>{action.label}</strong><small>{action.detail}</small></span>{action.shortcut && <kbd>{action.shortcut}</kbd>}</button>)}</section>}
+            {visibleProjectScripts.length > 0 && <section><h2>Project scripts</h2>{visibleProjectScripts.slice(0, 8).map((script) => <button type="button" key={script.name} onClick={() => runProjectScript(script)}><TerminalWindow /><span><strong>npm run {script.name}</strong><small>{script.command}</small></span></button>)}</section>}
+            {visibleProjects.length > 0 && <section><h2>Projects</h2>{visibleProjects.slice(0, 6).map((project) => <button type="button" key={project.cwd} onClick={() => { const first = project.threads[0]; first ? selectThread(first) : createThread(project.cwd); setSearchOpen(false); setThreadFilter(""); }}><FolderSimple /><span><strong>{project.name}</strong><small>{project.cwd}</small></span></button>)}</section>}
+            {(visibleThreads.length > 0 || visibleRuntimeSessions.length > 0) && <section><h2>Chats</h2>{visibleThreads.slice(0, 8).map((thread) => <button type="button" key={thread.threadId} onClick={() => { selectThread(thread); setSearchOpen(false); setThreadFilter(""); }}><ChatCircleDots /><span><strong>{thread.title}</strong><small>{thread.provider === "kimi" ? "Kimi" : `${providerName(thread.provider)} · History`}</small></span></button>)}{visibleRuntimeSessions.slice(0, Math.max(0, 8 - visibleThreads.length)).map((session) => <button type="button" key={session.sessionId} onClick={() => { setSearchOpen(false); setThreadFilter(""); void resumeSession(session); }}><ChatCircleDots /><span><strong>{session.title ?? "Agent chat"}</strong><small>Kimi</small></span></button>)}</section>}
+            {!paletteActions.length && !visibleProjectScripts.length && !visibleProjects.length && !visibleThreads.length && !visibleRuntimeSessions.length && <div className="command-empty"><MagnifyingGlass /><strong>No matches</strong><span>Try an action, project, chat, or script name.</span></div>}
+          </div>
+          <footer><span>Everything stays local</span><span><kbd>{preferences.keybindings.palette}</kbd></span></footer>
+        </section>
+      </div>}
+
+      {settingsOpen && <SettingsDialog
+        category={settingsCategory}
+        query={settingsQuery}
+        preferences={preferences}
+        auth={auth}
+        providers={providers}
+        environments={wslEnvironments}
+        remote={remoteStatus}
+        remotePairing={remotePairing}
+        remoteBusy={remoteBusy}
+        schedules={schedules}
+        schedulesBusy={schedulesBusy}
+        threads={threads}
+        activeThread={activeThread}
+        cwd={cwd}
+        quota={quota}
+        quotaError={quotaError}
+        quotaLoading={quotaLoading}
+        updateStatus={updateStatus}
+        turnRunning={updateBlocked || updatePreparing}
+        onCategory={setSettingsCategory}
+        onQuery={setSettingsQuery}
+        onPreferences={(patch) => setPreferences((current) => ({ ...current, ...patch }))}
+        onClose={() => { setSettingsOpen(false); setSettingsQuery(""); }}
+        onChooseWorkspace={chooseWorkspace}
+        onInstallCli={installCli}
+        onLogin={beginLogin}
+        onLogout={logout}
+        onRefreshQuota={refreshQuota}
+        onCheckUpdates={checkForUpdates}
+        onInstallUpdate={installUpdate}
+        onCancelUpdate={cancelUpdateDownload}
+        onExportDiagnostics={exportDiagnostics}
+        onExportSessions={exportSessions}
+        onRefreshEnvironments={refreshEnvironments}
+        onRefreshRemote={refreshRemote}
+        onConfigureRemote={configureRemote}
+        onCreateRemotePairing={createRemotePairing}
+        onRevokeRemoteDevice={revokeRemoteDevice}
+        onCreateSchedule={createSchedule}
+        onUpdateSchedule={updateSchedule}
+        onDeleteSchedule={deleteSchedule}
+        onRunSchedule={runSchedule}
+        onShowOnboarding={() => { setShowOnboarding(true); setSettingsOpen(false); setSettingsQuery(""); }}
+      />}
+      {manageDialog && <ManageItemDialog dialog={manageDialog} onCancel={() => setManageDialog(undefined)} onConfirm={confirmManageAction} />}
+      {yoloConfirm && <YoloConfirmDialog busy={yoloConfirm.busy} onCancel={() => setYoloConfirm((pending) => pending?.busy ? pending : undefined)} onConfirm={async () => {
+        const pending = yoloConfirm;
+        if (!configTargetsMatch(pending.target, currentConfigTarget.current) || pending.busy) {
+          setYoloConfirm(undefined);
+          return;
+        }
+        setYoloConfirm({ ...pending, busy: true });
+        const success = await setConfig(pending.configId, pending.value, pending.target);
+        if (success && configTargetsMatch(pending.target, currentConfigTarget.current)) {
+          setPreferences((current) => ({ ...current, yoloAcknowledged: true }));
+        }
+        setYoloConfirm(undefined);
+      }} />}
+      {(taskNotice || diagnostics.length > 0) && <div className="notice-stack">{taskNotice && <div className="app-notice task-notice" role="status" aria-live="polite"><Check /><span><strong>{taskNotice.title}</strong><small>{taskNotice.message}</small></span><button type="button" aria-label="Dismiss task update" onClick={() => setTaskNotice(undefined)}><X /></button></div>}{diagnostics.length > 0 && <div className="app-notice" role="alert"><WarningCircle /><span>{diagnostics[diagnostics.length - 1]}</span><button type="button" aria-label="Reveal runtime log" title="Reveal runtime log" onClick={() => void openRuntimeLog()}><Bug /></button><button type="button" aria-label="Copy error details" title="Copy error details" onClick={() => void navigator.clipboard.writeText(diagnostics.join("\n"))}><Copy /></button><button type="button" aria-label="Dismiss notification" onClick={() => setDiagnostics([])}><X /></button></div>}</div>}
+    </div>
+  );
+}
+
+function PromptQueue({ queue, steerDisabled = false, onClear, onRemove, onUpdate, onSteer }: {
+  queue: QueuedPrompt[];
+  steerDisabled?: boolean;
+  onClear: () => void;
+  onRemove: (queuedId: string) => void;
+  onUpdate: (queuedId: string, text: string) => void;
+  onSteer: (queuedId: string) => void;
+}) {
+  const [editing, setEditing] = useState<{ queuedId: string; text: string }>();
+  useEffect(() => {
+    if (editing && !queue.some((queued) => queued.queuedId === editing.queuedId)) setEditing(undefined);
+  }, [editing, queue]);
+
+  const save = () => {
+    const text = editing?.text.trim();
+    if (!editing || !text) return;
+    onUpdate(editing.queuedId, text);
+    setEditing(undefined);
+  };
+
+  return <section className="prompt-queue" aria-label={`${queue.length} queued prompts`}>
+    <header><strong>{queue.length} queued</strong><span>Runs in order</span><button type="button" onClick={onClear}>Clear</button></header>
+    <div className="prompt-queue-list">
+      {queue.map((queued, index) => editing?.queuedId === queued.queuedId ? <div className="queued-prompt editing" key={queued.queuedId}>
+        <input autoFocus aria-label="Edit queued prompt" value={editing.text} onChange={(event) => setEditing({ queuedId: queued.queuedId, text: event.target.value })} onKeyDown={(event) => {
+          if (event.key === "Enter") { event.preventDefault(); save(); }
+          if (event.key === "Escape") { event.preventDefault(); setEditing(undefined); }
+        }} />
+        <div className="queued-prompt-actions"><button type="button" disabled={!editing.text.trim()} onClick={save}>Save</button><button type="button" onClick={() => setEditing(undefined)}>Cancel</button></div>
+      </div> : <div className="queued-prompt" key={queued.queuedId}>
+        <span><b>{queued.mode === "steer" ? "Steer" : `Next ${index + 1}`}</b><span title={queued.text}>{queued.text}</span></span>
+        <div className="queued-prompt-actions">
+          <button type="button" onClick={() => setEditing({ queuedId: queued.queuedId, text: queued.text })}><PencilSimple /> Edit</button>
+          <button type="button" disabled={steerDisabled} onClick={() => onSteer(queued.queuedId)}>Steer</button>
+          <button className="queued-remove" type="button" aria-label={`Remove queued prompt: ${queued.text}`} onClick={() => onRemove(queued.queuedId)}><X /></button>
+        </div>
+      </div>)}
+    </div>
+  </section>;
+}
+
+function EmptyConversation({ kind, workspace, agentName, canPrompt, onPrompt, onOpenFolder }: { kind: "project" | "chat"; workspace: string | undefined; agentName: string; canPrompt: boolean; onPrompt: (text: string) => void; onOpenFolder: () => void }) {
+  const projectName = workspace ? workspaceName(workspace) : undefined;
+  const starters = kind === "chat" ? [
+    { icon: <ChatCircleDots />, label: "Explain a difficult topic", prompt: "Explain a difficult topic in simple terms" },
+    { icon: <Plus />, label: "Help me plan something", prompt: "Help me turn an idea into a clear, practical plan" },
+    { icon: <FileText />, label: "Improve some writing", prompt: "Review and improve this writing while keeping my voice: " },
+    { icon: <MagnifyingGlass />, label: "Research a question", prompt: "Research this question and give me a concise, well-sourced answer: " },
+  ] : [
+    { icon: <MagnifyingGlass />, label: "Explore and understand the code", prompt: "Explore this project and explain how it works" },
+    { icon: <Plus />, label: "Build a new feature", prompt: "Build a new feature in this project: " },
+    { icon: <GitBranch />, label: "Review code and suggest changes", prompt: "Review this project and suggest the highest-impact code improvements" },
+    { icon: <WarningCircle />, label: "Find and fix an issue", prompt: "Find and fix an issue in this project: " },
+  ];
+  return <div className="empty empty-conversation">
+    <div className="empty-mark"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div>
+    <h1>{kind === "chat" ? `What would you like to ask ${agentName}?` : projectName ? <>What should we work on in <span>{projectName}</span>?</> : "Open a folder to start building"}</h1>
+    <p>{kind === "chat" ? "This is a standalone chat, separate from your project workspaces." : projectName ? "Pick a starting point or describe exactly what you want to change." : `Choose any folder on this PC. ${agentName} opens it here without restarting the app.`}</p>
+    {kind === "project" && !projectName ? <button className="secondary empty-open-folder" type="button" onClick={onOpenFolder}><FolderOpen /> Open folder</button> : <div className="empty-prompts" aria-label="Suggested prompts">
+      {starters.map((starter) => <button type="button" key={starter.label} disabled={!canPrompt} onClick={() => onPrompt(starter.prompt)}><span>{starter.icon}</span><strong>{starter.label}</strong></button>)}
+    </div>}
+  </div>;
+}
+
+function ItemActions({ open, label, items, onToggle }: { open: boolean; label: string; items: Array<{ label: string; icon: React.ReactNode; danger?: boolean; onSelect: () => void }>; onToggle: () => void }) {
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  const menu = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState<{ top: number; left: number; side: "above" | "below" }>();
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      if (!trigger.current || !menu.current) return;
+      const anchor = trigger.current.getBoundingClientRect();
+      const next = floatingMenuPosition(
+        { top: anchor.top, right: anchor.right, bottom: anchor.bottom },
+        { width: menu.current.offsetWidth, height: menu.current.offsetHeight },
+        { width: window.innerWidth, height: window.innerHeight },
+      );
+      setPosition({ ...next, side: next.top < anchor.top ? "above" : "below" });
+    };
+    place();
+    const focusFrame = window.requestAnimationFrame(() => menu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')?.focus());
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+      if (menu.current?.contains(document.activeElement)) trigger.current?.focus();
+    };
+  }, [open]);
+
+  return <span className="item-menu-wrap">
+    <button ref={trigger} className="item-menu-trigger" type="button" aria-label={label} aria-haspopup="menu" aria-expanded={open} onClick={(event) => { event.preventDefault(); event.stopPropagation(); onToggle(); }} onKeyDown={(event) => { if (event.key === "ArrowDown" && !open) { event.preventDefault(); onToggle(); } }}><DotsThree weight="bold" /></button>
+    {open && createPortal(<div ref={menu} className="item-menu item-menu-portal" role="menu" data-side={position?.side} onKeyDown={moveMenuFocus} style={{ top: position?.top ?? 0, left: position?.left ?? 0, visibility: position ? "visible" : "hidden" }}>{items.map((item) => <button className={item.danger ? "danger" : ""} type="button" role="menuitem" key={item.label} onClick={(event) => { event.preventDefault(); event.stopPropagation(); trigger.current?.focus(); item.onSelect(); onToggle(); }}>{item.icon}<span>{item.label}</span></button>)}</div>, document.body)}
+  </span>;
+}
+
+function ThreadNavItem({ thread, active, chat = false, side = false, archived = false, menuOpen, onSelect, onMenu, onStop, onRename, onArchive, onDelete }: { thread: Thread; active: boolean; chat?: boolean; side?: boolean; archived?: boolean; menuOpen: boolean; onSelect: () => void; onMenu: (forceOpen?: boolean) => void; onStop: () => void; onRename: () => void; onArchive: () => void; onDelete: () => void }) {
+  const busy = thread.provider === "kimi" && isThreadBusy(thread);
+  const items = [
+    ...(busy ? [{ label: "Stop task", icon: <Stop weight="fill" />, onSelect: onStop }] : []),
+    { label: "Rename chat", icon: <PencilSimple />, onSelect: onRename },
+    { label: archived ? "Restore chat" : "Archive chat", icon: <Archive />, onSelect: onArchive },
+    { label: "Delete chat", icon: <Trash />, danger: true, onSelect: onDelete },
+  ];
+  return <div className={`thread-row-wrap ${side ? "side-thread-row" : ""} ${active ? "active" : ""}`} onContextMenu={(event) => { event.preventDefault(); onMenu(true); }}>
+    <button className={`thread ${chat ? "chat-thread" : ""} ${active ? "active" : ""}`} type="button" aria-current={active ? "page" : undefined} title={thread.provider === "kimi" ? thread.title : `${thread.title} · Historical ${providerName(thread.provider)} chat`} onClick={onSelect}>
+      {side && <GitBranch className="side-thread-icon" />}{chat ? <span className="thread-copy"><strong>{thread.title}</strong></span> : <span>{thread.title}</span>}
+    </button>
+    <span className="thread-row-actions">{busy && <i className="thread-running" role="status" aria-label={`Task ${thread.lifecycle.phase}`} />}<ItemActions open={menuOpen} label={`Manage ${thread.title}`} items={items} onToggle={onMenu} /></span>
+  </div>;
+}
+
+function RuntimeSessionNavItem({ session, chat = false, menuOpen, onSelect, onMenu, onRename, onRemove }: { session: RuntimeSession; chat?: boolean; menuOpen: boolean; onSelect: () => void; onMenu: (forceOpen?: boolean) => void; onRename: () => void; onRemove: () => void }) {
+  const title = session.title ?? (chat ? "Agent chat" : "Agent session");
+  const items = [
+    { label: "Open chat", icon: <ChatCircleDots />, onSelect },
+    { label: "Rename chat", icon: <PencilSimple />, onSelect: onRename },
+    { label: "Remove from sidebar", icon: <X />, onSelect: onRemove },
+  ];
+  return <div className="thread-row-wrap" onContextMenu={(event) => { event.preventDefault(); onMenu(true); }}>
+    <button className={`thread resumable ${chat ? "chat-thread" : ""}`} type="button" onClick={onSelect}>
+      {chat ? <span className="thread-copy"><strong>{title}</strong></span> : <span>{title}</span>}
+    </button>
+    <span className="thread-row-actions"><ItemActions open={menuOpen} label={`Manage ${title}`} items={items} onToggle={onMenu} /></span>
+  </div>;
+}
+
+function ManageItemDialog({ dialog, onCancel, onConfirm }: { dialog: ManageDialog; onCancel: () => void; onConfirm: (value?: string) => void | Promise<void> }) {
+  const dialogRef = useModalFocus<HTMLFormElement>();
+  const renaming = dialog.kind === "rename-project" || dialog.kind === "rename-thread";
+  const [value, setValue] = useState(dialog.name);
+  const [busy, setBusy] = useState(false);
+  const copy = dialog.kind === "rename-project"
+    ? { title: "Rename project", description: "This changes only the display name in Kimi Code.", action: "Rename" }
+    : dialog.kind === "rename-thread"
+      ? { title: "Rename chat", description: "Give this chat a clear name. Its history stays intact.", action: "Rename" }
+      : dialog.kind === "remove-project"
+        ? { title: "Remove project?", description: "The folder and its files stay on your computer. You can open it again anytime.", action: "Remove" }
+        : dialog.kind === "remove-runtime-session"
+          ? { title: `Remove “${dialog.name}”?`, description: "This hides the resumable session in Kimi Code. Its provider history stays untouched.", action: "Remove" }
+        : dialog.kind === "delete-project-chats"
+          ? { title: `Delete chats in ${dialog.name}?`, description: `This removes ${dialog.threadIds.length} local chat${dialog.threadIds.length === 1 ? "" : "s"}. Project files are never deleted.`, action: "Delete chats" }
+      : dialog.kind === "install-skill"
+          ? { title: `Install “${dialog.name}”?`, description: "Kimi Code will copy this project-local skill into your user Kimi Code skills folder. Existing skills are never overwritten.", action: "Install skill" }
+          : dialog.kind === "approve-project-mcp"
+            ? { title: "Approve project MCP servers?", description: "Approved MCP servers may start programs and access the network as your Windows user. Any configuration change requires approval again.", action: "Approve" }
+            : dialog.kind === "revoke-project-mcp"
+              ? { title: "Revoke project MCP approval?", description: "Kimi Code will stop attaching these project MCP servers. The project files and user-level MCP servers stay unchanged.", action: "Revoke" }
+          : { title: `Delete “${dialog.name}”?`, description: "This removes the local chat history from Kimi Code. Project files stay untouched.", action: "Delete chat" };
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [busy, onCancel]);
+  return <div className="manage-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
+    <form ref={dialogRef} className="manage-dialog" role="dialog" aria-modal="true" aria-labelledby="manage-title" aria-describedby="manage-description" onKeyDown={trapDialogFocus} onSubmit={(event) => { event.preventDefault(); setBusy(true); void Promise.resolve(onConfirm(renaming ? value : undefined)).finally(() => setBusy(false)); }}>
+      <header><span><strong id="manage-title">{copy.title}</strong><small id="manage-description">{copy.description}</small></span><button type="button" aria-label="Close" disabled={busy} onClick={onCancel}><X /></button></header>
+      {renaming && <label><span>Name</span><input autoFocus value={value} maxLength={120} onChange={(event) => setValue(event.target.value)} onFocus={(event) => event.currentTarget.select()} /></label>}
+      <footer><button className="secondary" type="button" autoFocus={!renaming} disabled={busy} onClick={onCancel}>Cancel</button><button className={renaming || dialog.kind === "remove-project" || dialog.kind === "remove-runtime-session" || dialog.kind === "install-skill" || dialog.kind === "approve-project-mcp" ? "primary" : "danger"} type="submit" disabled={busy || (renaming && !value.trim())}>{busy ? "Working…" : copy.action}</button></footer>
+    </form>
+  </div>;
+}
+
+type ComposerControl = {
+  id: string;
+  label: string;
+  tooltip: string;
+  icon: React.ReactNode;
+  current: string;
+  value: string;
+  note?: string;
+  disabled?: boolean;
+  choices: Array<{ value: string; name: string; description?: string; danger?: boolean }>;
+};
+
+function ProviderPicker({ providers, instances, selectedInstanceId, locked, disabled, onSelect }: { providers: ProviderState[]; instances: ProviderInstance[]; selectedInstanceId?: string; locked: boolean; disabled: boolean; onSelect: (instanceId?: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const defaultRuntimeValue = "__kimi_default__";
+  const provider = providers.find((item) => item.id === "kimi");
+  const kimiInstances = instances.filter((instance) => instance.provider === "kimi");
+  const choices = [{
+    value: defaultRuntimeValue,
+    name: provider?.name ?? "Kimi",
+    description: !provider?.installed ? "CLI not installed" : provider.authenticated === false ? "Sign in required" : provider.account ?? "Default Kimi runtime",
+  }, ...kimiInstances.map((instance) => ({ value: instance.id, name: instance.name, description: instance.environment ?? `Configured Kimi runtime${instance.installed ? "" : " · CLI missing"}` }))];
+  const selectedInstance = kimiInstances.find((instance) => instance.id === selectedInstanceId);
+  if (!shouldShowRuntimePicker(kimiInstances.map((instance) => instance.id), selectedInstanceId)) return null;
+  const control: ComposerControl = {
+    id: "runtime",
+    label: "Kimi runtime",
+    icon: <Robot />,
+    tooltip: locked ? "Kimi runtime is fixed for this chat" : "Kimi runtime for the new chat",
+    current: selectedInstance?.name ?? provider?.name ?? "Kimi",
+    value: selectedInstance?.id ?? defaultRuntimeValue,
+    choices,
+    disabled: locked || disabled || !choices.length,
+  };
+  return <div className="provider-picker"><ConfigControl control={control} open={open} onToggle={() => setOpen((current) => !current)} onClose={() => setOpen(false)} onPick={(value) => { onSelect(value === defaultRuntimeValue ? undefined : value); setOpen(false); }} /></div>;
+}
+
+export function ComposerConfig({ options, busyId, disabled = false, onChange }: { options: ConfigOption[]; busyId?: string | undefined; disabled?: boolean; onChange: (configId: string, value: string) => void }) {
+  const [openId, setOpenId] = useState<string>();
+  const model = options.find(isModelOption);
+  const thinking = options.find(isThinkingOption);
+  const mode = options.find(isModeOption);
+  const controls: ComposerControl[] = [];
+  if (model) {
+    const choices = flattenOptions(model);
+    controls.push({
+      id: model.id, label: "Model", icon: <Cpu />, tooltip: "Model Kimi uses for this chat",
+      current: currentChoiceName(model), value: String(model.currentValue), disabled: choices.length < 2,
+      choices: choices.map((choice) => ({ value: choice.value, name: choice.name, description: modelDescription(choice.name) })),
+    });
+  }
+  if (thinking) {
+    const choices = flattenOptions(thinking);
+    const offersExplicitEfforts = choices.some((choice) => !/^(?:on|off|enabled|disabled|true|false|1|0)$/i.test(choice.value)
+      && !/^(?:thinking[ -]?)?(?:on|off|enabled|disabled)$/i.test(choice.name));
+    controls.push({
+      id: thinking.id, label: "Reasoning", icon: <Brain />, tooltip: "Reasoning effort for the selected model",
+      current: thinkingEffortLabel(model, thinking), value: String(thinking.currentValue), disabled: choices.length < 2,
+      ...(offersExplicitEfforts ? {} : { note: "Kimi maps thinking to its supported effort. Kimi Code never simulates unavailable levels." }),
+      choices: choices.map((choice) => {
+        const label = thinkingEffortLabel(model, { ...thinking, currentValue: choice.value });
+        return { value: choice.value, name: label, ...(choice.name.toLowerCase() === label.toLowerCase() ? {} : { description: `Runtime option: ${choice.name}` }) };
+      }),
+    });
+  }
+  if (mode) {
+    const choices = flattenOptions(mode);
+    controls.push({
+      id: mode.id, label: "Permissions", icon: <ShieldCheck />, tooltip: "Permission mode. YOLO runs every tool without asking first.",
+      current: currentChoiceName(mode), value: String(mode.currentValue), disabled: choices.length < 2,
+      choices: choices.map((choice) => ({ value: choice.value, name: choice.name, description: modeDescription(choice.value, choice.name), danger: isYoloChoice(mode, choice.value) })),
+    });
+  }
+  for (const option of options) {
+    if (option === model || option === thinking || option === mode) continue;
+    const choices = flattenOptions(option);
+    if (choices.length < 2) continue;
+    controls.push({
+      id: option.id, label: option.name, icon: <SlidersHorizontal />, tooltip: `${option.name}: runtime configuration`,
+      current: currentChoiceName(option), value: String(option.currentValue),
+      choices: choices.map((choice) => ({ value: choice.value, name: choice.name })),
+    });
+  }
+  if (!controls.length) return null;
+  return <div className="composer-configs">
+    {controls.map((control) => <ConfigControl control={{ ...control, disabled: control.disabled || disabled || Boolean(busyId) }} key={control.id} open={openId === control.id} onToggle={() => setOpenId((current) => current === control.id ? undefined : control.id)} onClose={() => setOpenId(undefined)} onPick={(value) => { onChange(control.id, value); setOpenId(undefined); }} />)}
+  </div>;
+}
+
+function ConfigControl({ control, open, onToggle, onClose, onPick }: { control: ComposerControl; open: boolean; onToggle: () => void; onClose: () => void; onPick: (value: string) => void }) {
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  const popover = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState<{ top: number; left: number; side: "above" | "below" }>();
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const anchor = trigger.current?.getBoundingClientRect();
+      const menu = popover.current?.getBoundingClientRect();
+      if (!anchor || !menu) return;
+      const next = floatingMenuPosition(anchor, { width: menu.width, height: menu.height }, { width: window.innerWidth, height: window.innerHeight });
+      setPosition({ ...next, side: next.top < anchor.top ? "above" : "below" });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (trigger.current?.contains(event.target as Node) || popover.current?.contains(event.target as Node)) return;
+      onClose();
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        onClose();
+        trigger.current?.focus();
+      }
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", closeOnEscape, true);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", closeOnEscape, true);
+    };
+  }, [open, onClose]);
+
+  useEffect(() => {
+    if (!open) return;
+    (popover.current?.querySelector<HTMLButtonElement>(".config-options button.active") ?? popover.current?.querySelector<HTMLButtonElement>(".config-options button"))?.focus();
+  }, [open]);
+
+  function moveFocus(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const items = [...(popover.current?.querySelectorAll<HTMLButtonElement>(".config-options > button") ?? [])];
+    if (!items.length) return;
+    event.preventDefault();
+    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === "ArrowDown" ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
+    items[next]?.focus();
+  }
+
+  return <>
+    <button ref={trigger} className={`config-trigger ${open ? "open" : ""}`} type="button" title={control.tooltip} aria-label={`${control.label}: ${control.current}`} aria-haspopup="menu" aria-expanded={open} disabled={control.disabled} onClick={onToggle} onKeyDown={(event) => { if (event.key === "ArrowDown" && !open) { event.preventDefault(); onToggle(); } }}>
+      {control.icon}<span>{control.current}</span><CaretDown />
+    </button>
+    {open && createPortal(
+      <div ref={popover} className="config-popover config-popover-portal" role="menu" aria-label={control.label} data-side={position?.side} style={position ? { top: position.top, left: position.left } : { visibility: "hidden", top: 0, left: 0 }} onKeyDown={moveFocus}>
+        <header><strong>{control.label}</strong><small>{control.tooltip}</small></header>
+        <div className="config-options">
+          {control.choices.map((choice) => {
+            const active = choice.value === control.value;
+            return <button className={active ? "active" : ""} type="button" role="menuitemradio" aria-checked={active} key={choice.value} onClick={() => { trigger.current?.focus(); onPick(choice.value); }}>
+              <span><strong>{choice.name}</strong>{choice.description && <small>{choice.description}</small>}</span>
+              <span className="config-choice-meta">{control.label === "Reasoning" && <EffortMeter value={choice.value} label={choice.name} />}{choice.danger && <WarningCircle className="config-danger" />}{active && <Check weight="bold" />}</span>
+            </button>;
+          })}
+        </div>
+        {control.note && <footer className="config-note">{control.note}</footer>}
+      </div>, document.body)}
+  </>;
+}
+
+function EffortMeter({ value, label }: { value: string; label: string }) {
+  const level = reasoningStrength(`${value} ${label}`);
+  return <span className="effort-meter" aria-hidden="true">{[1, 2, 3, 4].map((step) => <i className={step <= level ? "active" : ""} key={step} />)}</span>;
+}
+
+export function reasoningStrength(value: string): number {
+  if (/\b(?:off|none|disabled)\b/i.test(value)) return 0;
+  if (/\b(?:minimal|low)\b/i.test(value)) return 1;
+  if (/\b(?:high)\b/i.test(value) && !/\b(?:xhigh|max|ultra)\b/i.test(value)) return 3;
+  if (/\b(?:xhigh|max|ultra)\b/i.test(value)) return 4;
+  return 2;
+}
+
+function YoloConfirmDialog({ busy, onConfirm, onCancel }: { busy: boolean; onConfirm: () => void; onCancel: () => void }) {
+  const dialogRef = useModalFocus<HTMLDivElement>();
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [onCancel]);
+  return <div className="manage-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <div ref={dialogRef} className="manage-dialog" role="alertdialog" aria-modal="true" aria-labelledby="yolo-title" aria-describedby="yolo-description" onKeyDown={trapDialogFocus}>
+      <header><span><strong id="yolo-title">Enable YOLO mode?</strong><small id="yolo-description">The active agent will run every tool and command without asking first. Enable this only for workspaces you fully trust. You will not be asked again.</small></span><button type="button" aria-label="Close" disabled={busy} onClick={onCancel}><X /></button></header>
+      <footer><button className="secondary" type="button" disabled={busy} onClick={onCancel}>Cancel</button><button className="danger" type="button" autoFocus disabled={busy} onClick={onConfirm}>{busy ? "Enabling…" : "Enable YOLO"}</button></footer>
+    </div>
+  </div>;
+}
+
+export function thinkingEffortLabel(_model?: ConfigOption, thinking?: ConfigOption): string {
+  const current = thinking ? currentChoiceName(thinking) : "";
+  if (current && !/^(?:thinking[ -]?)?(?:on|off|enabled|disabled|true|false|1|0)$/i.test(current)) return current;
+  return /^(false|off|disabled|0)$/i.test(String(thinking?.currentValue ?? "")) ? "Off" : "Default";
+}
+
+function currentChoiceName(option: ConfigOption): string {
+  return flattenOptions(option).find((choice) => choice.value === String(option.currentValue))?.name ?? String(option.currentValue);
+}
+
+function modelDescription(name: string): string {
+  if (/swarm/i.test(name)) return "Parallel agent orchestration";
+  if (/k3/i.test(name)) return "Flagship coding and agent model";
+  if (/k2/i.test(name)) return "Fast, efficient coding model";
+  return "Available from Kimi";
+}
+
+function isModelOption(option: ConfigOption): boolean {
+  return option.id.toLowerCase() === "model" || option.category?.toLowerCase() === "model";
+}
+
+function isThinkingOption(option: ConfigOption): boolean {
+  return /thinking|effort/i.test(`${option.id} ${option.name} ${option.category ?? ""}`);
+}
+
+export function isModeOption(option: ConfigOption): boolean {
+  return option.id.toLowerCase() === "mode" || option.category?.toLowerCase() === "mode";
+}
+
+export function isYoloChoice(option: ConfigOption | undefined, value: string): boolean {
+  if (!option || !isModeOption(option)) return false;
+  const choice = flattenOptions(option).find((candidate) => candidate.value === value);
+  return /yolo|full[ -]?access|bypass/i.test(`${value} ${choice?.name ?? ""}`);
+}
+
+export function modeDescription(value: string, name: string): string {
+  const key = `${value} ${name}`.toLowerCase();
+  if (/yolo|full[ -]?access|bypass/.test(key)) return "Full access: runs everything without asking";
+  if (/plan/.test(key)) return "Plans first and asks before acting";
+  if (/auto|accept|agent/.test(key)) return "Runs actions without asking each time";
+  if (/default|ask/.test(key)) return "Asks before sensitive actions";
+  return "Runtime permission mode";
+}
+
+/**
+ * Draft-time selection for a chat that has no ACP session yet. Only values the
+ * user deliberately chose are kept; anything the runtime no longer offers falls
+ * back to the runtime's own current value instead of forcing a stale choice.
+ */
+export function draftConfigOverrides(defaults: ConfigOption[], persisted: Record<string, string>): Record<string, string> {
+  const overrides: Record<string, string> = {};
+  for (const option of defaults) {
+    const wanted = persisted[option.id];
+    if (wanted === undefined) continue;
+    if (!flattenOptions(option).some((choice) => choice.value === wanted)) continue;
+    if (String(option.currentValue) !== wanted) overrides[option.id] = wanted;
+  }
+  return overrides;
+}
+
+export function applyDraftConfig(defaults: ConfigOption[], draft: Record<string, string>): ConfigOption[] {
+  return defaults.map((option) => draft[option.id] !== undefined ? { ...option, currentValue: draft[option.id]! } : option);
+}
+
+function SettingsDialog({ category, query, preferences, auth, providers, environments, remote, remotePairing, remoteBusy, schedules, schedulesBusy, threads, activeThread, cwd, quota, quotaError, quotaLoading, updateStatus, turnRunning, onCategory, onQuery, onPreferences, onClose, onChooseWorkspace, onInstallCli, onLogin, onLogout, onRefreshQuota, onCheckUpdates, onInstallUpdate, onCancelUpdate, onExportDiagnostics, onExportSessions, onRefreshEnvironments, onRefreshRemote, onConfigureRemote, onCreateRemotePairing, onRevokeRemoteDevice, onCreateSchedule, onUpdateSchedule, onDeleteSchedule, onRunSchedule, onShowOnboarding }: {
+  category: SettingsCategory;
+  query: string;
+  preferences: Preferences;
+  auth: AuthState | undefined;
+  providers: ProviderState[];
+  environments: WslEnvironment[];
+  remote: RemoteStatus | undefined;
+  remotePairing: RemotePairing | undefined;
+  remoteBusy: boolean;
+  schedules: Schedule[];
+  schedulesBusy: boolean;
+  threads: Thread[];
+  activeThread: Thread | undefined;
+  cwd: string;
+  quota: KimiQuota | undefined;
+  quotaError: string | undefined;
+  quotaLoading: boolean;
+  updateStatus: UpdateStatus;
+  turnRunning: boolean;
+  onCategory: (category: SettingsCategory) => void;
+  onQuery: (query: string) => void;
+  onPreferences: (patch: Partial<Preferences>) => void;
+  onClose: () => void;
+  onChooseWorkspace: () => Promise<void>;
+  onInstallCli: () => Promise<void>;
+  onLogin: () => Promise<void>;
+  onLogout: () => Promise<void>;
+  onRefreshQuota: () => Promise<void>;
+  onCheckUpdates: (manual?: boolean) => Promise<void>;
+  onInstallUpdate: () => Promise<void>;
+  onCancelUpdate: () => Promise<void>;
+  onExportDiagnostics: () => Promise<void>;
+  onExportSessions: (threadIds?: string[]) => Promise<void>;
+  onRefreshEnvironments: () => Promise<void>;
+  onRefreshRemote: () => Promise<void>;
+  onConfigureRemote: (config: RemoteConfig) => Promise<void>;
+  onCreateRemotePairing: () => Promise<void>;
+  onRevokeRemoteDevice: (deviceId: string) => Promise<void>;
+  onCreateSchedule: (input: { name: string; text: string; recurrence: Schedule["recurrence"]; nextRunAt: string }) => Promise<void>;
+  onUpdateSchedule: (id: string, patch: Partial<Pick<Schedule, "enabled" | "name" | "text" | "recurrence" | "nextRunAt">>) => Promise<void>;
+  onDeleteSchedule: (id: string) => Promise<void>;
+  onRunSchedule: (id: string) => Promise<void>;
+  onShowOnboarding: () => void;
+}) {
+  const dialogRef = useModalFocus<HTMLElement>(".settings-link");
+  const categories: Array<{ id: SettingsCategory; label: string; keywords: string; icon: React.ReactNode }> = [
+    { id: "general", label: "General", keywords: "workspace folder startup onboarding density send enter shift keyboard", icon: <SlidersHorizontal /> },
+    { id: "appearance", label: "Appearance", keywords: "theme light dark colors accent font text zoom", icon: <Palette /> },
+    { id: "layout", label: "Layout", keywords: "sidebar side panel rail resize left right", icon: <SidebarSimple /> },
+    { id: "account", label: "Kimi account", keywords: "profile login logout kimi cli account", icon: <UserCircle /> },
+    { id: "environments", label: "Environments", keywords: "windows wsl linux distributions runtime execution", icon: <TerminalWindow /> },
+    { id: "remote", label: "Remote access", keywords: "phone mobile pairing device lan private network tailscale", icon: <DeviceMobile /> },
+    { id: "automations", label: "Automations", keywords: "scheduled tasks daily weekly recurring headless notifications", icon: <Clock /> },
+    { id: "usage", label: "Usage & limits", keywords: "quota subscription plan limits", icon: <Gauge /> },
+    { id: "updates", label: "Updates", keywords: "version install restart release", icon: <DownloadSimple /> },
+    { id: "diagnostics", label: "Diagnostics", keywords: "support bundle logs errors troubleshooting privacy", icon: <Bug /> },
+    { id: "about", label: "About", keywords: "open source github license desktop", icon: <Info /> },
+  ];
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleCategories = categories.filter((item) => !normalizedQuery || `${item.label} ${item.keywords}`.toLowerCase().includes(normalizedQuery));
+  const current = categories.find((item) => item.id === category) ?? categories[0]!;
+  const shortcutConflicts = keybindingConflicts(preferences.keybindings);
+  const kimiProvider = providers.find((provider) => provider.id === "kimi");
+  const updateTitle = updateStatus.phase === "available" ? `Version ${updateStatus.version} is available` : updateStatus.phase === "downloading" ? `Downloading ${updateStatus.version}` : updateStatus.phase === "installing" ? `Installing ${updateStatus.version}` : updateStatus.phase === "checking" ? "Checking for updates" : updateStatus.phase === "current" ? "Kimi Code is up to date" : updateStatus.phase === "error" ? "Update check failed" : "Automatic updates";
+  const updateMessage = updateStatus.phase === "downloading" ? `${updateStatus.percent ?? 0}% complete` : updateStatus.phase === "installing" ? "The app will restart when installation finishes." : updateStatus.phase === "error" ? updateStatus.message : updateStatus.currentVersion ? `Installed version ${updateStatus.currentVersion}` : updateStatus.version ? `Installed version ${updateStatus.version}` : "Updates are checked automatically when the app starts.";
+  const remoteMode = !remote?.config.enabled ? "off" : remote.config.bind === "0.0.0.0" ? "lan" : "loopback";
+
+  return <div className="settings-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section ref={dialogRef} className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onKeyDown={trapDialogFocus}>
+      <header className="settings-titlebar"><div><GearSix /><span><strong id="settings-title">Settings</strong><small>Customize Kimi Code</small></span></div><button className="rail-icon" type="button" aria-label="Close settings" onClick={onClose}><X /></button></header>
+      <div className="settings-shell">
+        <aside className="settings-nav">
+          <label className="settings-search"><MagnifyingGlass /><input autoFocus value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search settings…" aria-label="Search settings" />{query && <button type="button" aria-label="Clear settings search" onClick={() => onQuery("")}><X /></button>}</label>
+          <nav aria-label="Settings categories">
+            {visibleCategories.map((item) => <button className={category === item.id ? "active" : ""} type="button" key={item.id} onClick={() => onCategory(item.id)}>{item.icon}<span>{item.label}</span></button>)}
+            {!visibleCategories.length && <p>No matching settings</p>}
+          </nav>
+        </aside>
+        <div className="settings-main">
+          <header className="settings-page-header"><span>{current.icon}</span><div><h1>{current.label}</h1><p>{settingsDescription(category)}</p></div></header>
+          <div className="settings-page">
+            {category === "general" && <>
+              <section className="settings-group"><h2>Workspace</h2><SettingsRow title="Current project" description={cwd || "No project folder selected."}><button className="secondary" type="button" onClick={() => void onChooseWorkspace()}><FolderOpen /> Open folder</button></SettingsRow></section>
+              <section className="settings-group"><h2>Behavior</h2><SettingsRow title="Interface density" description="Choose how much information fits on screen."><ChoiceButtons value={preferences.density} options={[{ value: "comfortable", label: "Comfortable" }, { value: "compact", label: "Compact" }]} onChange={(density) => onPreferences({ density: density as Preferences["density"] })} /></SettingsRow><SettingsRow title="Send message" description="Shift+Enter always inserts a new line."><ChoiceButtons value={preferences.sendKey} options={[{ value: "enter", label: "Enter" }, { value: "ctrl-enter", label: "Ctrl+Enter" }]} onChange={(sendKey) => onPreferences({ sendKey: sendKey as Preferences["sendKey"] })} /></SettingsRow><SettingsRow title="Getting started" description="Run the optional setup flow again without changing projects or sessions."><button className="secondary" type="button" onClick={onShowOnboarding}><ArrowsClockwise /> Show onboarding</button></SettingsRow></section>
+              <section className="settings-group"><h2>Tools & shortcuts</h2><SettingsRow title="External editor" description="The command palette can hand the active workspace to your editor.">{({ labelledBy, describedBy }) => <select className="settings-select" aria-labelledby={labelledBy} aria-describedby={describedBy} value={preferences.editor} onChange={(event) => onPreferences({ editor: event.target.value as Preferences["editor"] })}><option value="system">System file manager</option><option value="vscode">Visual Studio Code</option><option value="cursor">Cursor</option></select>}</SettingsRow>{keybindingActions.map((action) => <SettingsRow key={action.id} title={action.label} description={shortcutConflicts.has(action.id) ? "Conflicts with another shortcut and is disabled until changed." : "Click, then press a modifier and key."}>{({ labelledBy, describedBy }) => <KeybindingInput labelledBy={labelledBy} describedBy={describedBy} value={preferences.keybindings[action.id]} conflict={shortcutConflicts.has(action.id)} onChange={(shortcut) => onPreferences({ keybindings: { ...preferences.keybindings, [action.id]: shortcut } })} />}</SettingsRow>)}</section>
+            </>}
+
+            {category === "appearance" && <>
+              <section className="settings-group"><h2>Theme</h2><SettingsRow title="Color mode" description="Follow Windows or keep a fixed light or dark appearance."><ChoiceButtons value={preferences.theme} options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]} onChange={(theme) => onPreferences({ theme: theme as Preferences["theme"] })} /></SettingsRow><SettingsRow title="Accent color" description="Used for focus, progress, and selected controls."><div className="accent-choices" role="radiogroup" aria-label="Accent color">{(["neutral", "blue", "violet", "teal"] as const).map((accent) => <button className={`${accent} ${preferences.accent === accent ? "active" : ""}`} type="button" role="radio" aria-checked={preferences.accent === accent} aria-label={accent === "neutral" ? "Graphite" : accent} key={accent} onClick={() => onPreferences({ accent })}><span />{accent === "neutral" ? "Graphite" : accent}</button>)}</div></SettingsRow></section>
+              <section className="settings-group"><h2>Typography</h2><SettingsRow title="Interface font" description="System is recommended; mono is useful for a technical workspace.">{({ labelledBy, describedBy }) => <select className="settings-select" aria-labelledby={labelledBy} aria-describedby={describedBy} value={preferences.font} onChange={(event) => onPreferences({ font: event.target.value as Preferences["font"] })}><option value="system">System</option><option value="humanist">Humanist</option><option value="mono">Monospace</option></select>}</SettingsRow><SettingsRow title="Base font size" description="Scales navigation, chat, and controls together.">{({ labelledBy, describedBy }) => <label className="settings-range"><input type="range" aria-labelledby={labelledBy} aria-describedby={describedBy} min="13" max="18" step="1" value={preferences.fontSize} onChange={(event) => onPreferences({ fontSize: Number(event.target.value) })} /><output>{preferences.fontSize}px</output></label>}</SettingsRow><SettingsRow title="Interface scale" description="Zoom every part of the desktop app."><div className="settings-zoom"><div><button type="button" aria-label="Zoom out" onClick={() => onPreferences({ zoom: clampZoom(preferences.zoom - .1) })}>−</button><strong>{Math.round(preferences.zoom * 100)}%</strong><button type="button" aria-label="Zoom in" onClick={() => onPreferences({ zoom: clampZoom(preferences.zoom + .1) })}>+</button></div></div></SettingsRow></section>
+            </>}
+
+            {category === "layout" && <>
+              <section className="settings-group"><h2>Panel placement</h2><SettingsRow title="Project sidebar" description="Place projects and chats on either edge."><ChoiceButtons value={preferences.sidebarSide} options={[{ value: "left", label: "Left" }, { value: "right", label: "Right" }]} onChange={(sidebarSide) => onPreferences({ sidebarSide: sidebarSide as Preferences["sidebarSide"] })} /></SettingsRow><SettingsRow title="Work panel" description="Choose where Changes, Terminal, and Preview open."><ChoiceButtons value={preferences.railSide} options={[{ value: "left", label: "Left" }, { value: "right", label: "Right" }]} onChange={(railSide) => onPreferences({ railSide: railSide as Preferences["railSide"] })} /></SettingsRow></section>
+              <section className="settings-group"><h2>Sizing</h2><SettingsRow title="Sidebar width" description="Drag the divider in the workspace or adjust it here.">{({ labelledBy, describedBy }) => <label className="settings-range"><input type="range" aria-labelledby={labelledBy} aria-describedby={describedBy} min="84" max="420" step="4" value={preferences.sidebarWidth} onChange={(event) => onPreferences({ sidebarCollapsed: false, sidebarWidth: clampPanelWidth("sidebar", Number(event.target.value)) })} /><output>{preferences.sidebarWidth}px</output></label>}</SettingsRow><SettingsRow title="Work panel width" description="Applies to every work-panel tab, including desktop preview.">{({ labelledBy, describedBy }) => <label className="settings-range"><input type="range" aria-labelledby={labelledBy} aria-describedby={describedBy} min="260" max="1200" step="4" value={preferences.railWidth} onChange={(event) => onPreferences({ railWidth: clampPanelWidth("rail", Number(event.target.value)) })} /><output>{preferences.railWidth}px</output></label>}</SettingsRow><SettingsRow title="Restore layout" description="Return panels to their balanced default positions and sizes."><button className="secondary" type="button" onClick={() => onPreferences({ sidebarCollapsed: false, sidebarSide: "left", railSide: "right", sidebarWidth: defaultPreferences.sidebarWidth, railWidth: defaultPreferences.railWidth })}><ArrowsClockwise /> Reset panels</button></SettingsRow></section>
+            </>}
+
+            {category === "account" && <section className="settings-group"><h2>Kimi account</h2><div className="settings-provider-list">{kimiProvider ? <article className="active"><ProviderMark provider="kimi" /><div><strong>{kimiProvider.name}</strong><small>{!kimiProvider.installed ? "CLI not installed" : kimiProvider.authenticated === true ? kimiProvider.account ?? "Account connected" : kimiProvider.authenticated === false ? "Sign in required" : kimiProvider.account ?? "CLI ready"}</small></div>{!kimiProvider.installed ? <button className="secondary" type="button" onClick={() => void onInstallCli()}><DownloadSimple /> Guide</button> : kimiProvider.authenticated === true ? <button className="secondary danger-text" type="button" disabled={kimiProvider.loginRunning} onClick={() => void onLogout()}><SignOut /> Log out</button> : <button className="secondary" type="button" disabled={kimiProvider.loginRunning} onClick={() => void onLogin()}><SignIn />{kimiProvider.loginRunning ? "Waiting…" : "Sign in"}</button>}</article> : <p className="settings-note">Checking the local Kimi Code CLI…</p>}</div>{auth?.home && <code className="account-home">{auth.home}</code>}<p className="settings-note">Kimi Code uses the official local Kimi runtime. Passwords and API credentials stay in Kimi's account store and never enter this repository.</p></section>}
+
+            {category === "environments" && <section className="settings-group"><h2>Execution environments</h2><SettingsRow title="Windows" description="Kimi Code orchestration and local runtimes run under this Windows account."><span className="environment-status healthy">Active</span></SettingsRow>{environments.map((environment) => <SettingsRow key={environment.name} title={environment.name} description={environment.system ? "WSL system distribution; intentionally unavailable for agent work." : environment.healthy ? "Healthy WSL agent boundary." : environment.message ?? "WSL distribution is unavailable."}><span className={`environment-status ${environment.healthy && !environment.system ? "healthy" : ""}`}>{environment.system ? "System" : environment.healthy ? "Ready" : "Unavailable"}</span></SettingsRow>)}<button className="secondary" type="button" onClick={() => void onRefreshEnvironments()}><ArrowsClockwise /> Refresh</button><p className="settings-note">Named Kimi runtimes can be configured in <code>provider-instances.json</code>. Windows remains the default; only healthy user distributions are offered.</p></section>}
+
+            {category === "remote" && <>
+              <section className="settings-group"><h2>Private remote control</h2><SettingsRow title="Access" description="Off by default. Loopback is for a private-network proxy; LAN listens on this computer's private interfaces."><ChoiceButtons value={remoteMode} options={[{ value: "off", label: "Off" }, { value: "loopback", label: "Loopback" }, { value: "lan", label: "LAN" }]} onChange={(mode) => { if (remoteBusy) return; const port = remote?.config.port ?? 4318; void onConfigureRemote({ enabled: mode !== "off", bind: mode === "lan" ? "0.0.0.0" : "127.0.0.1", port }); }} /></SettingsRow><SettingsRow title="Port" description="Use a stable high port in your private-network or TLS proxy configuration.">{({ labelledBy, describedBy }) => <input className="settings-select remote-port" type="number" aria-labelledby={labelledBy} aria-describedby={describedBy} min="1024" max="65535" key={remote?.config.port ?? 4318} defaultValue={remote?.config.port ?? 4318} disabled={remoteBusy} onBlur={(event) => { const port = Number(event.currentTarget.value); if (remote && Number.isInteger(port) && port >= 1024 && port <= 65535 && port !== remote.config.port) void onConfigureRemote({ ...remote.config, port }); }} />}</SettingsRow>{remote?.addresses.length ? <div className="remote-addresses">{remote.addresses.map((address) => <code key={address}>{address}</code>)}</div> : null}<p className="settings-note"><ShieldCheck /> Prefer Tailscale, WireGuard, or your own TLS reverse proxy. Kimi Code does not ship a public relay and never opens a router port.</p></section>
+              <section className="settings-group"><h2>Paired devices</h2>{remotePairing && Date.parse(remotePairing.expiresAt) > Date.now() && <div className="remote-pairing"><small>One-time code · expires {relativeTime(remotePairing.expiresAt)}</small><strong>{remotePairing.code}</strong></div>}<div className="remote-device-list">{remote?.devices.filter((device) => !device.revokedAt).map((device) => <div key={device.id}><DeviceMobile /><span><strong>{device.name}</strong><small>{device.lastSeenAt ? `Seen ${relativeTime(device.lastSeenAt)}` : "Not connected yet"}</small></span><button className="secondary danger-text" type="button" disabled={remoteBusy} onClick={() => void onRevokeRemoteDevice(device.id)}>Revoke</button></div>)}{remote && !remote.devices.some((device) => !device.revokedAt) && <p>No paired devices</p>}</div><div className="remote-actions"><button className="secondary" type="button" disabled={remoteBusy} onClick={() => void onRefreshRemote()}><ArrowsClockwise /> Refresh</button><button className="primary" type="button" disabled={remoteBusy || !remote?.listening} onClick={() => void onCreateRemotePairing()}><Plus /> Pair device</button></div><p className="settings-note">Pairing codes work once for ten minutes. Device tokens are stored only as hashes and can be revoked here at any time.</p></section>
+              {remote?.audit.length ? <section className="settings-group"><h2>Recent security activity</h2><div className="remote-audit-list">{remote.audit.slice(0, 8).map((event) => <div key={event.id}><span>{event.action.replaceAll(".", " ")}</span><small>{relativeTime(event.at)}{event.detail ? ` · ${event.detail}` : ""}</small></div>)}</div></section> : null}
+            </>}
+
+            {category === "automations" && <ScheduleSettings schedules={schedules} threads={threads} activeThread={activeThread} busy={schedulesBusy} onCreate={onCreateSchedule} onUpdate={onUpdateSchedule} onDelete={onDeleteSchedule} onRun={onRunSchedule} />}
+
+            {category === "usage" && <div className="settings-usage"><UsagePanel quota={quota} error={quotaError} loading={quotaLoading} onRefresh={onRefreshQuota} /><p className="settings-note">Subscription limits come from the official local Kimi CLI <code>/usage</code> panel and refresh on focus and every minute. New official limit windows appear automatically.</p></div>}
+
+            {category === "updates" && <section className="settings-group update-settings"><h2>App updates</h2><div className={`update-card ${updateStatus.phase}`}><span className="update-state-icon">{updateStatus.phase === "current" ? <Check /> : updateStatus.phase === "error" ? <WarningCircle /> : updateStatus.phase === "available" ? <DownloadSimple /> : <ArrowsClockwise />}</span><div><strong>{updateTitle}</strong><small>{updateMessage}</small></div><div className="update-actions"><button className="secondary" type="button" disabled={updateStatus.phase === "checking" || updateStatus.phase === "downloading" || updateStatus.phase === "installing"} onClick={() => void onCheckUpdates(true)}><ArrowsClockwise /> Check now</button>{updateStatus.phase === "available" && <button className="primary" type="button" title={turnRunning ? "Finish or cancel the active turn first" : "Install update and restart"} disabled={turnRunning} onClick={() => void onInstallUpdate()}><DownloadSimple /> Install & restart</button>}{updateStatus.phase === "downloading" && <button className="secondary" type="button" onClick={() => void onCancelUpdate()}><X /> Cancel download</button>}</div></div>{updateStatus.phase === "downloading" && <div className="update-meter"><span style={{ transform: `scaleX(${(updateStatus.percent ?? 0) / 100})` }} /></div>}<p className="settings-note">Signed releases are verified before installation. Check now performs a real update lookup.</p></section>}
+
+            {category === "diagnostics" && <><section className="settings-group"><h2>Private support bundle</h2><SettingsRow title="Export diagnostics" description="Save a redacted JSON report with runtime versions, active-work counts, and recent errors. Prompts, credentials, session IDs, and workspace paths are excluded."><button className="secondary" type="button" onClick={() => void onExportDiagnostics()}><Bug /> Export support bundle</button></SettingsRow><p className="settings-note">Review the file before sharing it. Kimi Code never uploads support bundles automatically.</p></section><section className="settings-group"><h2>Private chat archive</h2><SettingsRow title="Export current chat" description="Save this chat as a redacted local JSON archive."><button className="secondary" type="button" disabled={!activeThread} onClick={() => activeThread && void onExportSessions([activeThread.threadId])}><DownloadSimple /> Export chat</button></SettingsRow><SettingsRow title="Export all chats" description="Save every local Kimi Code chat. Credentials, session IDs, raw tool payloads, and home paths are removed."><button className="secondary" type="button" onClick={() => void onExportSessions()}><Archive /> Export all</button></SettingsRow></section></>}
+
+            {category === "about" && <section className="settings-group about-settings"><img src="/kimi-logo.png" alt="" aria-hidden="true" /><h2>Kimi Code</h2><p>An unofficial, open-source desktop harness for Kimi Code CLI. Authentication stays with Kimi; workspaces and the local event projection stay on this computer.</p><dl><div><dt>Runtime</dt><dd>Kimi Code CLI through ACP</dd></div><div><dt>Storage</dt><dd>Local compact event log</dd></div><div><dt>Source</dt><dd>github.com/Leonxlnx/kimi-code-desktop</dd></div></dl></section>}
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>;
+}
+
+function ScheduleSettings({ schedules, threads, activeThread, busy, onCreate, onUpdate, onDelete, onRun }: {
+  schedules: Schedule[]; threads: Thread[]; activeThread: Thread | undefined; busy: boolean;
+  onCreate: (input: { name: string; text: string; recurrence: Schedule["recurrence"]; nextRunAt: string }) => Promise<void>;
+  onUpdate: (id: string, patch: Partial<Pick<Schedule, "enabled">>) => Promise<void>;
+  onDelete: (id: string) => Promise<void>; onRun: (id: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState({ name: "", text: "", recurrence: "once" as Schedule["recurrence"], nextRunAt: localDateTimeValue(Date.now() + 60 * 60_000) });
+  const [error, setError] = useState<string>();
+  const activeKimiThread = activeThread?.provider === "kimi" ? activeThread : undefined;
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError(undefined);
+    try {
+      await onCreate({ ...draft, name: draft.name.trim(), text: draft.text.trim(), nextRunAt: new Date(draft.nextRunAt).toISOString() });
+      setDraft((current) => ({ ...current, name: "", text: "", nextRunAt: localDateTimeValue(Date.now() + 60 * 60_000) }));
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  };
+  return <>
+    <section className="settings-group"><h2>New scheduled task</h2><form className="schedule-form" onSubmit={(event) => void submit(event)}>
+      <p>Schedules run in the currently open Kimi chat and retain its workspace and permission boundary.</p>
+      <label><span>Target</span><strong>{activeKimiThread?.title ?? (activeThread ? "Historical chats are read-only" : "Open a Kimi chat first")}</strong></label>
+      <label><span>Name</span><input required maxLength={120} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="Daily project review" /></label>
+      <label><span>Instruction</span><textarea required maxLength={100_000} value={draft.text} onChange={(event) => setDraft({ ...draft, text: event.target.value })} placeholder="Review open changes and report failures." /></label>
+      <div><label><span>Run</span><input required type="datetime-local" value={draft.nextRunAt} onChange={(event) => setDraft({ ...draft, nextRunAt: event.target.value })} /></label><label><span>Repeat</span><select value={draft.recurrence} onChange={(event) => setDraft({ ...draft, recurrence: event.target.value as Schedule["recurrence"] })}><option value="once">Once</option><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label></div>
+      {error && <p className="schedule-error" role="alert">{error}</p>}<button className="primary" type="submit" disabled={busy || !activeKimiThread || !draft.name.trim() || !draft.text.trim()}><Clock /> Schedule task</button>
+    </form></section>
+    <section className="settings-group"><h2>Schedules</h2><div className="schedule-list">{schedules.map((schedule) => { const thread = threads.find((candidate) => candidate.threadId === schedule.threadId); const historical = schedule.provider !== "kimi" || (thread && thread.provider !== "kimi"); const run = (operation: Promise<void>) => void operation.catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))); return <article key={schedule.id}><Clock /><span><strong>{schedule.name}</strong><small>{schedule.enabled ? `${schedule.recurrence} · ${relativeTime(schedule.nextRunAt)}` : "Paused"} · {thread?.title ?? "Unavailable chat"}{historical ? " · Historical" : ""}</small>{schedule.lastResult && <small>{schedule.lastResult}</small>}</span><div><button className="secondary" type="button" disabled={busy || historical} onClick={() => run(onRun(schedule.id))}>Run now</button><button className="secondary" type="button" disabled={busy || (historical && !schedule.enabled)} onClick={() => run(onUpdate(schedule.id, { enabled: !schedule.enabled }))}>{schedule.enabled ? "Pause" : "Resume"}</button><button className="secondary danger-text" type="button" disabled={busy} aria-label={`Delete ${schedule.name}`} onClick={() => run(onDelete(schedule.id))}><Trash /></button></div></article>; })}{!schedules.length && <p>No scheduled tasks yet.</p>}</div>{error && <p className="schedule-error settings-note" role="alert">{error}</p>}<p className="settings-note">Missed recurring times advance to the next calendar slot instead of replaying a backlog. Failed runs stay visible here and never change permissions automatically.</p></section>
+  </>;
+}
+
+function localDateTimeValue(timestamp: number): string {
+  const date = new Date(timestamp - new Date(timestamp).getTimezoneOffset() * 60_000);
+  return date.toISOString().slice(0, 16);
+}
+
+type SettingsRowLabels = { labelledBy: string; describedBy: string };
+
+function SettingsRow({ title, description, children }: { title: string; description: string; children: React.ReactNode | ((labels: SettingsRowLabels) => React.ReactNode) }) {
+  const id = useId();
+  const labels = { labelledBy: `${id}-title`, describedBy: `${id}-description` };
+  return <div className="settings-row"><div><strong id={labels.labelledBy}>{title}</strong><small id={labels.describedBy}>{description}</small></div><div>{typeof children === "function" ? children(labels) : children}</div></div>;
+}
+
+function ChoiceButtons({ value, options, onChange }: { value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void }) {
+  return <div className="settings-choices">{options.map((option) => <button className={value === option.value ? "active" : ""} type="button" aria-pressed={value === option.value} key={option.value} onClick={() => onChange(option.value)}>{option.label}</button>)}</div>;
+}
+
+export function profileConfigUpdates(options: ConfigOption[], profile: Pick<AgentProfile, "model" | "reasoning" | "permission">): Array<{ id: string; value: string }> {
+  const values: Array<[ConfigOption | undefined, string | undefined]> = [[options.find(isModelOption), profile.model], [options.find(isThinkingOption), profile.reasoning], [options.find(isModeOption), profile.permission]];
+  return values
+    .flatMap(([option, value]) => option && value && String(option.currentValue) !== value && flattenOptions(option).some((choice) => choice.value === value) ? [{ id: option.id, value }] : []);
+}
+
+function KeybindingInput({ value, conflict, labelledBy, describedBy, onChange }: { value: string; conflict: boolean; labelledBy: string; describedBy: string; onChange: (value: string) => void }) {
+  return <button className={`keybinding-input ${conflict ? "conflict" : ""}`} type="button" aria-labelledby={labelledBy} aria-describedby={describedBy} aria-invalid={conflict} title="Press a modifier and key" onKeyDown={(event) => {
+    const shortcut = shortcutFromEvent(event);
+    if (!shortcut) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onChange(shortcut);
+  }}><kbd>{value}</kbd></button>;
+}
+
+function settingsDescription(category: SettingsCategory): string {
+  return {
+    general: "Workspace defaults and everyday behavior.",
+    appearance: "Theme, typography, color, and interface scale.",
+    layout: "Place and resize every part of the workspace.",
+    account: "Local Kimi runtime, account, and sign-in state.",
+    environments: "Windows and WSL execution boundaries for local agents.",
+    remote: "Pair and revoke private-network companion devices.",
+    automations: "Schedule explicit agent tasks and review delivery state.",
+    usage: "Kimi subscription quota reported by the local CLI.",
+    updates: "Signed releases and update installation.",
+    diagnostics: "Local, redacted troubleshooting information.",
+    about: "Runtime architecture and open-source information.",
+  }[category];
+}
+
+function relativeTime(value: string): string {
+  const seconds = Math.round((Date.parse(value) - Date.now()) / 1_000);
+  const absolute = Math.abs(seconds);
+  const [amount, unit] = absolute >= 86_400 ? [Math.round(seconds / 86_400), "day"] : absolute >= 3_600 ? [Math.round(seconds / 3_600), "hour"] : absolute >= 60 ? [Math.round(seconds / 60), "minute"] : [seconds, "second"];
+  return new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(amount, unit as Intl.RelativeTimeFormatUnit);
+}
+
+function GitBranchActionPanel({ action, busy, onValue, onCancel, onConfirm }: {
+  action: GitBranchAction;
+  busy: boolean;
+  onValue: (value: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const titleId = useId();
+  const descriptionId = `${titleId}-description`;
+  const focusTarget = useRef<HTMLElement | null>(null);
+  const actionIdentity = `${action.kind}:${action.kind === "track" ? `${action.remote}:` : ""}${action.branch}`;
+  const invalidValue = action.kind !== "delete" && (!action.value.trim() || (action.kind === "rename" && action.value.trim() === action.branch));
+  useLayoutEffect(() => {
+    focusTarget.current?.focus();
+  }, [actionIdentity]);
+  return <form className={`git-branch-action ${action.kind}`} role="group" aria-labelledby={titleId} aria-describedby={action.kind === "delete" ? descriptionId : undefined} onKeyDown={(event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    onCancel();
+  }} onSubmit={(event) => {
+    event.preventDefault();
+    if (!busy && !invalidValue) onConfirm();
+  }}>
+    <span><strong id={titleId}>{action.kind === "rename" ? "Rename local branch" : action.kind === "delete" ? "Delete local branch?" : `Track ${action.remote}/${action.branch}`}</strong>{action.kind === "delete" && <small id={descriptionId}>Git will refuse if it is current or not fully merged.</small>}</span>
+    {action.kind !== "delete" && <input ref={(element) => { focusTarget.current = element; }} aria-label={action.kind === "rename" ? "Renamed branch" : "Local tracking branch"} value={action.value} onChange={(event) => onValue(event.target.value)} spellCheck={false} />}
+    <div><button ref={(element) => { if (action.kind === "delete") focusTarget.current = element; }} className="secondary" type="button" disabled={busy} onClick={onCancel}>Cancel</button><button className={action.kind === "delete" ? "danger" : "primary"} type="submit" disabled={busy || invalidValue}>{action.kind === "delete" ? "Delete" : action.kind === "rename" ? "Rename" : "Track"}</button></div>
+  </form>;
+}
+
+function RailTabs({ current, workspace, activeAgents, onSelect, onClose }: { current: RailView; workspace: boolean; activeAgents: number; onSelect: (view: RailView) => void; onClose: () => void }) {
+  const activate = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next = railTabAfter(current, event.key, workspace);
+    onSelect(next);
+    const target = event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(`[data-rail-tab="${next}"]`);
+    target?.focus();
+    target?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  };
+  const tab = (view: RailView, label: string, icon: ReactNode, badge?: number) => <button id={`rail-tab-${view}`} data-rail-tab={view} className={current === view ? "active" : ""} type="button" role="tab" title={label} aria-label={badge ? `${label}, ${badge} active` : label} aria-selected={current === view} aria-controls={current === view ? `rail-panel-${view}` : undefined} tabIndex={current === view ? 0 : -1} onClick={() => onSelect(view)} onKeyDown={activate}>{icon}<span>{label}</span>{badge ? <small className="rail-agent-count">{badge}</small> : null}</button>;
+  return <nav className="rail-tabs" aria-label="Side panel tabs">
+    <div role="tablist" aria-label="Workspace tools">
+      {workspace && tab("preview", "Preview", <Browser />)}
+      {workspace && tab("terminal", "Terminal", <TerminalWindow />)}
+      {workspace && tab("changes", "Changes", <GitCommit />)}
+      {workspace && tab("git", "Git", <GitBranch />)}
+      {tab("agents", "Subagents", <Robot />, activeAgents)}
+    </div>
+    <button className="rail-tabs-close" type="button" aria-label="Close side panel" onClick={onClose}><X /></button>
+  </nav>;
+}
+
+function CapabilitiesCenter({ provider, data, loading, tab, profiles, profileDraft, nativePlugins, nativeMcp, canInstallSkill, onTab, onRefresh, onInstallSkill, onUseSkill, onUsePrompt, onProfileDraft, onSaveProfile, onUseProfile, onDeleteProfile, onCopyPath, onProjectMcpAction }: {
+  provider: ProviderId;
+  data: KimiCapabilities | undefined;
+  loading: boolean;
+  tab: CapabilityTab;
+  profiles: AgentProfile[];
+  profileDraft: { name: string; prompt: string };
+  nativePlugins: boolean;
+  nativeMcp: boolean;
+  canInstallSkill: boolean;
+  onTab: (tab: CapabilityTab) => void;
+  onRefresh: () => Promise<boolean>;
+  onInstallSkill: (kind?: "folder" | "file") => Promise<void>;
+  onUseSkill: (name: string) => void;
+  onUsePrompt: (text: string) => void;
+  onProfileDraft: (draft: { name: string; prompt: string }) => void;
+  onSaveProfile: () => void;
+  onUseProfile: (profile: AgentProfile) => Promise<void>;
+  onDeleteProfile: (id: string) => void;
+  onCopyPath: (path: string) => void;
+  onProjectMcpAction: (action: "approve" | "revoke", fingerprint?: string) => void;
+}) {
+  const count = tab === "profiles" ? profiles.length : tab === "skills" ? data?.skills.length : tab === "plugins" ? data?.plugins.length : tab === "mcp" ? data?.mcpServers.length : data?.agents.length;
+  const path = tab === "skills" ? data?.roots.skills : tab === "plugins" ? data?.roots.plugins : undefined;
+  const providerLabel = providerName(provider);
+  const projectMcp = data?.projectMcp;
+  const projectMcpPresentation = projectMcp ? projectMcpAction(projectMcp.status, projectMcp.approvable) : undefined;
+  const projectMcpKind = projectMcpPresentation?.kind;
+  const projectMcpFingerprint = projectMcp?.fingerprint ?? undefined;
+  const canActOnProjectMcp = projectMcpKind === "revoke" || projectMcpKind === "approve" && Boolean(projectMcpFingerprint);
+  return <section className="capabilities-center" aria-label={`${providerLabel} capabilities`}>
+    <header className="capabilities-hero">
+      <div className="capabilities-mark"><PlugsConnected /></div>
+      <div><span>{providerLabel}</span><h1>Profiles, extensions, and focused agents.</h1><p>Kimi Code shows only capabilities reported by the local Kimi runtime. Credentials and Kimi-owned configuration stay with Kimi Code CLI.</p></div>
+      <button className="capabilities-refresh" type="button" disabled={loading} onClick={() => void onRefresh()}><ArrowsClockwise className={loading ? "rotating" : ""} /><span>{loading ? "Refreshing" : "Refresh"}</span></button>
+    </header>
+    {data?.support && <div className="capability-support" aria-label="Runtime support">{[["Models", data.support.models], ["Reasoning", data.support.reasoning], ["Permissions", data.support.permissions], ["Images", data.support.images], ["Commands", data.support.commands], ["Quota", data.support.quota]].map(([label, supported]) => <span className={supported ? "supported" : "unavailable"} key={String(label)}>{supported ? <Check /> : <Minus />}{String(label)}</span>)}</div>}
+    <nav className="capabilities-tabs" aria-label="Capability categories">
+      <button className={tab === "profiles" ? "active" : ""} type="button" onClick={() => onTab("profiles")}><UserCircle /><span>Profiles</span><small>{profiles.length}</small></button>
+      <button className={tab === "skills" ? "active" : ""} type="button" onClick={() => onTab("skills")}><SlidersHorizontal /><span>Skills</span><small>{data?.skills.length ?? 0}</small></button>
+      <button className={tab === "mcp" ? "active" : ""} type="button" onClick={() => onTab("mcp")}><Cpu /><span>MCP servers</span><small>{data?.mcpServers.length ?? 0}</small></button>
+      <button className={tab === "agents" ? "active" : ""} type="button" onClick={() => onTab("agents")}><Robot /><span>Subagents</span><small>{data?.agents.length ?? 3}</small></button>
+      <button className={tab === "plugins" ? "active" : ""} type="button" onClick={() => onTab("plugins")}><PlugsConnected /><span>Plugins</span><small>{data?.plugins.length ?? 0}</small></button>
+    </nav>
+    <div className="capabilities-content" key={tab}>
+      <div className="capabilities-section-title"><div><strong>{tab === "profiles" ? "Reusable agent profiles" : tab === "skills" ? "Available skills" : tab === "plugins" ? "Detected plugins" : tab === "mcp" ? "Configured tool servers" : "Runtime subagents"}</strong><span>{count ?? 0} {tab === "profiles" ? "saved" : tab === "agents" ? "available" : tab === "skills" ? "available" : "configured"}</span></div>{tab === "skills" && provider === "kimi" ? <span className="capabilities-title-actions"><button type="button" disabled={!canInstallSkill} title={canInstallSkill ? "Install a skill bundle from this project" : "Open a project to install a skill"} onClick={() => void onInstallSkill("folder")}><Plus /> Skill folder</button><button type="button" disabled={!canInstallSkill} title={canInstallSkill ? "Install a flat Markdown skill from this project" : "Open a project to install a skill"} onClick={() => void onInstallSkill("file")}><FileText /> Skill file</button></span> : tab === "plugins" && nativePlugins ? <button type="button" onClick={() => onUsePrompt("/plugins ")}><Plus /> Open plugin manager</button> : tab === "mcp" && nativeMcp ? <button type="button" onClick={() => onUsePrompt("/mcp-config ")}><Plus /> Configure MCP</button> : null}</div>
+      {loading && !data ? <CapabilitySkeleton /> : tab === "profiles" ? <div className="profile-workspace"><form onSubmit={(event) => { event.preventDefault(); onSaveProfile(); }}><input value={profileDraft.name} onChange={(event) => onProfileDraft({ ...profileDraft, name: event.target.value })} placeholder="Profile name" maxLength={80} /><textarea value={profileDraft.prompt} onChange={(event) => onProfileDraft({ ...profileDraft, prompt: event.target.value })} placeholder="Reusable instructions for this agent" maxLength={20_000} /><button type="submit" disabled={!profileDraft.name.trim() || !profileDraft.prompt.trim()}><Plus /> Save current runtime setup</button><small>The current model, reasoning, and permission values are saved only when this runtime offers them.</small></form><div>{profiles.map((profile) => <article key={profile.id}><ProviderMark provider={profile.provider} /><div><strong>{profile.name}</strong><p>{profile.prompt}</p><small>{[profile.model, profile.reasoning, profile.permission].filter(Boolean).join(" · ") || "Provider defaults"}</small></div><span><button type="button" onClick={() => void onUseProfile(profile)}>Use</button><button type="button" aria-label={`Delete ${profile.name}`} onClick={() => onDeleteProfile(profile.id)}><Trash /></button></span></article>)}{!profiles.length && <CapabilityEmpty icon={<UserCircle />} title="No profiles yet" text={`Save a reusable ${providerLabel} prompt with the runtime-supported model, reasoning, and permission choices currently selected in the composer.`} />}</div></div> : tab === "skills" ? <div className="capability-grid">
+        {data?.skills.map((skill) => <article className="capability-card" key={`${skill.scope}-${skill.source}-${skill.name}`}><span className="capability-icon"><SlidersHorizontal /></span><div><strong>{skill.name}</strong><small>{skill.scope} · {skill.source === "kimi" ? "Kimi" : "Agents"}{skill.hasSubSkills ? " · sub-skills" : ""}</small><p>{skill.description || "Local Kimi skill"}</p></div><button type="button" onClick={() => onUseSkill(skill.name)}>Use</button></article>)}
+        {!data?.skills.length && <CapabilityEmpty icon={<SlidersHorizontal />} title={data?.support.skills === "native" ? "No skills found" : "Skills are not exposed"} text={data?.support.skills === "native" ? "Kimi discovers skills from your user folders and the active project's .kimi-code or .agents directory." : `${providerLabel} does not expose a compatible skill inventory through the current runtime adapter.`} {...(canInstallSkill ? { action: "Install skill folder", onAction: () => onInstallSkill("folder") } : {})} />}
+      </div> : tab === "plugins" ? <div className="capability-grid">
+        {data?.plugins.map((plugin) => <article className="capability-card" key={plugin.name}><span className="capability-icon"><PlugsConnected /></span><div><strong>{plugin.name}</strong><small>v{plugin.version} · {plugin.toolCount} {plugin.toolCount === 1 ? "tool" : "tools"}</small><p>{plugin.description || "Local Kimi plugin"}</p></div>{nativePlugins ? <button type="button" onClick={() => onUsePrompt(`/plugins ${plugin.name} `)}>Manage</button> : <span className="capability-badge">Detected locally</span>}</article>)}
+        {!data?.plugins.length && <CapabilityEmpty icon={<PlugsConnected />} title={data?.support.plugins === "native" ? "No plugins detected" : "Plugins are not exposed"} text={nativePlugins ? "This Kimi runtime exposes its plugin manager, but no local plugin manifests were found." : `${providerLabel} does not advertise a compatible plugin manager. Kimi Code does not create a fake one.`} {...(nativePlugins ? { action: "Open plugin manager", onAction: () => onUsePrompt("/plugins ") } : {})} />}
+      </div> : tab === "mcp" ? <div className="capability-list">
+        {projectMcp && projectMcpPresentation && <article className="mcp-row" aria-label={`Project MCP: ${projectMcpPresentation.badge}`}><span className={`mcp-status ${projectMcp.status === "approved" ? "ready" : "attention"}`} /><div><strong>Project MCP servers</strong><small role="status">{projectMcpPresentation.badge}</small></div><span className="capability-badge">Project</span>{projectMcpKind && projectMcpPresentation.label && canActOnProjectMcp ? <button type="button" onClick={() => onProjectMcpAction(projectMcpKind, projectMcpFingerprint)}>{projectMcpPresentation.label}</button> : null}</article>}
+        {data?.mcpServers.map((server) => {
+          return <article className="mcp-row" key={mcpServerRowKey(server)}><span className={`mcp-status ${server.connectable ? "ready" : "attention"}`} /><div><strong>{server.name}</strong><small>{server.transport.toUpperCase()} · {server.target}</small></div>{!server.connectable && <span className="capability-badge">{server.needsAuthorization ? "OAuth" : server.projectScoped ? "Project" : "Unsupported"}</span>}{!server.projectScoped && <button type="button" onClick={() => onUsePrompt(nativeMcp ? "/mcp " : `Check the configured MCP server ${server.name} and report its available tools. `)}>Check</button>}</article>;
+        })}
+        {!data?.mcpServers.length && !projectMcp && <CapabilityEmpty icon={<Cpu />} title={data?.support.mcp === "none" ? "MCP is not exposed" : "Runtime-managed MCP"} text={nativeMcp ? "Connect Kimi to APIs, databases, and local tools using its standard MCP configuration." : `${providerLabel} owns its MCP configuration. Kimi Code does not read or rewrite its credential-bearing configuration.`} {...(nativeMcp ? { action: "Configure MCP", onAction: () => onUsePrompt("/mcp-config ") } : {})} />}
+      </div> : <div className="agent-grid">
+        {(data?.agents.length ? data.agents : provider === "kimi" ? defaultAgentCapabilities() : []).map((agent) => <article className={`agent-card agent-${agent.name}`} key={agent.name}><div className="agent-card-top"><span><Robot /></span><small>{agent.supportsBackground ? "Foreground or background" : "Foreground"}</small></div><h2>{agent.name}</h2><p>{agent.description}</p><footer><span>{agent.access}</span><button type="button" onClick={() => onUsePrompt(`Use the ${agent.name} subagent for this task: `)}>Use agent <CaretRight /></button></footer></article>)}
+        {!data?.agents.length && provider !== "kimi" && <CapabilityEmpty icon={<Robot />} title="Runtime-directed subagents" text={data?.support.subagents.activity ? `${providerLabel} subagent activity appears in the Agents panel when the runtime creates it. Kimi Code does not invent named shortcuts.` : `${providerLabel} does not expose subagent activity through this adapter.`} />}
+      </div>}
+      {data?.warnings.length ? <div className="capability-warning"><WarningCircle /><span>{data.warnings.join(" ")}</span></div> : null}
+      {path && <footer className="capabilities-paths"><span>Local {providerLabel} data</span><button type="button" title={path} onClick={() => onCopyPath(path)}><Copy /> Copy {tab === "mcp" ? "config" : `${tab.slice(0, -1)} folder`} path</button></footer>}
+    </div>
+  </section>;
+}
+
+function CapabilitySkeleton() {
+  return <div className="capability-skeleton" aria-label="Loading Kimi capabilities" aria-busy="true"><span /><span /><span /></div>;
+}
+
+function CapabilityEmpty({ icon, title, text, action, onAction }: { icon: React.ReactNode; title: string; text: string; action?: string; onAction?: () => void | Promise<void> }) {
+  return <div className="capability-empty"><span>{icon}</span><strong>{title}</strong><p>{text}</p>{action && onAction && <button type="button" onClick={() => void onAction()}>{action}</button>}</div>;
+}
+
+function SubagentsRail({ provider, runs, readOnly, canInspect, canStop, onInspect, onStop, onUseAgent, onOpenCenter }: { provider: ProviderId; runs: SubagentRun[]; readOnly: boolean; canInspect: boolean; canStop: boolean; onInspect: (run: SubagentRun) => Promise<SubagentInspection | undefined>; onStop: (run: SubagentRun) => Promise<void>; onUseAgent: (agent: string) => void; onOpenCenter: () => void }) {
+  const active = runs.filter((run) => run.status === "running").length;
+  const [selectedId, setSelectedId] = useState<string>();
+  const [inspection, setInspection] = useState<SubagentInspection>();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>();
+  const [stopping, setStopping] = useState(false);
+  const selected = runs.find((run) => run.id === selectedId);
+  useEffect(() => {
+    if (selectedId && !runs.some((run) => run.id === selectedId)) { setSelectedId(undefined); setInspection(undefined); }
+  }, [runs, selectedId]);
+
+  async function inspect(run: SubagentRun) {
+    setSelectedId(run.id);
+    setInspection(undefined);
+    setError(undefined);
+    if (!subagentCanInspect(canInspect, run)) return;
+    setLoading(true);
+    try { setInspection(await onInspect(run)); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    finally { setLoading(false); }
+  }
+
+  if (selected) return <section className="agents-rail-content agent-inspection">
+    <header><button className="agent-back" type="button" onClick={() => { setSelectedId(undefined); setInspection(undefined); setError(undefined); }}><CaretRight /> All agents</button><span>{canStop && selected.status === "running" && selected.threadIds?.length ? <button className="agent-stop" type="button" disabled={stopping} onClick={() => { setStopping(true); setError(undefined); void onStop(selected).then(() => canInspect ? inspect(selected) : undefined).catch((failure) => setError(failure instanceof Error ? failure.message : String(failure))).finally(() => setStopping(false)); }}><Stop />{stopping ? "Stopping" : "Stop"}</button> : null}<i className={`agent-status ${selected.status}`}>{selected.status}</i></span></header>
+    <div className="agent-inspection-body">
+      <div className="agent-inspection-title"><ProviderMark provider={provider} /><div><small>{selected.type}{selected.background ? " · background" : ""}</small><h2>{inspection?.title ?? selected.description}</h2><p>{selected.agentId ?? inspection?.role ?? selected.detail}</p></div></div>
+      {loading && <div className="agent-inspection-loading"><i /><span>Loading subagent transcript…</span></div>}
+      {error && <div className="agent-inspection-error"><WarningCircle /><span>{error}</span></div>}
+      {inspection?.turns.flatMap((turn) => turn.items.map((item) => <article className={`agent-inspection-item ${item.kind}`} key={`${turn.turnId}-${item.id}`}><header><strong>{item.title}</strong><span>{item.status ?? turn.status}</span></header>{item.text && <pre>{compactToolPreview(item.text, item.kind === "message" ? 8 : 4, 1_200)}</pre>}</article>))}
+      {!loading && !error && !inspection && <div className="agent-local-detail"><p>{selected.description}</p>{selected.output && <pre>{compactToolPreview(selected.output, 8, 1_200)}</pre>}<small>{canInspect && selected.threadIds?.length ? "Transcript is available when this provider runtime is connected." : "Showing details recorded in this chat; this runtime does not advertise transcript inspection."}</small></div>}
+    </div>
+  </section>;
+  return <section className="agents-rail-content">
+    <header><div><span>{active ? `${active} active` : "Subagents"}</span><strong>Focused work, separate context.</strong></div><button type="button" onClick={onOpenCenter}>Browse agents</button></header>
+    {runs.length ? <div className="agent-run-list">{runs.map((run) => <button className={`agent-run ${run.status}`} type="button" key={run.id} onClick={() => void inspect(run)}><span className="agent-run-state">{run.status === "running" ? <i /> : run.status === "completed" ? <Check /> : <WarningCircle />}</span><span className="agent-run-copy"><strong>{run.description}</strong><small><b>{run.type}</b>{run.background ? " · background" : " · foreground"}{run.agentId ? ` · ${run.agentId}` : ""}</small></span><span>{run.detail ?? run.status}</span><CaretRight /></button>)}</div> : <div className="agents-empty"><Robot /><strong>{readOnly ? "No recorded subagents" : "No subagents in this chat"}</strong><p>{readOnly ? "This historical chat cannot start or steer subagents." : "Ask Kimi to delegate exploration, planning, or implementation without filling the main context."}</p>{!readOnly && <div><button type="button" onClick={() => onUseAgent("explore")}>Explore</button><button type="button" onClick={() => onUseAgent("plan")}>Plan</button><button type="button" onClick={() => onUseAgent("coder")}>Code</button></div>}</div>}
+  </section>;
+}
+
+function Onboarding({ provider, cwd, onInstall, onLogin, onOpenUrl, onChooseWorkspace, onCancel, onFinish, onSkip }: {
+  provider: ProviderState | undefined; cwd: string; onInstall: () => Promise<void>; onLogin: () => Promise<void>; onOpenUrl: (url: string) => Promise<void>;
+  onChooseWorkspace: () => Promise<void>; onCancel: () => void; onFinish: () => void; onSkip: () => void;
+}) {
+  const connected = providerUsable(provider);
+  return <section className="onboarding">
+    <header><div className="onboarding-mark"><img src="/kimi-logo.png" alt="" aria-hidden="true" /></div><div><span>Welcome to Kimi Code</span><h1>Your Kimi workspace, ready to build.</h1><p>Connect Kimi Code CLI with your own account and quota. Credentials stay with Kimi; thread metadata stays locally on this computer.</p></div></header>
+    <ol className="setup-steps">
+      <li className={provider?.installed ? "complete" : ""}><span>{provider?.installed ? <Check /> : "1"}</span><div><strong>Install Kimi Code CLI</strong><p>{provider?.installed ? "Found the Kimi Code CLI." : "Open Kimi's official installation guide, then return here."}</p>{provider && !provider.installed && <button className="primary" type="button" onClick={() => void onInstall()}><DownloadSimple />Open install guide</button>}</div></li>
+      <li className={connected ? "complete" : ""}><span>{connected ? <Check /> : "2"}</span><div><strong>Connect your Kimi account</strong><p>{connected ? provider?.account ?? "Kimi Code is ready." : "Use Kimi's official sign-in flow. This app never receives your password."}</p>{provider?.installed && !connected && <div className="auth-actions"><button className="primary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin()}><SignIn />{provider.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button>{provider.loginRunning && <button className="secondary" type="button" onClick={onCancel}>Cancel</button>}</div>}{provider?.event?.operation === "login" && provider.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(provider.event!.url!)}>Open verification</button>}{provider?.event?.operation === "login" && provider.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(provider.event?.code ?? "")}><Copy />{provider.event.code}</button>}</div></li>
+      <li className={cwd ? "complete" : ""}><span>{cwd ? <Check /> : "3"}</span><div><strong>Choose a workspace</strong><p>{cwd || "Pick the folder your agent can work in."}</p><button className="secondary" type="button" onClick={() => void onChooseWorkspace()}><FolderOpen />{cwd ? "Change folder" : "Choose folder"}</button></div></li>
+    </ol>
+    <footer><button className="text-button" type="button" onClick={onSkip}>Skip for now</button><button className="primary" type="button" disabled={!connected || !cwd} onClick={onFinish}>Start coding</button></footer>
+  </section>;
+}
+
+function ProviderGate({ provider, onInstall, onLogin, onOpenUrl, onCancel }: {
+  provider: ProviderState | undefined; onInstall: () => Promise<void>; onLogin: () => Promise<void>; onOpenUrl: (url: string) => Promise<void>; onCancel: () => void;
+}) {
+  if (!provider) return <section className="auth-card" aria-live="polite"><ArrowsClockwise size={24} /><div><h1>Checking Kimi Code</h1><p>Reading the locally installed Kimi CLI…</p></div></section>;
+  return <section className="auth-card"><ProviderMark provider={provider.id} /><div><h1>{provider.installed ? "Connect Kimi Code" : "Install Kimi Code CLI"}</h1><p>{provider.installed ? "Sign in through Kimi Code CLI. Credentials remain in Kimi's local account store." : "Kimi Code CLI was not found. Open its official install guide, then return here."}</p>{provider.event?.operation === "login" && provider.event.url && <button className="verification-link" type="button" onClick={() => void onOpenUrl(provider.event!.url!)}>Open verification</button>}{provider.event?.operation === "login" && provider.event.code && <button className="pairing-code" type="button" onClick={() => void navigator.clipboard.writeText(provider.event?.code ?? "")}><Copy />{provider.event.code}</button>}<div className="auth-actions">{provider.installed ? <button className="primary" type="button" disabled={provider.loginRunning} onClick={() => void onLogin()}>{provider.loginRunning ? "Waiting for sign-in…" : "Begin sign-in"}</button> : <button className="primary" type="button" onClick={() => void onInstall()}>Open install guide</button>}{provider.loginRunning && <button className="secondary" type="button" onClick={onCancel}>Cancel</button>}</div></div></section>;
+}
+
+function ProviderMark({ provider }: { provider: ProviderId }) {
+  return <span className={`provider-mark provider-${provider}`} aria-hidden="true">{provider === "kimi" ? "K" : provider === "codex" ? "O" : provider === "claude" ? "A" : provider === "cursor" ? "C" : "OC"}</span>;
+}
+
+function SidebarSkeleton() {
+  return <div className="sidebar-skeleton" aria-label="Loading projects" aria-busy="true">{[72, 54, 80, 62, 46, 76].map((width, index) => <span style={{ width: `${width}%` }} key={`${width}-${index}`} />)}</div>;
+}
+
+function StartupScreen({ delayed, error, onRetry }: { delayed: boolean; error?: string; onRetry: () => void }) {
+  const needsAttention = delayed || Boolean(error);
+  return <div className="startup-screen" aria-label="Starting Kimi Code" aria-busy={!needsAttention}><div className="startup-intro"><img src="/kimi-logo.png" alt="" aria-hidden="true" /><span>Kimi Code</span><strong>{needsAttention ? "The local runtime needs attention" : "Opening your workspace"}</strong><small>{error ?? (delayed ? "The local service did not become ready in time. Restart it safely without closing the app." : "Connecting to Kimi Code CLI and restoring sessions")}</small>{needsAttention ? <button type="button" onClick={onRetry}><ArrowsClockwise /> Restart local runtime</button> : <div className="startup-progress" aria-hidden="true"><i /></div>}</div></div>;
+}
+
+export function serverWebSocketUrl(connection: unknown): string {
+  if (!connection || typeof connection !== "object") throw new Error("The desktop runtime returned no server connection.");
+  const { port, token } = connection as { port?: unknown; token?: unknown };
+  if (!Number.isInteger(port) || Number(port) < 1 || Number(port) > 65_535 || typeof token !== "string" || token.length > 4_096) {
+    throw new Error("The desktop runtime returned an invalid server connection.");
+  }
+  return `ws://127.0.0.1:${port}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+}
+
+export async function localServerUrl(
+  native = isTauri(),
+  lookup: () => Promise<unknown> = () => invoke("server_connection"),
+  attempts = 4,
+  retryDelayMs = 100,
+): Promise<string> {
+  if (!native) return "ws://127.0.0.1:4317";
+  let failure: unknown;
+  for (let attempt = 0; attempt < Math.max(1, attempts); attempt += 1) {
+    try {
+      return serverWebSocketUrl(await lookup());
+    } catch (error) {
+      failure = error;
+      if (attempt + 1 < attempts && retryDelayMs > 0) await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
+    }
+  }
+  throw new Error(`Could not locate the local Kimi Code runtime: ${failure instanceof Error ? failure.message : String(failure)}`);
+}
+
+export function workspaceName(cwd: string): string {
+  const trimmed = cwd.replace(/[\\/]+$/, "") || cwd;
+  return trimmed.split(/[\\/]/).filter(Boolean).at(-1) ?? cwd;
+}
+
+function samePath(left: string, right: string): boolean {
+  const normalize = (value: string) => value.replaceAll("\\", "/").replace(/\/+$/, "").toLocaleLowerCase();
+  return normalize(left) === normalize(right);
+}
+
+function pathKey(path: string): string {
+  return path.replaceAll("\\", "/").replace(/\/+$/, "").toLocaleLowerCase();
+}
+
+function uniquePaths(paths: string[]): string[] {
+  return paths.filter((path, index) => Boolean(path) && paths.findIndex((candidate) => samePath(candidate, path)) === index);
+}
+
+export function groupProjects(projectPaths: string[], threads: Thread[], runtimeSessions: RuntimeSession[], aliases: Record<string, string> = {}): ProjectGroup[] {
+  const projectThreads = threads.filter((thread) => thread.kind !== "chat");
+  const projectSessions = runtimeSessions.filter((session) => session.kind !== "chat");
+  const projectCwd = (thread: Thread) => thread.worktree?.sourceCwd ?? thread.cwd;
+  return uniquePaths([...projectPaths, ...projectThreads.map(projectCwd), ...projectSessions.map((session) => session.cwd)]).filter((cwd) => !isInternalWorkspace(cwd)).map((cwd) => ({
+    cwd,
+    name: aliases[pathKey(cwd)] || workspaceName(cwd),
+    threads: projectThreads.filter((thread) => samePath(projectCwd(thread), cwd)),
+    runtimeSessions: projectSessions.filter((session) => samePath(session.cwd, cwd)),
+  }));
+}
+
+export function filterRuntimeSessions(runtimeSessions: RuntimeSession[], threads: Thread[], hiddenSessionIds: string[]): RuntimeSession[] {
+  const hidden = new Set(hiddenSessionIds);
+  const managed = new Set(threads.map((thread) => thread.sessionId));
+  return runtimeSessions.filter((session) => !hidden.has(session.sessionId) && !managed.has(session.sessionId));
+}
+
+export function reorderPaths(paths: string[], source: string, target: string): string[] {
+  const sourceIndex = paths.findIndex((path) => samePath(path, source));
+  const targetIndex = paths.findIndex((path) => samePath(path, target));
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return paths;
+  const reordered = [...paths];
+  const [moved] = reordered.splice(sourceIndex, 1);
+  reordered.splice(targetIndex, 0, moved!);
+  return reordered;
+}
+
+export function reorderPathByOffset(paths: string[], source: string, offset: -1 | 1): string[] {
+  const sourceIndex = paths.findIndex((path) => samePath(path, source));
+  const targetIndex = sourceIndex + offset;
+  if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= paths.length) return paths;
+  return reorderPaths(paths, source, paths[targetIndex]!);
+}
+
+function filterProjects(projects: ProjectGroup[], query: string): ProjectGroup[] {
+  const normalized = query.trim().toLocaleLowerCase();
+  if (!normalized) return projects;
+  return projects.flatMap((project) => {
+    if (`${project.name} ${project.cwd}`.toLocaleLowerCase().includes(normalized)) return [project];
+    const threads = filterByTitle(project.threads, normalized);
+    const runtimeSessions = filterByTitle(project.runtimeSessions, normalized);
+    return threads.length || runtimeSessions.length ? [{ ...project, threads, runtimeSessions }] : [];
+  });
+}
+
+function isInternalWorkspace(path: string): boolean {
+  return /\/(?:kimicodedesktop|com\.kimicode\.desktop)\/runtime\/(?:quota-probe|chats|config-probe)$/i.test(path.replaceAll("\\", "/").replace(/\/+$/, ""));
+}
+
+function loadPreferences(): Preferences {
+  try {
+    const value = JSON.parse(localStorage.getItem(preferenceKey) ?? "{}") as Partial<Preferences>;
+    const savedWorkspace = typeof value.workspace === "string" ? value.workspace : "";
+    const workspace = isInternalWorkspace(savedWorkspace) ? "" : savedWorkspace;
+    const projects = Array.isArray(value.projects) ? value.projects.filter((path): path is string => typeof path === "string" && !isInternalWorkspace(path)) : [];
+    const projectAliases = value.projectAliases && typeof value.projectAliases === "object" && !Array.isArray(value.projectAliases)
+      ? Object.fromEntries(Object.entries(value.projectAliases).filter((entry): entry is [string, string] => typeof entry[1] === "string" && Boolean(entry[1].trim())))
+      : {};
+    const hiddenProjects = Array.isArray(value.hiddenProjects) ? value.hiddenProjects.filter((path): path is string => typeof path === "string") : [];
+    const hiddenSessions = Array.isArray(value.hiddenSessions) ? [...new Set(value.hiddenSessions.filter((sessionId): sessionId is string => typeof sessionId === "string"))] : [];
+    const composerConfig = value.composerConfig && typeof value.composerConfig === "object" && !Array.isArray(value.composerConfig)
+      ? Object.fromEntries(Object.entries(value.composerConfig).filter((entry): entry is [string, string] => typeof entry[1] === "string" && Boolean(entry[1])))
+      : {};
+    const savedKeybindings: Partial<Record<KeybindingAction, string>> = value.keybindings && typeof value.keybindings === "object" && !Array.isArray(value.keybindings) ? value.keybindings : {};
+    const keybindings = Object.fromEntries(keybindingActions.map(({ id }) => [id, typeof savedKeybindings[id] === "string" && savedKeybindings[id] ? savedKeybindings[id] : defaultPreferences.keybindings[id]])) as Record<KeybindingAction, string>;
+    const providerInstances = value.providerInstances && typeof value.providerInstances === "object" && !Array.isArray(value.providerInstances)
+      ? Object.fromEntries(Object.entries(value.providerInstances).filter(([provider, id]) => ["kimi", "codex", "claude", "cursor", "opencode"].includes(provider) && typeof id === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(id)))
+      : {};
+    const agentProfiles = Array.isArray(value.agentProfiles) ? value.agentProfiles.flatMap((profile) => {
+      if (!profile || typeof profile !== "object") return [];
+      const candidate = profile as Partial<AgentProfile>;
+      if (typeof candidate.id !== "string" || typeof candidate.name !== "string" || typeof candidate.prompt !== "string") return [];
+      return [{ id: candidate.id, name: candidate.name.slice(0, 80), prompt: candidate.prompt.slice(0, 20_000), provider: normalizeProvider(candidate.provider), ...(typeof candidate.model === "string" ? { model: candidate.model } : {}), ...(typeof candidate.reasoning === "string" ? { reasoning: candidate.reasoning } : {}), ...(typeof candidate.permission === "string" ? { permission: candidate.permission } : {}) }];
+    }).slice(0, 30) : [];
+    const savedPaletteVersion = Number(value.paletteVersion);
+    const fontSize = savedPaletteVersion === 4 && typeof value.fontSize === "number" ? Math.min(18, Math.max(13, Math.round(value.fontSize))) : defaultPreferences.fontSize;
+    return {
+      density: value.density === "compact" ? "compact" : "comfortable",
+      sendKey: value.sendKey === "ctrl-enter" ? "ctrl-enter" : "enter",
+      workspace,
+      onboardingDone: value.onboardingDone === true,
+      sidebarCollapsed: value.sidebarCollapsed === true,
+      projects: uniquePaths([...projects, workspace]),
+      zoom: typeof value.zoom === "number" ? clampZoom(value.zoom) : 1,
+      theme: value.theme === "light" || value.theme === "dark" ? value.theme : "system",
+      font: value.font === "humanist" || value.font === "mono" ? value.font : "system",
+      fontSize,
+      accent: savedPaletteVersion >= 3 && (value.accent === "neutral" || value.accent === "blue" || value.accent === "violet" || value.accent === "teal") ? value.accent : "neutral",
+      paletteVersion: 4,
+      sidebarSide: value.sidebarSide === "right" ? "right" : "left",
+      railSide: value.railSide === "left" ? "left" : "right",
+      sidebarWidth: clampPanelWidth("sidebar", value.sidebarWidth ?? defaultPreferences.sidebarWidth),
+      railWidth: clampPanelWidth("rail", value.railWidth ?? defaultPreferences.railWidth),
+      projectAliases,
+      hiddenProjects: uniquePaths(hiddenProjects),
+      hiddenSessions,
+      composerConfig,
+      yoloAcknowledged: value.yoloAcknowledged === true,
+      provider: "kimi",
+      providerInstances,
+      editor: value.editor === "vscode" || value.editor === "cursor" ? value.editor : "system",
+      keybindings,
+      agentProfiles,
+    };
+  } catch {
+    return { ...defaultPreferences };
+  }
+}
+
+export function clampPanelWidth(panel: "sidebar" | "rail", width: number): number {
+  return Math.round(Math.min(panel === "sidebar" ? 420 : 1200, Math.max(panel === "sidebar" ? 84 : 260, width)));
+}
+
+export function responsiveConversationMinimum(viewportWidth: number): number {
+  return Math.min(400, Math.max(320, Math.round(viewportWidth - collapsedSidebarWidth - 260)));
+}
+
+export function effectiveSidebarWidth(
+  collapsed: boolean,
+  requestedWidth: number,
+  viewportWidth: number,
+  railOpen = false,
+  minimumConversationWidth = responsiveConversationMinimum(viewportWidth),
+): number {
+  const baseWidth = collapsed || viewportWidth <= responsiveSidebarBreakpoint ? collapsedSidebarWidth : clampPanelWidth("sidebar", requestedWidth);
+  if (!railOpen || baseWidth === collapsedSidebarWidth) return baseWidth;
+  return effectiveRailWidth(260, viewportWidth, baseWidth, minimumConversationWidth) >= 260 ? baseWidth : collapsedSidebarWidth;
+}
+
+export function sidebarToggleState(
+  collapsed: boolean,
+  requestedWidth: number,
+  viewportWidth: number,
+  drawerOpen = false,
+  railOpen = false,
+): { collapsed: boolean; disabled: boolean; label: string } {
+  const narrow = viewportWidth <= responsiveSidebarBreakpoint;
+  const layoutWidth = effectiveSidebarWidth(collapsed, requestedWidth, viewportWidth, railOpen);
+  const autoCompacted = !narrow && !collapsed && layoutWidth === collapsedSidebarWidth;
+  const effectiveCollapsed = narrow ? !drawerOpen : layoutWidth === collapsedSidebarWidth;
+  return {
+    collapsed: effectiveCollapsed,
+    disabled: autoCompacted,
+    label: autoCompacted
+      ? "Sidebar stays compact while the work panel is open"
+      : narrow
+        ? drawerOpen ? "Close sidebar" : "Open sidebar"
+        : effectiveCollapsed ? "Expand sidebar" : "Collapse sidebar",
+  };
+}
+
+export function panelResizeWidth(panel: "sidebar" | "rail", startWidth: number, deltaX: number, side: "left" | "right"): number {
+  return clampPanelWidth(panel, startWidth + deltaX * (side === "left" ? 1 : -1));
+}
+
+export function effectiveRailWidth(requestedWidth: number, viewportWidth: number, sidebarWidth: number, minimumConversationWidth = 400): number {
+  const available = Math.max(0, Math.round(viewportWidth - sidebarWidth - minimumConversationWidth));
+  return available < 260 ? 0 : Math.min(clampPanelWidth("rail", requestedWidth), available);
+}
+
+export function floatingMenuPosition(anchor: { top: number; right: number; bottom: number }, menu: { width: number; height: number }, viewport: { width: number; height: number }): { top: number; left: number } {
+  const margin = 8;
+  const maxLeft = Math.max(margin, viewport.width - menu.width - margin);
+  const left = Math.max(margin, Math.min(maxLeft, anchor.right - menu.width));
+  const below = anchor.bottom + 4;
+  const top = below + menu.height <= viewport.height - margin ? below : Math.max(margin, anchor.top - menu.height - 4);
+  return { top, left };
+}
+
+function clampZoom(value: number): number {
+  return Math.min(1.4, Math.max(.8, Math.round(value * 10) / 10));
+}
+
+export function normalizeAvailableCommands(value: unknown): AvailableCommand[] {
+  if (!Array.isArray(value)) return [];
+  const commands: AvailableCommand[] = [];
+  const seen = new Set<string>();
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const raw = candidate as { name?: unknown; description?: unknown; input?: unknown };
+    const name = typeof raw.name === "string" ? raw.name.trim().replace(/^\/+/, "") : "";
+    if (!name || seen.has(name.toLowerCase())) continue;
+    const input = raw.input && typeof raw.input === "object" && typeof (raw.input as { hint?: unknown }).hint === "string"
+      ? { hint: (raw.input as { hint: string }).hint }
+      : undefined;
+    commands.push({
+      name,
+      description: typeof raw.description === "string" && raw.description.trim() ? raw.description.trim() : "Provider command.",
+      ...(input ? { input } : {}),
+    });
+    seen.add(name.toLowerCase());
+  }
+  return commands;
+}
+
+export function filterKimiSkills(skills: KimiSkill[], query: string, limit = 10): KimiSkill[] {
+  const needle = query.trim().toLowerCase();
+  return skills
+    .filter((skill) => !needle || skill.name.toLowerCase().includes(needle) || skill.description.toLowerCase().includes(needle))
+    .slice(0, Math.max(0, limit));
+}
+
+export function skillComposerInsertion(skillName: string, runtimeCommands: Array<{ name: string }>): string {
+  const normalizedName = skillName.trim();
+  const advertised = runtimeCommands
+    .map((command) => command.name.trim().replace(/^\/+/, ""))
+    .find((name) => name.toLowerCase() === normalizedName.toLowerCase() || name.toLowerCase() === `skill:${normalizedName.toLowerCase()}`);
+  return advertised ? `/${advertised} ` : `$${normalizedName} `;
+}
+
+export function composerTrigger(value: string): { kind: "command" | "skill" | "file"; prefix: "/" | "$" | "#" | "@"; query: string; start: number } | undefined {
+  const match = /(^|\s)([/#$@])(\{?[^}\s]*)$/.exec(value);
+  if (!match) return undefined;
+  const prefix = match[2] as "/" | "$" | "#" | "@";
+  return {
+    kind: prefix === "/" ? "command" : prefix === "$" ? "skill" : "file",
+    prefix,
+    query: (match[3] ?? "").replace(/^\{/, ""),
+    start: match.index + (match[1]?.length ?? 0),
+  };
+}
+
+export function parseHarnessCommand(value: string):
+  | { name: "goal"; objective?: string; clear: boolean }
+  | { name: "side"; title?: string }
+  | undefined {
+  const match = /^\/(goal|side)(?:\s+([\s\S]*))?$/i.exec(value.trim());
+  if (!match) return undefined;
+  const argument = match[2]?.trim();
+  if (match[1]?.toLowerCase() === "side") return { name: "side", ...(argument ? { title: argument } : {}) };
+  const clear = /^(?:clear|remove|off)$/i.test(argument ?? "");
+  return { name: "goal", clear, ...(!clear && argument ? { objective: argument } : {}) };
+}
+
+export function toggleComposerTrigger(value: string, prefix: "/" | "$" | "#"): string {
+  const active = composerTrigger(value);
+  if (active?.prefix === prefix) return value.slice(0, active.start).replace(/\s+$/, "");
+  return `${value}${value && !/\s$/.test(value) ? " " : ""}${prefix}`;
+}
+
+function replaceComposerTrigger(value: string, replacement: string): string {
+  const trigger = composerTrigger(value);
+  return trigger ? `${value.slice(0, trigger.start)}${replacement}` : `${value}${value && !/\s$/.test(value) ? " " : ""}${replacement}`;
+}
+
+export function workspaceRelativePath(root: string, file: string): string | undefined {
+  const normalize = (value: string) => {
+    const slashes = value.trim().replaceAll("\\", "/");
+    const collapsed = slashes.replace(/\/{2,}/g, "/");
+    const normalized = slashes.startsWith("//") ? `/${collapsed}` : collapsed;
+    return normalized === "/" ? normalized : normalized.replace(/\/+$/, "");
+  };
+  const normalizedRoot = normalize(root);
+  const normalizedFile = normalize(file);
+  if (!normalizedRoot || !normalizedFile || normalizedRoot === normalizedFile) return undefined;
+  const insensitive = /^[a-z]:\//i.test(normalizedRoot) || normalizedRoot.startsWith("//");
+  const comparedRoot = insensitive ? normalizedRoot.toLowerCase() : normalizedRoot;
+  const comparedFile = insensitive ? normalizedFile.toLowerCase() : normalizedFile;
+  const prefix = comparedRoot === "/" ? "/" : `${comparedRoot}/`;
+  if (!comparedFile.startsWith(prefix)) return undefined;
+  return normalizedFile.slice(prefix.length).replace(/^\/+/, "") || undefined;
+}
+
+async function applyZoom(value: number): Promise<void> {
+  if (!isTauri()) return;
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  await getCurrentWebview().setZoom(value);
+}
+
+async function openExternal(url: string): Promise<void> {
+  if (isTauri()) {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+export function moveSuggestionIndex(current: number, count: number, key: "ArrowDown" | "ArrowUp"): number {
+  if (count <= 0) return 0;
+  return key === "ArrowDown" ? (current + 1) % count : (current - 1 + count) % count;
+}
+
+async function revealPath(path: string): Promise<void> {
+  if (!isTauri()) throw new Error("Explorer integration is available in the desktop app");
+  const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+  await revealItemInDir(path);
+}
+
+function UsagePanel({ quota, error, loading, onRefresh }: { quota: KimiQuota | undefined; error: string | undefined; loading: boolean; onRefresh: () => Promise<void> }) {
+  const quotaRows = [quota?.summary, ...(quota?.limits ?? [])].filter((row): row is KimiQuotaRow => Boolean(row));
+  return <section className="quota-panel">
+      <div className="quota-title"><div><span>Subscription quota</span>{quota?.updatedAt ? <small>{quota.stale ? "Last verified" : "Updated"} {formatReset(quota.updatedAt)}</small> : quota?.planType && <small>{quota.planType === "purchase" ? "Purchased plan" : quota.planType}</small>}</div><button type="button" aria-label="Refresh subscription quota" disabled={loading} onClick={() => void onRefresh()}><ArrowsClockwise /></button></div>
+      {loading && !quotaRows.length ? <div className="quota-skeleton" aria-label="Fetching Kimi quota" aria-busy="true"><span /><span /><span /></div> : quotaRows.map((row) => <QuotaRow key={row.label} row={row} />)}
+      {!loading && !quotaRows.length && <p className="quota-empty">{error ?? "Quota unavailable"}</p>}
+      {quota?.parallel !== undefined && <div className="quota-parallel"><span>Parallel sessions</span><strong>{quota.parallel}</strong></div>}
+    </section>;
+}
+
+function QuotaRow({ row }: { row: KimiQuotaRow }) {
+  const percent = quotaRowPercent(row) ?? 0;
+  const used = 100 - percent;
+  const reset = row.resetHint ?? (row.resetTime ? `resets ${formatReset(row.resetTime)}` : undefined);
+  return <div className="quota-row"><div><span>{row.label}</span><strong>{percent}% left</strong></div><div className="quota-meter"><span style={{ transform: `scaleX(${percent / 100})` }} /></div><small>{used}% used · {percent}% left{reset ? ` · ${reset}` : ""}</small></div>;
+}
+
+function quotaPercent(quota?: KimiQuota): number | undefined {
+  return quotaRowPercent(quota?.summary);
+}
+
+function quotaRowPercent(row?: KimiQuotaRow): number | undefined {
+  return row?.limit ? Math.max(0, Math.min(100, Math.round((row.remaining / row.limit) * 100))) : undefined;
+}
+
+export function contextPercent(usage?: Usage): number | undefined {
+  const context = usage?.context;
+  return context?.size ? Math.max(0, Math.min(100, Math.round((context.used / context.size) * 100))) : undefined;
+}
+
+function defaultAgentCapabilities(): KimiAgent[] {
+  return [
+    { name: "coder", description: "General software engineering with workspace read, write, search, and shell tools.", access: "Read, write, shell", supportsBackground: true },
+    { name: "explore", description: "Fast read-only codebase exploration, search, and technical summaries.", access: "Read and search", supportsBackground: true },
+    { name: "plan", description: "Architecture analysis and implementation planning without changing files.", access: "Read and plan", supportsBackground: true },
+  ];
+}
+
+export function subagentRuns(thread: Pick<Thread, "tools"> & Partial<Pick<Thread, "backgroundTasks">> | undefined): SubagentRun[] {
+  if (!thread) return [];
+  const backgroundTasks = thread.backgroundTasks ?? [];
+  const matchedTasks = new Set<string>();
+  const runs = thread.tools.filter(isSubagentTool).map<SubagentRun>((tool) => {
+    const input = isRecordValue(tool.rawInput) ? tool.rawInput : {};
+    const output = `${safeStringify(tool.rawOutput)} ${tool.content?.map((item) => safeStringify(item)).join(" ") ?? ""}`;
+    const threadIds = Array.isArray(input.receiverThreadIds) ? input.receiverThreadIds.filter((value): value is string => typeof value === "string" && Boolean(value)) : [];
+    const visibleOutput = agentVisibleOutput(tool.content?.flatMap((item) => item.type === "content" && item.content?.type === "text" && item.content.text ? [item.content.text] : []).join("\n")
+      || (typeof tool.rawOutput === "string" ? tool.rawOutput : undefined));
+    const agentId = /\bagent_id:\s*([\w-]+)/i.exec(output)?.[1];
+    const taskId = /\btask_id:\s*((?:agent|bash)-[a-z0-9]+)\b/i.exec(output)?.[1];
+    const task = taskId ? backgroundTasks.find((candidate) => candidate.taskId === taskId) : undefined;
+    if (task) matchedTasks.add(task.taskId);
+    const type = typeof input.subagent_type === "string" ? input.subagent_type : /actual_subagent_type:\s*([\w-]+)/i.exec(output)?.[1] ?? "coder";
+    const description = typeof input.description === "string" && input.description.trim()
+      ? input.description.trim()
+      : (tool.title ?? "Agent task").replace(/^Agent\s*:\s*/i, "");
+    const background = input.run_in_background === true || /\bautomatic_notification:\s*true\b/i.test(output) || /\bkind:\s*agent\b/i.test(output);
+    const status = task
+      ? backgroundTaskRunStatus(task.status)
+      : background && /\bstatus:\s*running\b/i.test(output)
+        ? "running"
+        : tool.status === "in_progress" || tool.status === "pending" ? "running" : tool.status === "failed" ? "failed" : "completed";
+    return {
+      id: tool.toolCallId,
+      type,
+      description,
+      status,
+      background,
+      ...(agentId ? { agentId } : {}),
+      ...(task ? { detail: backgroundTaskDetail(task) } : {}),
+      ...(threadIds.length ? { threadIds } : {}),
+      ...(visibleOutput ? { output: visibleOutput } : {}),
+    };
+  });
+  for (const task of backgroundTasks) {
+    if (matchedTasks.has(task.taskId) || !task.taskId.startsWith("agent-")) continue;
+    runs.push({
+      id: task.taskId,
+      type: "agent",
+      description: task.description,
+      status: backgroundTaskRunStatus(task.status),
+      background: true,
+      agentId: task.taskId,
+      detail: backgroundTaskDetail(task),
+    });
+  }
+  return runs.reverse();
+}
+
+function backgroundTaskRunStatus(status: BackgroundTask["status"]): SubagentRun["status"] {
+  return status === "running" ? "running" : status === "completed" ? "completed" : "failed";
+}
+
+function agentVisibleOutput(value: string | undefined): string | undefined {
+  const text = value?.split(/\r?\n/).filter((line) => !/^\s*(?:agent_id|task_id|status|automatic_notification|actual_subagent_type)\s*:/i.test(line)).join("\n").trim();
+  return text || undefined;
+}
+
+function backgroundTaskDetail(task: BackgroundTask): string {
+  if (task.status === "running") return "running";
+  if (task.status === "completed") return task.reportQueued ? "report queued" : "completed";
+  const status = task.status === "timed_out" ? "timed out" : task.status;
+  return task.exitCode === undefined || task.exitCode === null ? status : `${status} · exit ${task.exitCode}`;
+}
+
+function isSubagentTool(tool: Tool | undefined): tool is Tool {
+  return Boolean(tool && (/^Agent(?:\b|:)/i.test(tool.title ?? "") || isRecordValue(tool.rawInput) && typeof tool.rawInput.subagent_type === "string"));
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function formatReset(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}m`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k`;
+  return String(value);
+}
+
+export function updatePercent(downloaded: number, total?: number): number | undefined {
+  return total ? Math.min(100, Math.round((downloaded / total) * 100)) : undefined;
+}
+
+type TurnView = { record: TurnRecord; messages: Message[]; activity: ActivityEntry[]; tools: Tool[]; approvals: Approval[]; checkpoint?: Checkpoint; canRevert: boolean; running: boolean; phase: TurnPhase };
+type TurnProjection = {
+  source: Thread;
+  views: TurnView[];
+  index: Map<string, number>;
+  before: Set<string>;
+  after: Map<string, Checkpoint>;
+  fullyReverted: Set<string>;
+  partiallyReverted: Set<string>;
+  toolTurn: Map<string, string>;
+  toolIndex: Map<string, number>;
+  activityToolIndex: Map<string, number>;
+  approvalTurn: Map<string, string>;
+  latestActivitySeq: Map<string, number>;
+};
+type TurnProjectionCache = Map<string, TurnProjection>;
+
+export function createTurnProjectionCache(): TurnProjectionCache {
+  return new Map();
+}
+
+export function recentTurns<T>(turns: T[], limit: number): T[] {
+  const count = Math.max(0, Math.floor(limit));
+  if (!count) return [];
+  return turns.length > count ? turns.slice(-count) : turns;
+}
+
+function buildTurnProjection(thread: Thread): TurnProjection {
+  const views = new Map<string, TurnView>();
+  const ensure = (turnId: string) => {
+    let view = views.get(turnId);
+    if (!view) {
+      const running = thread.activeTurnId === turnId;
+      view = { record: { turnId, startedAt: thread.createdAt }, messages: [], activity: [], tools: [], approvals: [], canRevert: false, running, phase: running ? thread.lifecycle.phase : "idle" };
+      views.set(turnId, view);
+    }
+    return view;
+  };
+  for (const record of thread.turns) ensure(record.turnId).record = record;
+  for (const message of thread.messages) ensure(message.turnId).messages.push(message);
+  for (const entry of thread.activity) ensure(entry.turnId).activity.push(entry);
+  for (const tool of thread.tools) if (tool.turnId) ensure(tool.turnId).tools.push(tool);
+  for (const approval of thread.approvals) {
+    const turnId = approval.turnId ?? thread.activeTurnId;
+    if (turnId) views.get(turnId)?.approvals.push(approval);
+  }
+  const before = new Set<string>();
+  const after = new Map<string, Checkpoint>();
+  const fullyReverted = new Set<string>();
+  const partiallyReverted = new Set(thread.revertedParts.map((part) => part.turnId));
+  for (const checkpoint of thread.checkpoints) {
+    if (checkpoint.phase === "before") before.add(checkpoint.turnId);
+    if (checkpoint.phase === "reverted") fullyReverted.add(checkpoint.turnId);
+    if (checkpoint.phase === "after") {
+      after.set(checkpoint.turnId, checkpoint);
+      const view = views.get(checkpoint.turnId);
+      if (view) view.checkpoint = checkpoint;
+    }
+  }
+  for (const view of views.values()) {
+    view.activity.sort((a, b) => a.seq - b.seq);
+    view.canRevert = Boolean(view.checkpoint && before.has(view.record.turnId) && !fullyReverted.has(view.record.turnId) && !partiallyReverted.has(view.record.turnId));
+  }
+  const projected = [...views.values()];
+  return {
+    source: thread,
+    views: projected,
+    index: new Map(projected.map((view, index) => [view.record.turnId, index])),
+    before,
+    after,
+    fullyReverted,
+    partiallyReverted,
+    toolTurn: new Map(thread.tools.flatMap((tool) => tool.turnId ? [[tool.toolCallId, tool.turnId] as const] : [])),
+    toolIndex: new Map(thread.tools.map((tool, index) => [tool.toolCallId, index])),
+    activityToolIndex: new Map(thread.activity.flatMap((entry, index) => entry.toolCallId ? [[entry.toolCallId, index] as const] : [])),
+    approvalTurn: new Map(thread.approvals.flatMap((approval) => {
+      const turnId = approval.turnId ?? thread.activeTurnId;
+      return turnId ? [[approval.requestId, turnId] as const] : [];
+    })),
+    latestActivitySeq: new Map(projected.map((view) => [view.record.turnId, view.activity.reduce((latest, entry) => Math.max(latest, entry.updatedSeq ?? entry.seq), -1)])),
+  };
+}
+
+export function projectTurns(thread: Thread): TurnView[] {
+  return buildTurnProjection(thread).views;
+}
+
+export function projectedTurnCount(thread: Thread | undefined, cache?: TurnProjectionCache): number {
+  if (!thread) return 0;
+  const cached = cache?.get(thread.threadId);
+  return cached?.source === thread ? cached.views.length : projectTurns(thread).length;
+}
+
+export function projectRecentTurns(thread: Thread | undefined, limit: number, cache?: TurnProjectionCache): TurnView[] {
+  if (!thread) return [];
+  const cached = cache?.get(thread.threadId);
+  return recentTurns(cached?.source === thread ? cached.views : projectTurns(thread), limit);
+}
+
+function turnProjectionInputsEqual(previous: Thread, next: Thread): boolean {
+  return previous.createdAt === next.createdAt
+    && previous.running === next.running
+    && previous.activeTurnId === next.activeTurnId
+    && previous.stopReason === next.stopReason
+    && previous.lifecycle === next.lifecycle
+    && previous.turns === next.turns
+    && previous.messages === next.messages
+    && previous.activity === next.activity
+    && previous.tools === next.tools
+    && previous.approvals === next.approvals
+    && previous.checkpoints === next.checkpoints
+    && previous.revertedParts === next.revertedParts;
+}
+
+export function reconcileTurnProjectionCache(cache: TurnProjectionCache, previousThreads: Thread[], nextThreads: Thread[]): void {
+  const previousById = new Map(previousThreads.map((thread) => [thread.threadId, thread]));
+  const retained = new Set(nextThreads.map((thread) => thread.threadId));
+  for (const threadId of cache.keys()) if (!retained.has(threadId)) cache.delete(threadId);
+  for (const next of nextThreads) {
+    const previous = previousById.get(next.threadId);
+    if (!previous || previous === next) continue;
+    const projection = cache.get(next.threadId);
+    if (projection?.source === previous && turnProjectionInputsEqual(previous, next)) projection.source = next;
+    else cache.delete(next.threadId);
+  }
+}
+
+function CheckpointReviewPanel({ review, comments, revertedParts, busy, pending, onComment, onRequestRevert, onConfirmRevert, onCancelRevert, onAddFeedback }: {
+  review: CheckpointReview;
+  comments: Record<string, string>;
+  revertedParts: RevertedCheckpointPart[];
+  busy: boolean;
+  pending: { path: string; hunkIndex?: number } | undefined;
+  onComment: (key: string, value: string) => void;
+  onRequestRevert: (part: { path: string; hunkIndex?: number }) => void;
+  onConfirmRevert: (path: string, hunkIndex?: number) => Promise<void>;
+  onCancelRevert: () => void;
+  onAddFeedback: () => void;
+}) {
+  const hasFeedback = Object.values(comments).some((comment) => comment.trim());
+  const reverted = (path: string, hunkIndex?: number) => revertedParts.some((part) => part.turnId === review.turnId && part.path === path
+    && (part.hunkIndex === undefined || hunkIndex === undefined || part.hunkIndex === hunkIndex));
+  const confirm = (path: string, hunkIndex?: number) => pending?.path === path && pending.hunkIndex === hunkIndex;
+  return <section className="checkpoint-review" aria-label="Turn change review">
+    <header><div><strong>{review.files.length} changed {review.files.length === 1 ? "file" : "files"}</strong><span>Comment on a hunk or reverse only that recorded turn change.</span></div><button className="secondary" type="button" disabled={!hasFeedback} onClick={onAddFeedback}><PencilSimple /> Add feedback to prompt</button></header>
+    {review.files.map((file) => {
+      const fileReverted = reverted(file.path);
+      const wholeFileReverted = revertedParts.some((part) => part.turnId === review.turnId && part.path === file.path && part.hunkIndex === undefined);
+      return <article className="review-file" key={file.path}>
+        <div className="review-file-heading"><strong>{file.path}</strong><button type="button" disabled={busy || fileReverted} onClick={() => onRequestRevert({ path: file.path })}>{wholeFileReverted ? "Reverted" : fileReverted ? "Partially reverted" : "Revert file"}</button></div>
+        {confirm(file.path) && <div className="review-confirm" role="alert"><span>Reverse this file's changes from this turn?</span><button type="button" disabled={busy} onClick={() => void onConfirmRevert(file.path)}>Revert</button><button type="button" onClick={onCancelRevert}>Cancel</button></div>}
+        {file.hunks.length ? file.hunks.map((hunk) => {
+          const key = reviewCommentKey(file.path, hunk.index);
+          const hunkReverted = reverted(file.path, hunk.index);
+          return <section className="review-hunk" key={key}>
+            <div><code>{hunk.header}</code>{file.canRevertHunks && <button type="button" disabled={busy || hunkReverted} onClick={() => onRequestRevert({ path: file.path, hunkIndex: hunk.index })}>{hunkReverted ? "Reverted" : "Revert hunk"}</button>}</div>
+            {confirm(file.path, hunk.index) && <div className="review-confirm" role="alert"><span>Reverse only this hunk?</span><button type="button" disabled={busy} onClick={() => void onConfirmRevert(file.path, hunk.index)}>Revert</button><button type="button" onClick={onCancelRevert}>Cancel</button></div>}
+            <pre>{hunk.lines.map((line, index) => <span className={line.startsWith("+") ? "added" : line.startsWith("-") ? "removed" : undefined} key={index}>{line || " "}{"\n"}</span>)}</pre>
+            <textarea aria-label={`Review comment for ${file.path} ${hunk.header}`} maxLength={4_000} value={comments[key] ?? ""} onChange={(event) => onComment(key, event.target.value)} placeholder="Leave feedback for the agent…" />
+          </section>;
+        }) : <div className="review-binary"><span>{file.binary ? "Binary change" : "Metadata-only change"}</span><textarea aria-label={`Review comment for ${file.path}`} maxLength={4_000} value={comments[reviewCommentKey(file.path)] ?? ""} onChange={(event) => onComment(reviewCommentKey(file.path), event.target.value)} placeholder="Leave feedback for the agent…" /></div>}
+      </article>;
+    })}
+    {!review.files.length && <div className="git-empty"><Check /> No recorded file changes</div>}
+  </section>;
+}
+
+export function reviewCommentKey(path: string, hunkIndex?: number): string {
+  return `${path}\u0000${hunkIndex ?? "file"}`;
+}
+
+export function reviewFeedbackPrompt(review: CheckpointReview, comments: Record<string, string>): string {
+  const items = review.files.flatMap((file) => (file.hunks.length ? file.hunks.map((hunk) => ({ path: file.path, label: hunk.header, comment: comments[reviewCommentKey(file.path, hunk.index)]?.trim() })) : [{ path: file.path, label: file.binary ? "binary change" : "metadata change", comment: comments[reviewCommentKey(file.path)]?.trim() }]))
+    .filter((item): item is { path: string; label: string; comment: string } => Boolean(item.comment));
+  return items.length ? `Review the following feedback for turn ${review.turnId}:\n\n${items.map((item) => `- ${item.path} (${item.label})\n  ${item.comment.slice(0, 4_000)}`).join("\n")}` : "";
+}
+
+const TurnBlock = memo(function TurnBlock({ turn, readOnly, onOpenUrl, onOpenPreview, onOpenLocation, onRevealPath, onEdit, onRespond, onRevert, onReview }: {
+  turn: TurnView;
+  readOnly: boolean;
+  onOpenUrl: (url: string) => Promise<void>;
+  onOpenPreview: (url: string) => void;
+  onOpenLocation: (path: string) => void;
+  onRevealPath: (path: string) => Promise<void>;
+  onEdit: (text: string) => Promise<void>;
+  onRespond: (approval: Approval, optionId?: string) => void;
+  onRevert: (turnId: string) => Promise<void>;
+  onReview: (turnId: string) => void;
+}) {
+  const user = turn.messages.filter((message) => message.role === "user" && message.origin !== "background_task");
+  const { commentary, final } = turnAssistantMessages(turn);
+  const report = final?.text ?? "";
+  const failure = turn.record.error
+    ?? (turn.record.stopReason === "error" ? readOnly ? "This historical turn stopped before finishing." : "The agent stopped before finishing this turn. You can edit the prompt and try again." : undefined);
+  const previewLink = useMemo(() => findLocalPreviewUrl([
+    ...turn.messages.map((message) => message.text),
+    ...turn.tools.flatMap((tool) => [tool.title ?? "", ...tool.content?.map((item) => item.content?.text ?? "") ?? [], safeStringify(tool.rawOutput)]),
+  ].join("\n")), [turn.messages, turn.tools]);
+  return <section className={`turn-block ${turn.running ? "running" : "complete"}`}>
+    {user.map((message, index) => <article className="user-message" key={`${message.turnId}-user-${index}`}>
+      <MarkdownText text={message.text} onOpenUrl={onOpenUrl} />
+      <PathLinks text={message.text} onReveal={onRevealPath} />
+      <AttachmentSummary message={message} />
+      <div className="message-actions">{!readOnly && <button type="button" aria-label="Edit task" title="Edit task" onClick={() => void onEdit(message.text)}><PencilSimple /></button>}<button type="button" aria-label="Copy task" title="Copy task" onClick={() => void navigator.clipboard.writeText(message.text)}><Copy /></button></div>
+    </article>)}
+    <div className="turn-output">
+      {(turn.running || turn.activity.length > 0 || commentary.length > 0) && <ActivityTimeline turn={turn} commentary={commentary} onOpenUrl={onOpenUrl} onOpenLocation={onOpenLocation} />}
+      {final && <article className="assistant-message markdown"><MarkdownText text={final.text} onOpenUrl={onOpenUrl} /><PathLinks text={final.text} onReveal={onRevealPath} /></article>}
+      {turn.approvals.map((approval) => <article className="approval" key={approval.requestId}>
+        <div><strong>{approval.kind === "question" ? "Question" : approval.kind === "plan_review" ? "Review plan" : "Permission required"}</strong><p>{approval.title}</p></div>
+        <div className="approval-actions">{readOnly ? <small>Historical request · no response can be sent</small> : approval.options.map((option) => <button className={permissionClass(option.kind)} type="button" key={option.optionId} onClick={() => onRespond(approval, option.optionId)}>{option.name}</button>)}</div>
+      </article>)}
+      {turn.record.completedAt && failure && <div className="turn-failure" role="alert"><WarningCircle /><div><strong>Stopped with an error</strong><span>{failure}</span></div></div>}
+      {turn.record.completedAt && (report || turn.canRevert || turn.record.usage?.totalTokens != null || turn.record.stopReason === "cancelled" || failure) && <footer className="turn-report">
+        {(turn.record.usage?.totalTokens != null || turn.record.stopReason === "cancelled" || failure) && <div className="turn-report-meta">{turn.record.usage?.totalTokens != null && <span>{formatTokens(turn.record.usage.totalTokens)} tokens</span>}{turn.record.stopReason === "cancelled" && <span>Stopped</span>}{failure && <span>Failed</span>}</div>}
+        <div className="turn-report-actions">{report && <button type="button" onClick={() => void navigator.clipboard.writeText(report)}><Copy /> Copy summary</button>}{!readOnly && turn.canRevert && <button type="button" onClick={() => void onRevert(turn.record.turnId)}><ArrowCounterClockwise /> Undo changes</button>}</div>
+      </footer>}
+      {turn.record.completedAt && previewLink && <div className="turn-preview-link"><span><i />{previewLink}</span><div><button type="button" onClick={() => onOpenPreview(previewLink)}><Browser /> Preview</button><button type="button" onClick={() => void onOpenUrl(previewLink)}><ArrowSquareOut /> Browser</button></div></div>}
+      {turn.record.completedAt && turn.checkpoint?.diff && <ChangesCard diff={turn.checkpoint.diff} readOnly={readOnly} onReview={() => onReview(turn.record.turnId)} />}
+    </div>
+  </section>;
+});
+
+export function turnAssistantMessages(turn: Pick<TurnView, "activity" | "messages" | "running">): { commentary: Message[]; final?: Message } {
+  const assistant = turn.messages.filter((message) => message.role === "assistant");
+  if (turn.running || !assistant.length) return { commentary: assistant };
+  const latestActivity = turn.activity.reduce((latest, entry) => Math.max(latest, entry.updatedSeq ?? entry.seq), -1);
+  const candidate = assistant.at(-1)!;
+  const candidateSeq = candidate.updatedSeq ?? candidate.seq;
+  if (candidateSeq !== undefined && candidateSeq <= latestActivity) return { commentary: assistant };
+  return { commentary: assistant.slice(0, -1), final: candidate };
+}
+
+type TimelineItem =
+  | { id: string; seq: number; updatedSeq: number; kind: "activity"; entry: ActivityEntry }
+  | { id: string; seq: number; updatedSeq: number; kind: "commentary"; message: Message };
+
+export function latestTimelineItemId(items: ReadonlyArray<{ id: string; updatedSeq: number }>): string | undefined {
+  let latest: { id: string; updatedSeq: number } | undefined;
+  for (const item of items) if (!latest || item.updatedSeq > latest.updatedSeq) latest = item;
+  return latest?.id;
+}
+
+export function ActivityTimeline({ turn, commentary = turnAssistantMessages(turn).commentary, onOpenUrl, onOpenLocation }: { turn: TurnView; commentary?: Message[]; onOpenUrl: (url: string) => Promise<void>; onOpenLocation: (path: string) => void }) {
+  const [open, setOpen] = useState(turn.running);
+  const [showEarlier, setShowEarlier] = useState(false);
+  const wasRunning = useRef(turn.running);
+  const duration = useElapsedDuration(turn.record.startedAt, turn.record.completedAt, turn.running);
+  useEffect(() => {
+    if (turn.running) setOpen(true);
+    else if (wasRunning.current) setOpen(false);
+    wasRunning.current = turn.running;
+  }, [turn.running]);
+  const activity = dedupeActivityEntries(turn.activity);
+  const timeline: TimelineItem[] = [
+    ...activity.map((entry) => ({ id: entry.id, seq: entry.seq, updatedSeq: entry.updatedSeq ?? entry.seq, kind: "activity" as const, entry })),
+    ...commentary.filter((message) => message.text.trim()).map((message, index) => ({ id: `commentary-${message.seq ?? index}`, seq: message.seq ?? index, updatedSeq: message.updatedSeq ?? message.seq ?? index, kind: "commentary" as const, message })),
+  ].sort((a, b) => a.seq - b.seq);
+  const hidden = Math.max(0, timeline.length - 4);
+  const entries = showEarlier ? timeline : timeline.slice(-4);
+  const currentEntryId = turn.running ? latestTimelineItemId(timeline) : undefined;
+  const statusLabel = turn.running ? turnPhaseLabel(turn.phase) : `Worked for ${duration}`;
+  return <details className="turn-activity" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary><span className={`activity-state ${turn.running ? "active" : ""}`}>{turn.running ? <i className="activity-spinner" aria-hidden="true" /> : <Check />}</span><strong>{statusLabel}</strong><small>{turn.running ? duration : `${timeline.length} ${timeline.length === 1 ? "step" : "steps"}`}</small><CaretDown /></summary>
+    {open && <div className="activity-content">
+      {hidden > 0 && !showEarlier && <button className="activity-earlier" type="button" onClick={() => setShowEarlier(true)}>Show {hidden} earlier {hidden === 1 ? "step" : "steps"}</button>}
+      {entries.map((item) => item.kind === "activity"
+        ? <ActivityStep key={item.id} entry={item.entry} current={item.id === currentEntryId} tool={item.entry.toolCallId ? turn.tools.find((tool) => tool.toolCallId === item.entry.toolCallId) : undefined} onOpenUrl={onOpenUrl} onOpenLocation={onOpenLocation} />
+        : <CommentaryStep key={item.id} message={item.message} current={item.id === currentEntryId} onOpenUrl={onOpenUrl} />)}
+    </div>}
+  </details>;
+}
+
+function turnPhaseLabel(phase: TurnPhase): string {
+  if (phase === "stopping") return "Stopping";
+  if (phase === "checkpointing") return "Saving changes";
+  if (phase === "preparing") return "Preparing";
+  return "Working";
+}
+
+function CommentaryStep({ message, current, onOpenUrl }: { message: Message; current: boolean; onOpenUrl: (url: string) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  return <details className="activity-step commentary-step" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary><span className="activity-step-state">{current ? <i className="activity-spinner" aria-label="Current update" /> : <Check />}</span><span>{activityPreview(message.text)}</span><CaretRight /></summary>
+    {open && <div className="activity-detail"><div className="markdown"><MarkdownText text={message.text} onOpenUrl={onOpenUrl} /></div></div>}
+  </details>;
+}
+
+function ActivityStep({ entry, current, tool, onOpenUrl, onOpenLocation }: { entry: ActivityEntry; current: boolean; tool: Tool | undefined; onOpenUrl: (url: string) => Promise<void>; onOpenLocation: (path: string) => void }) {
+  const [open, setOpen] = useState(false);
+  return <details className={`activity-step ${entry.status}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary><span className="activity-step-state">{entry.status === "completed" ? <Check /> : entry.status === "failed" ? <WarningCircle /> : current ? <i className="activity-spinner" aria-label="Current step" /> : <Circle />}</span><span>{activityPreview(entry.text)}</span><CaretRight /></summary>
+    {open && <div className="activity-detail">{entry.kind === "tool" && tool ? <ToolCard tool={tool} onOpenLocation={onOpenLocation} /> : <div className="markdown"><MarkdownText text={entry.text} onOpenUrl={onOpenUrl} /></div>}</div>}
+  </details>;
+}
+
+export function activityPreview(text: string, maxLength = 96): string {
+  const cleaned = text.replace(/```[\s\S]*?```/g, " code ").replace(/[`*_#>\[\]]/g, "").replace(/\s+/g, " ").trim() || "…";
+  return cleaned.length > maxLength ? `${cleaned.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…` : cleaned;
+}
+
+export function dedupeActivityEntries(entries: ActivityEntry[]): ActivityEntry[] {
+  const result: ActivityEntry[] = [];
+  for (const entry of entries) {
+    const previous = result.at(-1);
+    const duplicateThought = entry.kind === "thought"
+      && previous?.kind === "thought"
+      && activityPreview(previous.text, 10_000) === activityPreview(entry.text, 10_000);
+    if (!duplicateThought) result.push(entry);
+  }
+  return result;
+}
+
+function useElapsedDuration(start: string, end: string | undefined, running: boolean): string {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => tick((value) => value + 1), 1_000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+  return formatDuration(start, end);
+}
+
+const MarkdownText = memo(function MarkdownText({ text, onOpenUrl }: { text: string; onOpenUrl: (url: string) => Promise<void> }) {
+  return <Suspense fallback={<div className="markdown-fallback">{text}</div>}>
+    <MarkdownTextContent text={text} onOpenUrl={onOpenUrl} />
+  </Suspense>;
+});
+
+export function extractLocalPaths(text: string): string[] {
+  const codePaths = [...text.matchAll(/`([^`\r\n]+)`/g)].map((match) => match[1] ?? "");
+  const plainText = text.replace(/`[^`\r\n]+`/g, " ");
+  const candidates = [
+    ...codePaths,
+    ...[...plainText.matchAll(/\b[A-Za-z]:[\\/][^\s`<>"|?*]+/g)].map((match) => match[0]),
+  ];
+  const seen = new Set<string>();
+  return candidates
+    .map((path) => path.trim().replace(/[),.;!?]+$/g, ""))
+    .filter((path) => /^[A-Za-z]:[\\/]/.test(path))
+    .filter((path) => {
+      const key = path.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 6);
+}
+
+function PathLinks({ text, onReveal }: { text: string; onReveal: (path: string) => Promise<void> }) {
+  const paths = extractLocalPaths(text);
+  if (!paths.length) return null;
+  return <div className="message-paths">{paths.map((path) => <button type="button" title={`Reveal ${path} in Explorer`} key={path} onClick={() => void onReveal(path)}><FolderOpen /><span>{path}</span><ArrowSquareOut /></button>)}</div>;
+}
+
+type DiffSummary = { files: Array<{ path: string; additions: number; deletions: number }>; additions: number; deletions: number };
+
+export function summarizeDiff(diff: string): DiffSummary {
+  const files: DiffSummary["files"] = [];
+  let current: DiffSummary["files"][number] | undefined;
+  for (const line of diff.split(/\r?\n/)) {
+    const match = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (match) {
+      current = { path: match[2]!, additions: 0, deletions: 0 };
+      files.push(current);
+    } else if (current && line.startsWith("+") && !line.startsWith("+++")) current.additions += 1;
+    else if (current && line.startsWith("-") && !line.startsWith("---")) current.deletions += 1;
+  }
+  return { files, additions: files.reduce((sum, file) => sum + file.additions, 0), deletions: files.reduce((sum, file) => sum + file.deletions, 0) };
+}
+
+function ChangesCard({ diff, readOnly, onReview }: { diff: string; readOnly: boolean; onReview: () => void }) {
+  const [showAll, setShowAll] = useState(false);
+  const summary = summarizeDiff(diff);
+  if (!summary.files.length) return null;
+  return <details className="changes-card">
+    <summary><span><GitBranch /><strong>Edited {summary.files.length} {summary.files.length === 1 ? "file" : "files"}</strong></span><span className="diff-totals"><b>+{summary.additions}</b><i>−{summary.deletions}</i><CaretDown /></span></summary>
+    <div className="change-list">{summary.files.slice(0, showAll ? undefined : 3).map((file) => <div className="change-row" key={file.path}><span>{file.path}</span><small><b>+{file.additions}</b><i>−{file.deletions}</i></small></div>)}<div className="changes-actions">{summary.files.length > 3 && <button type="button" onClick={() => setShowAll((value) => !value)}>{showAll ? "Show less" : `Show ${summary.files.length - 3} more`}</button>}<button type="button" onClick={() => void navigator.clipboard.writeText(diff)}>Copy patch</button>{!readOnly && <button type="button" onClick={onReview}>Open Changes</button>}</div></div>
+  </details>;
+}
+
+function formatDuration(start: string, end?: string): string {
+  const elapsed = Math.max(0, new Date(end ?? Date.now()).getTime() - new Date(start).getTime());
+  const seconds = Math.max(1, Math.round(elapsed / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
+export function normalizeLocalPreviewUrl(value: string): string | undefined {
+  let candidate = value.trim();
+  if (/^\d{2,5}$/.test(candidate)) candidate = `http://localhost:${candidate}`;
+  else if (/^(?:localhost|127\.0\.0\.1)(?::\d{1,5})?(?:\/|$)/i.test(candidate)) candidate = `http://${candidate}`;
+  try {
+    const url = new URL(candidate);
+    if (!['http:', 'https:'].includes(url.protocol) || !['localhost', '127.0.0.1'].includes(url.hostname.toLowerCase())) return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+export function findLocalPreviewUrl(text: string): string | undefined {
+  const explicit = /https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d{1,5})?(?:\/[^\s<>"'`)*\]}]*)?/i.exec(text)?.[0];
+  if (explicit) return normalizeLocalPreviewUrl(explicit);
+  const bare = /\b(?:localhost|127\.0\.0\.1):\d{1,5}(?:\/[^\s<>"'`)*\]}]*)?/i.exec(text)?.[0];
+  return bare ? normalizeLocalPreviewUrl(bare) : undefined;
+}
+
+function safeStringify(value: unknown): string {
+  try { return value === undefined ? "" : JSON.stringify(value); } catch { return String(value); }
+}
+
+function moveMenuFocus(event: ReactKeyboardEvent<HTMLElement>): void {
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])')];
+  if (!items.length) return;
+  event.preventDefault();
+  const current = items.indexOf(document.activeElement as HTMLElement);
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+    : event.key === 'ArrowDown' ? (current + 1 + items.length) % items.length
+      : (current - 1 + items.length) % items.length;
+  items[next]?.focus();
+}
+
+const dialogFocusableSelector = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function dialogFocusableElements(root: HTMLElement): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(dialogFocusableSelector)].filter((item) => item.offsetParent !== null);
+}
+
+function useModalFocus<T extends HTMLElement>(fallbackSelector?: string) {
+  const dialog = useRef<T>(null);
+  const returnFocus = useRef<HTMLElement | null>(
+    typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null,
+  );
+  useLayoutEffect(() => {
+    const root = dialog.current;
+    if (!root) return;
+    if (!root.contains(document.activeElement)) dialogFocusableElements(root)[0]?.focus({ preventScroll: true });
+    return () => {
+      const previous = returnFocus.current;
+      const target = previous?.isConnected ? previous : fallbackSelector ? document.querySelector<HTMLElement>(fallbackSelector) : null;
+      target?.focus({ preventScroll: true });
+    };
+  }, [fallbackSelector]);
+  return dialog;
+}
+
+function trapDialogFocus(event: ReactKeyboardEvent<HTMLElement>): void {
+  if (event.key !== 'Tab') return;
+  const items = dialogFocusableElements(event.currentTarget);
+  if (!items.length) return;
+  const first = items[0]!;
+  const last = items.at(-1)!;
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+export function compactToolPreview(text: string | undefined, maxLines = 4, maxCharacters = 560): string {
+  if (!text) return "";
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const preview = lines.length > maxLines
+    ? [...lines.slice(0, Math.max(1, maxLines - 1)), `… ${lines.length - Math.max(1, maxLines - 1)} more lines`]
+    : lines.slice(0, maxLines);
+  const joined = preview.join("\n");
+  return joined.length > maxCharacters ? `${joined.slice(0, Math.max(1, maxCharacters - 1)).trimEnd()}…` : joined;
+}
+
+function ToolCard({ tool, onOpenLocation }: { tool: Tool; onOpenLocation: (path: string) => void }) {
+  const diff = tool.content?.find((item) => item.type === "diff");
+  return <article className="tool-card">
+    <header><span className={`tool-state ${tool.status}`}>{tool.status === "completed" ? <Check /> : <Circle />}</span><strong>{tool.title ?? "Tool call"}</strong><span>{(tool.status ?? "pending").replace("_", " ")}</span></header>
+    {tool.locations && <div className="tool-locations">{tool.locations.map((location) => <button type="button" key={`${location.path}:${location.line ?? ""}`} onClick={() => onOpenLocation(location.path)}><FileText />{location.path}{location.line ? `:${location.line}` : ""}</button>)}</div>}
+    {tool.content?.filter((item) => item.type === "content" && item.content?.type === "text").map((item, index) => <pre className="tool-content" key={index}>{compactToolPreview(item.content?.text)}</pre>)}
+    {diff && <div className="diff"><div className="diff-path">{diff.path}</div><pre className="removed">{compactToolPreview(diff.oldText, 2, 280)}</pre><pre className="added">{compactToolPreview(diff.newText, 2, 280)}</pre></div>}
+    {(tool.rawInput !== undefined || tool.rawOutput !== undefined) && <details className="tool-raw"><summary>Metadata preview</summary><pre>{compactToolPreview(safeStringify({ input: tool.rawInput, output: tool.rawOutput }))}</pre></details>}
+  </article>;
+}
+
+function AttachmentSummary({ message }: { message: Message }) {
+  if (!message.resources?.length && !message.images?.length) return null;
+  return <div className="message-attachments">{message.resources?.map((path) => <span key={path}><FileText />{path}</span>)}{message.images?.map((image) => <span key={image.name}><Paperclip />{image.name}</span>)}</div>;
+}
+
+export function rebaseThreadListSnapshot(listed: Thread[], recovered: Iterable<Thread>): Thread[] {
+  const listedIds = new Set(listed.map((thread) => thread.threadId));
+  const preserved = [...recovered].filter((thread) => !listedIds.has(thread.threadId));
+  return [...preserved, ...listed];
+}
+
+type ThreadArrayKey = "turns" | "messages" | "activity" | "plan" | "tools" | "approvals" | "configOptions" | "commands" | "checkpoints" | "revertedParts" | "backgroundTasks" | "queue";
+type ThreadDraft = { value: Thread; copied: Set<ThreadArrayKey> };
+
+function beginThreadDraft(current: Thread): ThreadDraft {
+  return { value: { ...normalizeThread(current) }, copied: new Set() };
+}
+
+function writableThreadArray<K extends ThreadArrayKey>(draft: ThreadDraft, key: K): Thread[K] {
+  if (!draft.copied.has(key)) {
+    const record = draft.value as unknown as Record<ThreadArrayKey, unknown[]>;
+    record[key] = [...record[key]];
+    draft.copied.add(key);
+  }
+  return draft.value[key];
+}
+
+export function applyEvents(threads: Thread[], events: StoredEvent[], projectionCache?: TurnProjectionCache): Thread[] {
+  let nextThreads = threads;
+  const mutable = new Map<string, ThreadDraft>();
+  const projections = new Map<string, TurnProjection>();
+  for (const event of events) {
+    if (event.type === "ThreadSnapshot") {
+      const payload = event.payload as { thread: Thread };
+      const snapshot = normalizeThread({ ...payload.thread, threadId: event.threadId });
+      mutable.set(event.threadId, { value: snapshot, copied: new Set() });
+      if (projectionCache) projections.set(event.threadId, buildTurnProjection(snapshot));
+      nextThreads = nextThreads.some((thread) => thread.threadId === event.threadId)
+        ? nextThreads.map((thread) => thread.threadId === event.threadId ? snapshot : thread)
+        : [snapshot, ...nextThreads];
+      continue;
+    }
+    if (event.type === "ThreadCreated") {
+      const payload = event.payload as { sessionId: string; provider?: ProviderId; instanceId?: string; parentThreadId?: string; cwd: string; worktree?: { sourceCwd: string; branch: string }; kind?: "project" | "chat"; title: string; configOptions: ConfigOption[] };
+      const created: Thread = { threadId: event.threadId, ...payload, provider: normalizeProvider(payload.provider), kind: payload.kind === "chat" ? "chat" : "project", createdAt: event.createdAt, updatedAt: event.createdAt, running: false, activeTurnId: undefined, stopReason: undefined, lifecycle: { phase: "idle", updatedAt: event.createdAt }, turns: [], messages: [], activity: [], plan: [], tools: [], approvals: [], commands: [], modeId: undefined, checkpoints: [], revertedParts: [], backgroundTasks: [], usage: {}, queue: [] };
+      mutable.set(event.threadId, { value: created, copied: new Set() });
+      if (projectionCache) projections.set(event.threadId, buildTurnProjection(created));
+      nextThreads = [created, ...nextThreads.filter((thread) => thread.threadId !== event.threadId)];
+      continue;
+    }
+    if (event.type === "ThreadDeleted") {
+      mutable.delete(event.threadId);
+      projections.delete(event.threadId);
+      projectionCache?.delete(event.threadId);
+      nextThreads = nextThreads.filter((thread) => thread.threadId !== event.threadId);
+      continue;
+    }
+    let draft = mutable.get(event.threadId);
+    if (!draft) {
+      const current = nextThreads.find((thread) => thread.threadId === event.threadId);
+      if (!current) continue;
+      draft = beginThreadDraft(current);
+      mutable.set(event.threadId, draft);
+      nextThreads = nextThreads.map((thread) => thread.threadId === event.threadId ? draft!.value : thread);
+      if (projectionCache) {
+        const cached = projectionCache.get(event.threadId);
+        projections.set(event.threadId, cached?.source === current ? cached : buildTurnProjection(current));
+      }
+    }
+    const projection = projections.get(event.threadId);
+    const previousActiveTurnId = draft.value.activeTurnId;
+    mutateThread(draft, event, projection);
+    if (projection) {
+      if (!applyTurnProjectionEvent(projection, draft.value, event, previousActiveTurnId)) projections.set(event.threadId, buildTurnProjection(draft.value));
+      else projection.source = draft.value;
+    }
+  }
+  if (projectionCache) for (const [threadId, projection] of projections) projectionCache.set(threadId, projection);
+  return nextThreads;
+}
+
+function mutateThread(draft: ThreadDraft, event: StoredEvent, projection?: TurnProjection): void {
+  const next = draft.value;
+  next.updatedAt = event.createdAt;
+  const payload = event.payload;
+  if (event.type === "ThreadRenamed") next.title = String(payload.title);
+  else if (event.type === "ThreadGoalSet") next.goal = { objective: String(payload.objective), updatedAt: event.createdAt };
+  else if (event.type === "ThreadGoalCleared") delete next.goal;
+  else if (event.type === "ThreadArchived") {
+    if (payload.archived) next.archivedAt = event.createdAt;
+    else delete next.archivedAt;
+  }
+  else if (event.type === "TurnPhaseChanged") {
+    const turnId = typeof payload.turnId === "string" ? payload.turnId : undefined;
+    const terminal = payload.phase === "idle" || payload.phase === "blocked" || payload.phase === "failed";
+    const activePhase = payload.phase === "preparing" || terminal || !turnId || next.activeTurnId === turnId;
+    if (activePhase && (!terminal || !next.lifecycle.turnId || !turnId || next.lifecycle.turnId === turnId)) {
+      next.lifecycle = {
+        phase: normalizeTurnPhase(payload.phase),
+        updatedAt: event.createdAt,
+        ...(turnId ? { turnId } : {}),
+        ...(typeof payload.queuedId === "string" ? { queuedId: payload.queuedId } : {}),
+        ...(typeof payload.error === "string" && payload.error ? { error: payload.error } : {}),
+      };
+    }
+  }
+  else if (event.type === "TurnStarted") {
+    const queuedId = typeof payload.sourceQueuedId === "string" ? payload.sourceQueuedId : next.lifecycle.turnId === payload.turnId ? next.lifecycle.queuedId : undefined;
+    next.running = true; next.activeTurnId = String(payload.turnId); next.stopReason = undefined;
+    next.lifecycle = { phase: "running", updatedAt: event.createdAt, turnId: String(payload.turnId), ...(queuedId ? { queuedId } : {}) };
+    if (typeof payload.title === "string" && payload.title) next.title = payload.title;
+    writableThreadArray(draft, "turns").push({ turnId: String(payload.turnId), startedAt: event.createdAt });
+    writableThreadArray(draft, "messages").push({
+      turnId: String(payload.turnId), role: "user", text: String(payload.text),
+      seq: event.seq, updatedSeq: event.seq,
+      ...(Array.isArray(payload.resources) && payload.resources.length ? { resources: payload.resources as string[] } : {}),
+      ...(Array.isArray(payload.images) && payload.images.length ? { images: payload.images as Array<{ name: string; mimeType: string }> } : {}),
+    }); next.plan = [];
+  } else if (event.type === "MessageAppended") {
+    const message = payload as Message;
+    if (message.role === "thought") appendRendererThought(draft, message, event);
+    else appendRendererMessage(draft, message, event, projection);
+  }
+  else if (event.type === "MessageDelta") {
+    const delta = payload as Message;
+    if (delta.role === "thought") appendRendererThought(draft, delta, event);
+    else appendRendererMessage(draft, delta, event, projection);
+  } else if (event.type === "PlanReplaced") next.plan = payload.entries as Thread["plan"];
+  else if (event.type === "ToolCallCreated") { const tool = payload.tool as Tool; const turnId = tool.turnId ?? next.activeTurnId; writableThreadArray(draft, "tools").push({ ...tool, ...(turnId ? { turnId } : {}) }); if (turnId) upsertRendererTool(draft, { ...tool, turnId }, event, projection); }
+  else if (event.type === "ToolCallPatched") {
+    const patch = payload.tool as Tool;
+    const tools = writableThreadArray(draft, "tools");
+    const cachedIndex = projection?.toolIndex.get(patch.toolCallId);
+    const index = cachedIndex !== undefined && tools[cachedIndex]?.toolCallId === patch.toolCallId ? cachedIndex : tools.findIndex((tool) => tool.toolCallId === patch.toolCallId);
+    const turnId = patch.turnId ?? tools[index]?.turnId ?? next.activeTurnId;
+    if (index >= 0) tools[index] = { ...tools[index], ...patch, ...(turnId ? { turnId } : {}) }; else tools.push({ ...patch, ...(turnId ? { turnId } : {}) });
+    const tool = index >= 0 ? tools[index] : tools.at(-1);
+    if (turnId && tool) upsertRendererTool(draft, { ...tool, turnId }, event, projection);
+  } else if (event.type === "ConfigOptionsReplaced") next.configOptions = payload.options as ConfigOption[];
+  else if (event.type === "CommandsReplaced") next.commands = normalizeAvailableCommands(payload.commands);
+  else if (event.type === "ModeChanged") next.modeId = String(payload.modeId);
+  else if (event.type === "UsageUpdated") next.usage = { ...next.usage, context: payload.usage as NonNullable<Usage["context"]> };
+  else if (event.type === "ApprovalRequested") { const approval = payload as Approval; const turnId = approval.turnId ?? next.activeTurnId; writableThreadArray(draft, "approvals").push({ ...approval, ...(turnId ? { turnId } : {}) }); }
+  else if (event.type === "ApprovalResolved") next.approvals = writableThreadArray(draft, "approvals").filter((approval) => approval.requestId !== payload.requestId);
+  else if (event.type === "BackgroundTaskRegistered") {
+    if (!next.backgroundTasks.some((task) => task.taskId === payload.taskId)) {
+      writableThreadArray(draft, "backgroundTasks").push({
+        taskId: String(payload.taskId),
+        queuedId: String(payload.queuedId),
+        turnId: String(payload.turnId),
+        description: String(payload.description),
+        status: "running",
+        registeredAt: event.createdAt,
+        updatedAt: event.createdAt,
+        reportQueued: false,
+      });
+    }
+  }
+  else if (event.type === "BackgroundTaskFinished") {
+    const tasks = writableThreadArray(draft, "backgroundTasks");
+    const index = tasks.findIndex((candidate) => candidate.taskId === payload.taskId);
+    if (index >= 0) {
+      const task = { ...tasks[index]! };
+      const status = String(payload.status);
+      task.status = status === "completed" || status === "failed" || status === "killed" || status === "lost" || status === "expired" || status === "timed_out" ? status : "failed";
+      task.updatedAt = event.createdAt;
+      if (typeof payload.endedAt === "number") task.endedAt = payload.endedAt;
+      if (typeof payload.exitCode === "number" || payload.exitCode === null) task.exitCode = payload.exitCode as number | null;
+      tasks[index] = task;
+    }
+  }
+  else if (event.type === "BackgroundTaskReportQueued") {
+    const tasks = writableThreadArray(draft, "backgroundTasks");
+    const index = tasks.findIndex((candidate) => candidate.taskId === payload.taskId);
+    if (index >= 0) tasks[index] = { ...tasks[index]!, reportQueued: true, updatedAt: event.createdAt };
+  }
+  else if (event.type === "BackgroundTaskReportDelivered") {
+    const tasks = writableThreadArray(draft, "backgroundTasks");
+    const index = tasks.findIndex((candidate) => candidate.taskId === payload.taskId);
+    if (index >= 0 && !tasks[index]!.reportCancelledAt) tasks[index] = { ...tasks[index]!, reportDeliveredAt: event.createdAt, updatedAt: event.createdAt };
+  }
+  else if (event.type === "BackgroundTaskReportCancelled") {
+    const tasks = writableThreadArray(draft, "backgroundTasks");
+    const index = tasks.findIndex((candidate) => candidate.taskId === payload.taskId);
+    if (index >= 0 && !tasks[index]!.reportDeliveredAt) tasks[index] = { ...tasks[index]!, reportCancelledAt: event.createdAt, updatedAt: event.createdAt };
+  }
+  else if (event.type === "TurnCompleted") { const turns = writableThreadArray(draft, "turns"); const index = turns.findLastIndex((item) => item.turnId === payload.turnId); if (index >= 0) turns[index] = { ...turns[index]!, completedAt: event.createdAt, stopReason: String(payload.stopReason), ...(typeof payload.error === "string" && payload.error ? { error: payload.error } : {}), ...(payload.usage ? { usage: payload.usage as NonNullable<Usage["tokens"]> } : {}) }; finishRendererActivity(draft, String(payload.turnId), event.createdAt, String(payload.stopReason) === "error"); if (next.activeTurnId === payload.turnId) { next.running = false; next.stopReason = String(payload.stopReason); next.activeTurnId = undefined; next.lifecycle = { phase: String(payload.stopReason) === "error" ? "failed" : "idle", updatedAt: event.createdAt, ...(String(payload.stopReason) === "error" && typeof payload.error === "string" ? { error: payload.error } : {}) }; } if (payload.usage) next.usage = { ...next.usage, tokens: payload.usage as NonNullable<Usage["tokens"]> }; }
+  else if (event.type === "TurnCancelled") { const turns = writableThreadArray(draft, "turns"); const index = turns.findLastIndex((item) => item.turnId === payload.turnId); if (index >= 0) turns[index] = { ...turns[index]!, completedAt: event.createdAt, stopReason: "cancelled" }; finishRendererActivity(draft, String(payload.turnId), event.createdAt, true); if (next.activeTurnId === payload.turnId) { next.running = false; next.stopReason = "cancelled"; next.activeTurnId = undefined; next.lifecycle = { phase: "idle", updatedAt: event.createdAt }; } }
+  else if (event.type === "CheckpointCaptured") { const checkpoint = { ...(payload.checkpoint as Checkpoint) }; if (typeof payload.diff === "string") checkpoint.diff = payload.diff; writableThreadArray(draft, "checkpoints").push(checkpoint); }
+  else if (event.type === "CheckpointReverted") writableThreadArray(draft, "checkpoints").push(payload.checkpoint as Checkpoint);
+  else if (event.type === "CheckpointPartReverted") { writableThreadArray(draft, "checkpoints").push(payload.checkpoint as Checkpoint); writableThreadArray(draft, "revertedParts").push({ turnId: String(payload.turnId), path: String(payload.path), ...(typeof payload.hunkIndex === "number" ? { hunkIndex: payload.hunkIndex } : {}), revertedAt: event.createdAt }); }
+}
+
+function appendRendererThought(draft: ThreadDraft, message: Message, event: StoredEvent): void {
+  const activity = writableThreadArray(draft, "activity");
+  const current = activity.at(-1);
+  if (current?.kind === "thought" && current.turnId === message.turnId && current.status === "in_progress") {
+    activity[activity.length - 1] = { ...current, text: boundedActivityText(current.text + message.text), updatedSeq: event.seq, updatedAt: event.createdAt };
+    return;
+  }
+  finishRendererThought(draft, message.turnId, event.createdAt);
+  activity.push({ id: `thought-${event.seq}`, turnId: message.turnId, kind: "thought", status: "in_progress", text: boundedActivityText(message.text), seq: event.seq, updatedSeq: event.seq, createdAt: event.createdAt, updatedAt: event.createdAt });
+}
+
+function appendRendererMessage(draft: ThreadDraft, message: Message, event: StoredEvent, projection?: TurnProjection): void {
+  const messages = writableThreadArray(draft, "messages");
+  const last = messages.at(-1);
+  const latestActivitySeq = projection?.latestActivitySeq.get(message.turnId) ?? draft.value.activity.reduce((latest, entry) => entry.turnId === message.turnId
+    ? Math.max(latest, entry.updatedSeq ?? entry.seq)
+    : latest, -1);
+  if (last?.turnId === message.turnId && last.role === message.role
+    && (last.updatedSeq ?? last.seq ?? -1) > latestActivitySeq) {
+    messages[messages.length - 1] = { ...last, text: last.text + message.text, updatedSeq: event.seq };
+    return;
+  }
+  messages.push({ ...message, seq: event.seq, updatedSeq: event.seq });
+}
+
+function boundedActivityText(text: string): string {
+  return text.length <= 4_000 ? text : `${text.slice(0, 3_999).trimEnd()}…`;
+}
+
+function upsertRendererTool(draft: ThreadDraft, tool: Tool & { turnId: string }, event: StoredEvent, projection?: TurnProjection): void {
+  const activity = writableThreadArray(draft, "activity");
+  const cachedIndex = projection?.activityToolIndex.get(tool.toolCallId);
+  const index = cachedIndex !== undefined && activity[cachedIndex]?.toolCallId === tool.toolCallId ? cachedIndex : activity.findIndex((entry) => entry.kind === "tool" && entry.turnId === tool.turnId && entry.toolCallId === tool.toolCallId);
+  const status = rendererActivityStatus(tool.status);
+  if (index >= 0) {
+    const existing = activity[index]!;
+    activity[index] = { ...existing, text: tool.title ?? existing.text, status, updatedSeq: event.seq, updatedAt: event.createdAt };
+    return;
+  }
+  finishRendererThought(draft, tool.turnId, event.createdAt);
+  activity.push({ id: `tool-${tool.toolCallId}`, turnId: tool.turnId, kind: "tool", status, text: tool.title ?? "Tool call", toolCallId: tool.toolCallId, seq: event.seq, updatedSeq: event.seq, createdAt: event.createdAt, updatedAt: event.createdAt });
+}
+
+function finishRendererThought(draft: ThreadDraft, turnId: string, updatedAt: string): void {
+  const activity = writableThreadArray(draft, "activity");
+  const index = activity.findLastIndex((entry) => entry.turnId === turnId && entry.kind === "thought" && entry.status === "in_progress");
+  if (index >= 0) activity[index] = { ...activity[index]!, status: "completed", updatedAt };
+}
+
+function finishRendererActivity(draft: ThreadDraft, turnId: string, updatedAt: string, failed: boolean): void {
+  const activity = writableThreadArray(draft, "activity");
+  for (let index = 0; index < activity.length; index += 1) {
+    const entry = activity[index]!;
+    if (entry.turnId !== turnId || (entry.status !== "pending" && entry.status !== "in_progress")) continue;
+    activity[index] = { ...entry, status: failed ? "failed" : "completed", updatedAt };
+  }
+}
+
+function rendererActivityStatus(status?: string): ActivityEntry["status"] {
+  if (status === "completed") return "completed";
+  if (status === "failed" || status === "error" || status === "cancelled") return "failed";
+  if (status === "pending") return "pending";
+  return "in_progress";
+}
+
+function projectionView(projection: TurnProjection, turnId: string): TurnView | undefined {
+  const index = projection.index.get(turnId);
+  return index === undefined ? undefined : projection.views[index];
+}
+
+function projectedApprovalsForTurn(projection: TurnProjection, thread: Thread, turnId: string): Approval[] {
+  const approvals = thread.approvals.filter((approval) => (approval.turnId ?? thread.activeTurnId) === turnId);
+  for (const approval of approvals) projection.approvalTurn.set(approval.requestId, turnId);
+  return approvals;
+}
+
+function ensureProjectionView(projection: TurnProjection, thread: Thread, turnId: string): TurnView {
+  const existing = projectionView(projection, turnId);
+  if (existing) return existing;
+  const running = thread.activeTurnId === turnId;
+  const checkpoint = projection.after.get(turnId);
+  const created: TurnView = { record: { turnId, startedAt: thread.createdAt }, messages: [], activity: [], tools: [], approvals: projectedApprovalsForTurn(projection, thread, turnId), ...(checkpoint ? { checkpoint } : {}), canRevert: false, running, phase: running ? thread.lifecycle.phase : "idle" };
+  created.canRevert = projectedCanRevert(projection, created);
+  projection.index.set(turnId, projection.views.length);
+  projection.views.push(created);
+  projection.latestActivitySeq.set(turnId, -1);
+  return created;
+}
+
+function replaceProjectionView(projection: TurnProjection, turnId: string, next: TurnView): void {
+  const index = projection.index.get(turnId);
+  if (index !== undefined) projection.views[index] = next;
+}
+
+function projectedCanRevert(projection: TurnProjection, view: TurnView): boolean {
+  const turnId = view.record.turnId;
+  return Boolean(view.checkpoint && projection.before.has(turnId) && !projection.fullyReverted.has(turnId) && !projection.partiallyReverted.has(turnId));
+}
+
+function finishProjectedThought(activity: ActivityEntry[], turnId: string, updatedAt: string): ActivityEntry[] {
+  const index = activity.findLastIndex((entry) => entry.turnId === turnId && entry.kind === "thought" && entry.status === "in_progress");
+  if (index < 0) return activity;
+  const next = [...activity];
+  next[index] = { ...next[index]!, status: "completed", updatedAt };
+  return next;
+}
+
+function setProjectedLatestActivitySeq(projection: TurnProjection, turnId: string, activity: ActivityEntry[]): void {
+  projection.latestActivitySeq.set(turnId, activity.reduce((latest, entry) => Math.max(latest, entry.updatedSeq ?? entry.seq), -1));
+}
+
+function applyTurnProjectionEvent(projection: TurnProjection, thread: Thread, event: StoredEvent, previousActiveTurnId: string | undefined): boolean {
+  const payload = event.payload;
+  if (event.type === "TurnPhaseChanged") {
+    const turnId = typeof payload.turnId === "string" ? payload.turnId : thread.activeTurnId;
+    const view = turnId ? projectionView(projection, turnId) : undefined;
+    if (!turnId || !view) return true;
+    const running = thread.activeTurnId === turnId;
+    const phase = running ? thread.lifecycle.phase : "idle";
+    if (view.running !== running || view.phase !== phase) replaceProjectionView(projection, turnId, { ...view, running, phase });
+    return true;
+  }
+  if (event.type === "TurnStarted") {
+    const turnId = String(payload.turnId);
+    if (projection.index.has(turnId)) return false;
+    const record = thread.turns.at(-1);
+    const message = thread.messages.at(-1);
+    if (!record || record.turnId !== turnId || !message || message.turnId !== turnId || message.role !== "user") return false;
+    if (previousActiveTurnId && previousActiveTurnId !== turnId) {
+      const previous = projectionView(projection, previousActiveTurnId);
+      if (previous) replaceProjectionView(projection, previousActiveTurnId, { ...previous, running: false, phase: "idle" });
+    }
+    const running = thread.activeTurnId === turnId;
+    const checkpoint = projection.after.get(turnId);
+    const view: TurnView = { record, messages: [message], activity: [], tools: [], approvals: projectedApprovalsForTurn(projection, thread, turnId), ...(checkpoint ? { checkpoint } : {}), canRevert: false, running, phase: running ? thread.lifecycle.phase : "idle" };
+    view.canRevert = projectedCanRevert(projection, view);
+    projection.index.set(turnId, projection.views.length);
+    projection.views.push(view);
+    projection.latestActivitySeq.set(turnId, -1);
+    return true;
+  }
+  if (event.type === "MessageAppended" || event.type === "MessageDelta") {
+    const message = payload as Message;
+    const turnId = typeof message.turnId === "string" ? message.turnId : undefined;
+    if (!turnId) return false;
+    const view = ensureProjectionView(projection, thread, turnId);
+    if (message.role === "thought") {
+      const current = thread.activity.at(-1);
+      if (!current || current.turnId !== turnId || current.kind !== "thought") return false;
+      let activity = view.activity;
+      const index = activity.findIndex((entry) => entry.id === current.id);
+      if (index >= 0) {
+        activity = [...activity];
+        activity[index] = current;
+      } else {
+        if ((activity.at(-1)?.seq ?? -1) > current.seq) return false;
+        activity = finishProjectedThought(activity, turnId, event.createdAt);
+        activity = [...activity, current];
+      }
+      replaceProjectionView(projection, turnId, { ...view, activity });
+      setProjectedLatestActivitySeq(projection, turnId, activity);
+      return true;
+    }
+    const current = thread.messages.at(-1);
+    if (!current || current.turnId !== turnId || current.role !== message.role) return false;
+    const messages = [...view.messages];
+    const last = messages.at(-1);
+    if (last && last.seq === current.seq && last.role === current.role) messages[messages.length - 1] = current;
+    else messages.push(current);
+    replaceProjectionView(projection, turnId, { ...view, messages });
+    return true;
+  }
+  if (event.type === "ToolCallCreated" || event.type === "ToolCallPatched") {
+    const patch = payload.tool as Tool | undefined;
+    if (!patch?.toolCallId) return false;
+    let toolIndex = projection.toolIndex.get(patch.toolCallId);
+    if (toolIndex === undefined || thread.tools[toolIndex]?.toolCallId !== patch.toolCallId) {
+      const tail = thread.tools.length - 1;
+      toolIndex = tail >= 0 && thread.tools[tail]?.toolCallId === patch.toolCallId ? tail : thread.tools.findIndex((tool) => tool.toolCallId === patch.toolCallId);
+    }
+    if (toolIndex < 0) return false;
+    const tool = thread.tools[toolIndex]!;
+    const turnId = tool.turnId ?? projection.toolTurn.get(tool.toolCallId);
+    if (!turnId) return false;
+    const view = ensureProjectionView(projection, thread, turnId);
+    const tools = [...view.tools];
+    const projectedToolIndex = tools.findIndex((candidate) => candidate.toolCallId === tool.toolCallId);
+    if (projectedToolIndex >= 0) tools[projectedToolIndex] = tool;
+    else tools.push(tool);
+    let activityIndex = projection.activityToolIndex.get(tool.toolCallId);
+    if (activityIndex === undefined || thread.activity[activityIndex]?.toolCallId !== tool.toolCallId) {
+      const tail = thread.activity.length - 1;
+      activityIndex = tail >= 0 && thread.activity[tail]?.toolCallId === tool.toolCallId ? tail : thread.activity.findIndex((entry) => entry.toolCallId === tool.toolCallId);
+    }
+    if (activityIndex < 0) return false;
+    const entry = thread.activity[activityIndex]!;
+    let activity = view.activity;
+    const projectedActivityIndex = activity.findIndex((candidate) => candidate.toolCallId === tool.toolCallId);
+    if (projectedActivityIndex >= 0) {
+      activity = [...activity];
+      activity[projectedActivityIndex] = entry;
+    } else {
+      if ((activity.at(-1)?.seq ?? -1) > entry.seq) return false;
+      activity = finishProjectedThought(activity, turnId, event.createdAt);
+      activity = [...activity, entry];
+    }
+    replaceProjectionView(projection, turnId, { ...view, tools, activity });
+    projection.toolTurn.set(tool.toolCallId, turnId);
+    projection.toolIndex.set(tool.toolCallId, toolIndex);
+    projection.activityToolIndex.set(tool.toolCallId, activityIndex);
+    setProjectedLatestActivitySeq(projection, turnId, activity);
+    return true;
+  }
+  if (event.type === "ApprovalRequested") {
+    const approval = thread.approvals.at(-1);
+    if (!approval || approval.requestId !== payload.requestId) return false;
+    const turnId = approval.turnId ?? thread.activeTurnId;
+    if (!turnId) return true;
+    projection.approvalTurn.set(approval.requestId, turnId);
+    const view = projectionView(projection, turnId);
+    if (view) replaceProjectionView(projection, turnId, { ...view, approvals: [...view.approvals, approval] });
+    return true;
+  }
+  if (event.type === "ApprovalResolved") {
+    const requestId = String(payload.requestId);
+    const turnId = projection.approvalTurn.get(requestId);
+    if (!turnId) return false;
+    projection.approvalTurn.delete(requestId);
+    const view = projectionView(projection, turnId);
+    if (view) replaceProjectionView(projection, turnId, { ...view, approvals: view.approvals.filter((approval) => approval.requestId !== requestId) });
+    return true;
+  }
+  if (event.type === "TurnCompleted" || event.type === "TurnCancelled") {
+    const turnId = String(payload.turnId);
+    const view = projectionView(projection, turnId);
+    if (!view) return true;
+    const record = thread.turns.findLast((candidate) => candidate.turnId === turnId);
+    if (!record) return false;
+    const failed = event.type === "TurnCancelled" || String(payload.stopReason) === "error";
+    const activity = view.activity.map((entry) => entry.status === "pending" || entry.status === "in_progress" ? { ...entry, status: failed ? "failed" as const : "completed" as const, updatedAt: event.createdAt } : entry);
+    const running = thread.activeTurnId === turnId;
+    replaceProjectionView(projection, turnId, { ...view, record, activity, running, phase: running ? thread.lifecycle.phase : "idle" });
+    return true;
+  }
+  if (event.type === "CheckpointCaptured" || event.type === "CheckpointReverted" || event.type === "CheckpointPartReverted") {
+    const checkpoint = thread.checkpoints.at(-1);
+    if (!checkpoint) return false;
+    const turnId = event.type === "CheckpointPartReverted" ? String(payload.turnId) : checkpoint.turnId;
+    if (checkpoint.phase === "before") projection.before.add(checkpoint.turnId);
+    if (checkpoint.phase === "after") projection.after.set(checkpoint.turnId, checkpoint);
+    if (checkpoint.phase === "reverted") projection.fullyReverted.add(checkpoint.turnId);
+    if (event.type === "CheckpointPartReverted") projection.partiallyReverted.add(turnId);
+    const view = projectionView(projection, turnId);
+    if (view) {
+      const updated = checkpoint.phase === "after" ? { ...view, checkpoint } : { ...view };
+      updated.canRevert = projectedCanRevert(projection, updated);
+      replaceProjectionView(projection, turnId, updated);
+    }
+    return true;
+  }
+  return event.type === "ThreadRenamed"
+    || event.type === "ThreadGoalSet"
+    || event.type === "ThreadGoalCleared"
+    || event.type === "ThreadArchived"
+    || event.type === "TurnSubmissionAccepted"
+    || event.type === "TurnSubmissionsRemoved"
+    || event.type === "TurnSubmissionsPayloadLost"
+    || event.type === "PlanReplaced"
+    || event.type === "ConfigOptionsReplaced"
+    || event.type === "CommandsReplaced"
+    || event.type === "ModeChanged"
+    || event.type === "UsageUpdated"
+    || event.type === "BackgroundTaskRegistered"
+    || event.type === "BackgroundTaskFinished"
+    || event.type === "BackgroundTaskReportQueued"
+    || event.type === "BackgroundTaskReportAttempted"
+    || event.type === "BackgroundTaskReportDelivered"
+    || event.type === "BackgroundTaskReportCancelled";
+}
+
+export function normalizeThread(value: Thread): Thread {
+  const thread = value as Partial<Thread>;
+  const createdAt = typeof thread.createdAt === "string" ? thread.createdAt : new Date(0).toISOString();
+  const running = Boolean(thread.running);
+  return {
+    threadId: String(thread.threadId ?? ""),
+    sessionId: String(thread.sessionId ?? ""),
+    provider: normalizeProvider(thread.provider),
+    ...(typeof thread.instanceId === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(thread.instanceId) ? { instanceId: thread.instanceId } : {}),
+    ...(typeof thread.parentThreadId === "string" && thread.parentThreadId ? { parentThreadId: thread.parentThreadId } : {}),
+    ...(thread.goal && typeof thread.goal.objective === "string" && thread.goal.objective ? { goal: {
+      objective: thread.goal.objective,
+      updatedAt: typeof thread.goal.updatedAt === "string" ? thread.goal.updatedAt : createdAt,
+    } } : {}),
+    cwd: String(thread.cwd ?? ""),
+    ...(thread.worktree && typeof thread.worktree.sourceCwd === "string" && typeof thread.worktree.branch === "string" ? { worktree: { sourceCwd: thread.worktree.sourceCwd, branch: thread.worktree.branch } } : {}),
+    kind: thread.kind === "chat" ? "chat" : "project",
+    title: typeof thread.title === "string" && thread.title ? thread.title : "Agent session",
+    createdAt,
+    updatedAt: typeof thread.updatedAt === "string" ? thread.updatedAt : createdAt,
+    ...(typeof thread.archivedAt === "string" ? { archivedAt: thread.archivedAt } : {}),
+    running,
+    activeTurnId: typeof thread.activeTurnId === "string" ? thread.activeTurnId : undefined,
+    stopReason: typeof thread.stopReason === "string" ? thread.stopReason : undefined,
+    lifecycle: thread.lifecycle && typeof thread.lifecycle === "object" ? {
+      phase: normalizeTurnPhase(thread.lifecycle.phase),
+      updatedAt: typeof thread.lifecycle.updatedAt === "string" ? thread.lifecycle.updatedAt : createdAt,
+      ...(typeof thread.lifecycle.turnId === "string" ? { turnId: thread.lifecycle.turnId } : {}),
+      ...(typeof thread.lifecycle.queuedId === "string" ? { queuedId: thread.lifecycle.queuedId } : {}),
+      ...(typeof thread.lifecycle.error === "string" ? { error: thread.lifecycle.error } : {}),
+    } : { phase: running ? "running" : thread.stopReason === "error" ? "failed" : "idle", updatedAt: createdAt, ...(typeof thread.activeTurnId === "string" ? { turnId: thread.activeTurnId } : {}) },
+    turns: Array.isArray(thread.turns) ? thread.turns : [],
+    messages: Array.isArray(thread.messages) ? thread.messages : [],
+    activity: Array.isArray(thread.activity) ? thread.activity : [],
+    plan: Array.isArray(thread.plan) ? thread.plan : [],
+    tools: Array.isArray(thread.tools) ? thread.tools : [],
+    approvals: Array.isArray(thread.approvals) ? thread.approvals : [],
+    configOptions: Array.isArray(thread.configOptions) ? thread.configOptions : [],
+    commands: normalizeAvailableCommands(thread.commands),
+    modeId: typeof thread.modeId === "string" ? thread.modeId : undefined,
+    checkpoints: Array.isArray(thread.checkpoints) ? thread.checkpoints : [],
+    revertedParts: Array.isArray(thread.revertedParts) ? thread.revertedParts : [],
+    backgroundTasks: Array.isArray(thread.backgroundTasks) ? thread.backgroundTasks : [],
+    usage: thread.usage && typeof thread.usage === "object" ? thread.usage : {},
+    queue: visibleQueuedPrompts(Array.isArray(thread.queue) ? thread.queue : []),
+  };
+}
+
+function normalizeTurnPhase(value: unknown): TurnPhase {
+  return value === "preparing" || value === "running" || value === "stopping" || value === "checkpointing" || value === "blocked" || value === "failed" ? value : "idle";
+}
+
+export function visibleQueuedPrompts(queue: QueuedPrompt[]): QueuedPrompt[] {
+  return queue.filter((prompt) => prompt.origin !== "background_task");
+}
+
+function flattenOptions(option: ConfigOption): Array<{ value: string; name: string }> {
+  return option.options?.filter((choice): choice is { value: string; name: string } => "value" in choice) ?? [];
+}
+
+export function filterByTitle<T extends { title?: string }>(items: T[], query: string): T[] {
+  const normalized = query.trim().toLowerCase();
+  return normalized ? items.filter((item) => (item.title ?? "Agent session").toLowerCase().includes(normalized)) : items;
+}
+
+function normalizeProvider(value: unknown): ProviderId {
+  return value === "codex" || value === "claude" || value === "cursor" || value === "opencode" ? value : "kimi";
+}
+
+function providerName(provider: ProviderId): string {
+  return provider === "codex" ? "OpenAI Codex" : provider === "claude" ? "Anthropic Claude" : provider === "cursor" ? "Cursor" : provider === "opencode" ? "OpenCode" : "Kimi";
+}
+
+export function providerUsable(provider: ProviderState | undefined): boolean {
+  return Boolean(provider?.installed && provider.authenticated !== false);
+}
+
+export function threadTreeOrder(items: Thread[]): Thread[] {
+  const ids = new Set(items.map((thread) => thread.threadId));
+  const children = new Map<string, Thread[]>();
+  for (const thread of items) {
+    if (!thread.parentThreadId || !ids.has(thread.parentThreadId)) continue;
+    children.set(thread.parentThreadId, [...(children.get(thread.parentThreadId) ?? []), thread]);
+  }
+  const ordered: Thread[] = [];
+  const visit = (thread: Thread) => {
+    ordered.push(thread);
+    for (const child of children.get(thread.threadId) ?? []) visit(child);
+  };
+  for (const thread of items) if (!thread.parentThreadId || !ids.has(thread.parentThreadId)) visit(thread);
+  return ordered;
+}
+
+function permissionClass(kind: string): string {
+  if (kind === "allow_once") return "primary";
+  if (kind === "reject_always") return "danger";
+  return "secondary";
+}
+
+async function readImage(file: File): Promise<PendingImage> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result)));
+    reader.addEventListener("error", () => reject(reader.error ?? new Error("Could not read image")));
+    reader.readAsDataURL(file);
+  });
+  return { name: file.name, mimeType: file.type, data: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+}

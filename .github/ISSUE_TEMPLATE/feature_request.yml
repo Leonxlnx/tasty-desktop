@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest a focused improvement for Kimi Code Desktop.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful outcome, not an implementation wish list.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Note any existing Kimi CLI or desktop workflow that partly solves the problem.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This belongs in the desktop harness rather than Kimi Code CLI itself.
+          required: true
+        - label: I searched existing issues for a similar request.
+          required: true

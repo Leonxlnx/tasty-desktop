@@ -1,0 +1,31 @@
+{
+  "name": "kimi-code-desktop",
+  "description": "Unofficial Windows desktop harness for Kimi Code CLI",
+  "license": "MIT",
+  "repository": "https://github.com/Leonxlnx/kimi-code-desktop",
+  "homepage": "https://github.com/Leonxlnx/kimi-code-desktop#readme",
+  "bugs": "https://github.com/Leonxlnx/kimi-code-desktop/issues",
+  "private": true,
+  "packageManager": "pnpm@10.13.1",
+  "pnpm": {
+    "overrides": {
+      "nanoid@3.3.16": "3.3.17",
+      "postcss@8.5.19": "8.5.23"
+    }
+  },
+  "scripts": {
+    "dev": "corepack pnpm@10.13.1 --filter @kimi-code-desktop/desktop dev",
+    "dev:services": "corepack pnpm@10.13.1 --parallel --filter @kimi-code-desktop/server --filter @kimi-code-desktop/web dev",
+    "build": "corepack pnpm@10.13.1 --filter @kimi-code-desktop/desktop build",
+    "bundle": "corepack pnpm@10.13.1 --filter @kimi-code-desktop/desktop bundle",
+    "bundle:local": "corepack pnpm@10.13.1 --filter @kimi-code-desktop/desktop bundle:local",
+    "build:services": "corepack pnpm@10.13.1 --filter @kimi-code-desktop/server build && corepack pnpm@10.13.1 --filter @kimi-code-desktop/web build",
+    "check:public": "node scripts/check-public-source.mjs",
+    "check:licenses": "node scripts/check-third-party-licenses.mjs",
+    "licenses:write": "node scripts/check-third-party-licenses.mjs --write",
+    "prepare:bundle": "node scripts/prepare-bundle.mjs",
+    "typecheck": "corepack pnpm@10.13.1 --filter @kimi-code-desktop/server typecheck && corepack pnpm@10.13.1 --filter @kimi-code-desktop/web typecheck && corepack pnpm@10.13.1 --filter @kimi-code-desktop/desktop typecheck",
+    "test": "corepack pnpm@10.13.1 --filter @kimi-code-desktop/server test && corepack pnpm@10.13.1 --filter @kimi-code-desktop/web test && corepack pnpm@10.13.1 --filter @kimi-code-desktop/desktop test && corepack pnpm@10.13.1 test:tooling",
+    "test:tooling": "node --test scripts/check-migration-approval.test.mjs scripts/check-public-source.test.mjs scripts/check-release-version.test.mjs scripts/check-third-party-licenses.test.mjs scripts/execute-approved-migration.test.mjs scripts/prepare-bundle.test.mjs scripts/prepare-feed-migration.test.mjs scripts/release-feed.test.mjs"
+  }
+}

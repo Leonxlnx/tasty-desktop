@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Kimi Code",
+  "version": "0.12.0",
+  "identifier": "com.kimicode.desktop",
+  "build": {
+    "beforeDevCommand": "corepack pnpm@10.13.1 -C ../.. dev:services",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "corepack pnpm@10.13.1 -C ../.. build:services && corepack pnpm@10.13.1 -C ../.. prepare:bundle",
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Kimi Code",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 620,
+        "resizable": true,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ws://127.0.0.1:*; frame-src http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:*; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
+    "createUpdaterArtifacts": true,
+    "publisher": "Kimi Code Desktop contributors",
+    "shortDescription": "An open-source desktop harness for Kimi Code CLI",
+    "longDescription": "Use your own Kimi account, quota, sessions, skills, agents, Git workflows, terminal, and local previews in one native coding workspace.",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    },
+    "resources": {
+      "target/bundle-assets/": ""
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEzRkIwRDA0M0M0MjdDQTgKUldTb2ZFSThCQTM3bysyNy94VWxTSjNjOGt2RDZOZkVmRG9jVk1RT2NGNDgrUEJwcnhiYlhjNDUK",
+      "endpoints": [
+        "https://leonxlnx.github.io/kimi-code-desktop/latest.json",
+        "https://leonxlnx.github.io/tasty-desktop/latest.json"
+      ],
+      "windows": { "installMode": "passive" }
+    }
+  }
+}
